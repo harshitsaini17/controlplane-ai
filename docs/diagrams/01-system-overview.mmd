@@ -1,0 +1,117 @@
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Inter, Segoe UI, Helvetica, Arial, sans-serif","fontSize":"15px","primaryTextColor":"#111827","lineColor":"#4b5563"},"flowchart":{"curve":"basis","nodeSpacing":50,"rankSpacing":55}}}%%
+%% Source: docs/02-architecture.md 1 (component diagram) + 5 (cost plane placement).
+%% Claim: one process, three planes of checks, converging on ONE verdict per unit.
+%% Layout note: strictly top-to-bottom. No back-edges to clients and no subgraph-level
+%% edges -- both make dagre scatter subgraph members across the canvas.
+flowchart TB
+
+  subgraph CLIENTS["CLIENT APPS &nbsp;&mdash;&nbsp; one policy profile each"]
+    direction LR
+    C1["support_bot<br/><i>UC-1</i>"]
+    C2["hr_copilot<br/><i>UC-2</i>"]
+    C3["finance_advisor<br/><i>UC-3</i>"]
+  end
+
+  ING["<b>INGRESS</b><br/>resolve use case &middot; bind policy_version<br/><i>unknown use case &rarr; 400 ERR-CFG-001</i>"]
+
+  PS[("<b>POLICY STORE</b><br/>policies/*.yaml<br/><i>versioned + schema-validated</i>")]
+
+  subgraph INLANE["INPUT LANE &nbsp;&mdash;&nbsp; pre-inference, before any upstream cost"]
+    direction LR
+    T1I["<b>tier1_pii</b><br/><b>tier1_blocklist</b><br/><i>&lt;2 ms</i>"]
+    T2I["<b>tier2_injection</b><br/><i>&lt;25 ms</i>"]
+    CST["<b>cost_budget</b><br/><b>loop_guard</b><br/><i>&lt;1 ms</i>"]
+    RTR["<b>router</b><br/>picks model tier<br/><i>pre-dispatch</i>"]
+    T1I --> T2I --> CST --> RTR
+  end
+
+  DSP["<b>DISPATCHER</b><br/>streaming, or fully buffered when streaming:false<br/>optional cascade probe &nbsp;<i>(ADR-013)</i>"]
+  UP["<b>Upstream LLM API</b><br/><i>small tier &middot; frontier tier</i>"]
+
+  SB["<b>SENTENCE BUFFER</b><br/>accumulate tokens to a sentence boundary<br/><i>not token-level, not full-response (ADR-002)</i>"]
+
+  subgraph OUTLANE["OUTPUT LANE &nbsp;&mdash;&nbsp; runs per buffered sentence, concurrently"]
+    direction LR
+    T1O["<b>tier1_pii</b><br/><i>responsibility</i>"]
+    T2O["<b>tier2_toxicity</b><br/><i>responsibility</i>"]
+    PERF["<b>fast_consistency</b><br/><b>rag_grounding</b><br/><b>numeric_claims</b><br/><i>performance</i>"]
+  end
+
+  ENR["<b>entity_enricher</b><br/>appends privacy.person to the <b>same</b> signal<br/><i>ADR-011 &middot; &lt;10 ms &middot; never blocks</i>"]
+
+  PE{{"<b>POLICY ENGINE</b><br/>converge all signals &rarr; most severe wins<br/><i>04 &sect;4.3 &middot; zero use-case conditionals</i>"}}
+
+  A1["<b>PASS</b><br/>release"]
+  A2["<b>EDIT</b><br/>redact / soften"]
+  A3["<b>BLOCK</b><br/>fallback message"]
+  A4["<b>ESCALATE</b><br/>quarantine"]
+
+  AUD[("<b>AUDIT LOG</b><br/>append-only &middot; no raw PII<br/><i>verdict + signal_ids + policy_version</i>")]
+  RQ[("<b>REVIEW QUEUE</b><br/>+ human overrides")]
+  DEEP["<b>DEEP AUDIT WORKERS</b><br/>semantic entropy &middot; fairness spot checks<br/><i>async, sampled, never awaited (NFR-P-003)</i>"]
+  DASH["<b>DASHBOARD</b><br/><i>Streamlit (ADR-007)</i>"]
+  HITL(["<b>Human reviewer</b>"])
+
+  C1 --> ING
+  C2 -->|"HTTPS &middot; X-ControlPlane-Use-Case"| ING
+  C3 --> ING
+  PS -.->|"thresholds &middot; action map<br/>fail modes &middot; budgets"| ING
+
+  ING --> T1I
+  RTR -->|"input verdict PASS"| DSP
+  RTR -.->|"BLOCK / ESCALATE short-circuits here:<br/><b>zero upstream tokens, zero cost</b>"| PE
+
+  DSP -->|"dispatch"| UP
+  UP -->|"SSE tokens"| SB
+
+  SB --> T1O
+  SB --> T2O
+  SB --> PERF
+  T1O --> ENR
+  T2O --> ENR
+  PERF --> ENR
+
+  ENR -->|"signals &mdash; multi-label, multi-plane"| PE
+  PS -.->|"the policy for <i>this</i> use case"| PE
+
+  PE --> A1
+  PE --> A2
+  PE --> A3
+  PE --> A4
+
+  A1 --> AUD
+  A2 --> AUD
+  A3 --> AUD
+  A4 --> RQ
+  A4 --> AUD
+
+  AUD -.->|"sampled copy"| DEEP
+  DEEP -.->|"enriches only &mdash;<br/>never alters a delivered verdict"| AUD
+  AUD --> DASH
+  RQ --> DASH
+  RQ <-->|"approve / reject + note"| HITL
+
+  classDef resp fill:#fff1f2,stroke:#be123c,color:#111827
+  classDef perf fill:#eff6ff,stroke:#1d4ed8,color:#111827
+  classDef cost fill:#fffbeb,stroke:#b45309,color:#111827
+  classDef ctrl fill:#eef2ff,stroke:#4338ca,color:#111827
+  classDef store fill:#f3f4f6,stroke:#4b5563,color:#111827
+  classDef ext fill:#ffffff,stroke:#9ca3af,color:#374151
+  classDef vpass fill:#ecfdf5,stroke:#047857,color:#111827
+  classDef vedit fill:#fef3c7,stroke:#b45309,color:#111827
+  classDef vblock fill:#fee2e2,stroke:#b91c1c,color:#111827
+  classDef vesc fill:#ffedd5,stroke:#c2410c,color:#111827
+  classDef deep fill:#f5f3ff,stroke:#6d28d9,color:#111827
+
+  class T1I,T2I,T1O,T2O,ENR resp
+  class PERF perf
+  class CST,RTR cost
+  class ING,DSP,SB,PE ctrl
+  class PS,AUD,RQ store
+  class UP,DASH,HITL ext
+  class C1,C2,C3 cost
+  class A1 vpass
+  class A2 vedit
+  class A3 vblock
+  class A4 vesc
+  class DEEP deep

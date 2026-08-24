@@ -1,0 +1,63 @@
+# UC-1 support_bot — customer-facing RAG support assistant (01 §3).
+# Profile: external users, low latency, moderate strictness, EU geography.
+# Demo role: EDIT actions + the latency story (07 beats 1, 2, 3, 4a, 7).
+#
+# This file is the NORMATIVE source for UC-1's policy values (ADR-016); 01 §3 lists
+# distinguishing highlights only.
+schema_version: 1
+use_case: support_bot
+policy_version: 1
+geography: EU                    # 01 §3 "EU geography"
+risk_appetite: medium            # 01 §3 "moderate strictness"
+
+streaming: true                  # 01 §3 low latency; consistency is on_sampled (ADR-014)
+sampling:
+  deep_audit_rate: 0.10          # 01 §3 "deep-audit sampling 10%"
+consistency: "on_sampled"          # 04 §2.3: streaming mode, compared at deep-audit rate
+cascade_probe: "on"                # ADR-013 "cascade_probe: on for support_bot"
+
+thresholds:
+  tau_low: 0.35                  # SEED(pre-calibration; 06 §3 calibration overwrites; never judge-facing)
+  tau_high: 0.70                 # SEED(pre-calibration; 06 §3 calibration overwrites; never judge-facing)
+  tau_route: 0.55                # SEED(pre-calibration; 06 §3 calibration overwrites; never judge-facing)
+
+budget:                          # ADR-016
+  monthly_usd: 500
+  per_request_max_tokens: 4000
+  loop_max_requests_per_min: 20
+
+actions:
+  pii.*: edit                    # 01 §3 "PII -> EDIT (redact)"; 04 §6 redact transform
+  security.prompt_injection: block   # 01 §3 "injection -> BLOCK" (07 beat 3)
+  security.blocklist: block
+  toxicity.high: block           # 01 §3 "toxicity high -> BLOCK"
+  toxicity.moderate: pass        # ADR-016; toxicity appetite gradient pass/pass/escalate over UC-1/2/3
+  # Per-label, not a hallucination.* family map (ADR-015): only span-bearing or
+  # output_sentence signals are edit-executable, so low_confidence is mapped
+  # explicitly to its real consequence instead of relying on 04 §4.3 step-4 promotion.
+  hallucination.ungrounded_claim: edit    # rag_grounding: output_sentence + span -> soften (07 beat 4a)
+  hallucination.unsourced_numeric: edit   # numeric_claims: output_sentence + span -> soften
+  hallucination.low_confidence: escalate  # fast_consistency: output_full, span-less by design
+  privacy.person: pass           # ADR-015: not edit-eligible (no 04 §6 transform). Informational
+                                 # here; label stays visible in the beat-5 audit JSON.
+  cost.budget_exceeded: block
+  cost.loop_detected: block
+  conversation.cumulative_risk: escalate
+default_action: pass
+
+fail_mode:
+  tier1: fail_closed             # 01 §3 "fail_closed for Tier-1"
+  tier2: fail_open               # 01 §3 "fail_open for Tier-2 (availability over strictness)"; 07 beat 7
+  performance: fail_open         # ADR-016
+  cost: fail_open                # ADR-016
+
+messages:
+  block_fallback: "I can't help with that request. If you need further assistance, our support team is available."
+  escalate_user_notice: "I need to double-check this before answering. Your request has been routed for review."
+
+escalation:
+  notify: ["console"]
+  quarantine_ttl_s: 3600
+
+blocklist_extra: []
+detector_params: {}

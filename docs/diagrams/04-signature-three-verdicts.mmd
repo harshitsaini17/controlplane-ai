@@ -1,0 +1,64 @@
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Inter, Segoe UI, Helvetica, Arial, sans-serif","fontSize":"14px","primaryTextColor":"#111827","lineColor":"#374151"},"flowchart":{"curve":"basis","nodeSpacing":40,"rankSpacing":55}}}%%
+%% Source: docs/07-demo-script.md beat 4 + policies/*.yaml action maps + ADR-015 fixture note.
+%% Claim: identical signal, three verdicts. The only thing that differs is YAML.
+flowchart TB
+
+  FIX["<b>ONE IDENTICAL FIXTURE RESPONSE</b><br/>a plausible but low-confidence claim<br/>containing a person's detail<br/><i>plus one pii.email span (ADR-015)</i>"]
+
+  SIG["<b>ONE MULTI-LABEL SIGNAL</b> &nbsp;<i>(FR-DET-005)</i><br/>labels: hallucination.ungrounded_claim + privacy.person<br/>planes: performance + responsibility<br/><i>+ a pii.email signal from tier1_pii</i>"]
+
+  ENGINE{{"<b>THE SAME POLICY ENGINE</b><br/>same code, same build, same algorithm<br/><i>zero use-case conditionals (FR-POL-002)</i>"}}
+
+  subgraph P1["policies/support_bot.yaml &nbsp;&mdash;&nbsp; UC-1"]
+    direction TB
+    M1["pii.* &rarr; <b>edit</b><br/>hallucination.ungrounded_claim &rarr; <b>edit</b><br/>privacy.person &rarr; pass"]
+    V1["<b>EDIT</b><br/>softened claim<br/>+ redacted detail<br/><i>user sees a safe answer</i>"]
+    M1 --> V1
+  end
+
+  subgraph P2["policies/hr_copilot.yaml &nbsp;&mdash;&nbsp; UC-2"]
+    direction TB
+    M2["pii.* &rarr; <b>block</b><br/>hallucination.* &rarr; pass<br/>privacy.person &rarr; <b>block</b>"]
+    V2["<b>BLOCK</b><br/>fallback message<br/><i>internal PII policy</i>"]
+    M2 --> V2
+  end
+
+  subgraph P3["policies/finance_advisor.yaml &nbsp;&mdash;&nbsp; UC-3"]
+    direction TB
+    M3["pii.* &rarr; <b>escalate</b><br/>hallucination.* &rarr; <b>escalate</b><br/>privacy.person &rarr; <b>escalate</b>"]
+    V3["<b>ESCALATE</b><br/>quarantined, review item<br/><i>non-streaming: nothing ever<br/>reached the user (ADR-014)</i>"]
+    M3 --> V3
+  end
+
+  AUD[("<b>THREE AUDIT RECORDS, SIDE BY SIDE</b><br/>same signals &middot; three verdicts &middot; three policy_version stamps")]
+
+  FIX --> SIG --> ENGINE
+  ENGINE -->|"reads UC-1 policy"| M1
+  ENGINE -->|"reads UC-2 policy"| M2
+  ENGINE -->|"reads UC-3 policy"| M3
+  V1 --> AUD
+  V2 --> AUD
+  V3 --> AUD
+
+  NOTE["<i>Not one line of code differs between these pipelines.<br/>This is why it is a control <b>plane</b>, not a filter.</i>"]
+  AUD --- NOTE
+
+  classDef fixture fill:#f3f4f6,stroke:#4b5563,color:#111827
+  classDef signal fill:#fdf4ff,stroke:#a21caf,color:#111827
+  classDef engine fill:#eef2ff,stroke:#4338ca,color:#111827,font-weight:bold
+  classDef map fill:#ffffff,stroke:#9ca3af,color:#374151
+  classDef vedit fill:#fef3c7,stroke:#b45309,color:#111827,font-weight:bold
+  classDef vblock fill:#fee2e2,stroke:#b91c1c,color:#111827,font-weight:bold
+  classDef vesc fill:#ffedd5,stroke:#c2410c,color:#111827,font-weight:bold
+  classDef note fill:#ffffff,stroke:#ffffff,color:#4b5563
+  classDef store fill:#f3f4f6,stroke:#4b5563,color:#111827
+
+  class FIX fixture
+  class SIG signal
+  class ENGINE engine
+  class M1,M2,M3 map
+  class V1 vedit
+  class V2 vblock
+  class V3 vesc
+  class AUD store
+  class NOTE note

@@ -1,0 +1,56 @@
+# UC-3 finance_advisor — regulated decision-support tool (01 §3).
+# Transcribed from the normative example in 04 §3. High stakes: escalation-heavy,
+# fail_closed everywhere, non-streaming (ADR-014), always frontier tier (ADR-013).
+schema_version: 1
+use_case: finance_advisor
+policy_version: 3                # bump on every change; engine stamps it into audit
+geography: EU
+risk_appetite: low               # low | medium | high (informational + default pack selector)
+
+streaming: false                 # consistency:on requires full buffering (ADR-014)
+sampling:
+  deep_audit_rate: 0.25
+consistency: "on"                  # on | on_sampled | off   (on => streaming:false)
+cascade_probe: "off"               # ADR-013; high-stakes -> always frontier tier
+
+thresholds:                      # calibrated per 06 §3; conformal-style quantiles
+  tau_low: 0.35                  # below -> treat hallucination score as firing
+  tau_high: 0.70                 # low..high band -> borderline (ESCALATE-eligible)
+  tau_route: 0.55                # cascade escalation threshold (ADR-009)
+
+budget:
+  monthly_usd: 200
+  per_request_max_tokens: 4000
+  loop_max_requests_per_min: 10
+
+actions:                         # label -> action map; unlisted label -> default_action
+  pii.*: escalate
+  security.prompt_injection: block
+  security.blocklist: block
+  toxicity.high: block
+  toxicity.moderate: escalate
+  hallucination.low_confidence: escalate
+  hallucination.ungrounded_claim: escalate
+  hallucination.unsourced_numeric: escalate
+  privacy.person: escalate
+  cost.budget_exceeded: block
+  cost.loop_detected: block
+  conversation.cumulative_risk: escalate
+default_action: pass
+
+fail_mode:                       # per detector class, when timeout/error (04 §5)
+  tier1: fail_closed
+  tier2: fail_closed
+  performance: fail_closed
+  cost: fail_closed
+
+messages:
+  block_fallback: "This request can't be completed under {use_case} policy. A specialist has been notified."
+  escalate_user_notice: "Your request needs additional verification and has been routed for review."
+
+escalation:
+  notify: ["console", "webhook:${REVIEW_WEBHOOK_URL}"]
+  quarantine_ttl_s: 3600
+
+blocklist_extra: []
+detector_params: {}              # optional per-detector overrides (e.g., toxicity cutoffs)

@@ -1,0 +1,53 @@
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Inter, Segoe UI, Helvetica, Arial, sans-serif","fontSize":"14px","primaryTextColor":"#111827","lineColor":"#374151"},"flowchart":{"curve":"basis","nodeSpacing":38,"rankSpacing":48}}}%%
+%% Source: docs/04 1 (signal model), 1.1 (taxonomy), 1.2 + ADR-012 (score kinds), 2.2 + ADR-011 (enrichment), FR-DET-005.
+%% Claim: risk categories overlap, so ONE signal carries many labels. Detectors never decide actions.
+flowchart TB
+
+  TEXT["<b>one output sentence</b><br/><i>&quot;Dr. Sarah Chen approved a 40% budget increase last quarter.&quot;</i><br/>fabricated detail about an identifiable person"]
+
+  subgraph DETS["DETECTORS &nbsp;&mdash;&nbsp; emit signals, never decide actions"]
+    direction LR
+    D1["<b>rag_grounding</b><br/>score_kind: <b>confidence</b><br/><i>higher = better</i>"]
+    D2["<b>numeric_claims</b><br/>score_kind: <b>detection</b><br/><i>deterministic, 1.0</i>"]
+  end
+
+  SIG1["<b>SIGNAL A</b><br/>detector: rag_grounding<br/>labels: [hallucination.ungrounded_claim]<br/>planes: [performance]<br/>score: 0.41 &nbsp;kind: confidence<br/>span: {start, end} &nbsp;stage: output_sentence<br/>evidence: <i>category only, never the raw value</i>"]
+
+  SIG2["<b>SIGNAL B</b><br/>detector: numeric_claims<br/>labels: [hallucination.unsourced_numeric]<br/>planes: [performance]<br/>score: 1.0 &nbsp;kind: detection<br/>span: {start, end}"]
+
+  ENR{{"<b>entity_enricher</b> stage &nbsp;<i>(ADR-011)</i><br/>spaCy NER over the span &plusmn; its sentence window<br/>PERSON found &rarr; append to the <b>SAME</b> signal<br/><i>&lt;10 ms &middot; failure skips + logs, never blocks</i>"}}
+
+  SIG1E["<b>SIGNAL A &mdash; enriched</b><br/>labels: [hallucination.ungrounded_claim, <b>privacy.person</b>]<br/>planes: [performance, <b>responsibility</b>]<br/><i>two planes, one signal</i>"]
+
+  RULE["<b>ONE-SIGNAL RULE</b> &nbsp;<i>(FR-DET-005)</i><br/>the overlap case is <b>not</b> two signals correlated later.<br/>No detector emits privacy.person directly; enrichment<br/>appends it, so there is nothing to double-count."]
+
+  PE{{"<b>POLICY ENGINE</b><br/>the only component that decides<br/>most severe mapped action across labels"}}
+
+  BAND["<i>score_kind decides whether the<br/>tau band applies at all:</i><br/><b>confidence</b> &rarr; band logic applies<br/><b>detection</b> &rarr; band logic <b>never</b> applies<br/><i>(ADR-012: keeps deterministic 1.0<br/>signals from being silently dropped)</i>"]
+
+  TEXT --> D1
+  TEXT --> D2
+  D1 --> SIG1
+  D2 --> SIG2
+  SIG1 -->|"span-bearing hallucination.*"| ENR
+  ENR --> SIG1E
+  SIG1E --> PE
+  SIG2 --> PE
+  SIG1E --- RULE
+  PE --- BAND
+
+  classDef text fill:#f3f4f6,stroke:#4b5563,color:#111827
+  classDef det fill:#eff6ff,stroke:#1d4ed8,color:#111827
+  classDef sig fill:#ffffff,stroke:#9ca3af,color:#374151
+  classDef enr fill:#fff1f2,stroke:#be123c,color:#111827
+  classDef merged fill:#fdf4ff,stroke:#a21caf,color:#111827,font-weight:bold
+  classDef engine fill:#eef2ff,stroke:#4338ca,color:#111827,font-weight:bold
+  classDef note fill:#ffffff,stroke:#ffffff,color:#4b5563
+
+  class TEXT text
+  class D1,D2 det
+  class SIG1,SIG2 sig
+  class ENR enr
+  class SIG1E merged
+  class PE engine
+  class RULE,BAND note

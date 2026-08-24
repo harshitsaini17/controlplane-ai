@@ -1,0 +1,58 @@
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Inter, Segoe UI, Helvetica, Arial, sans-serif","fontSize":"13px","primaryTextColor":"#111827","lineColor":"#374151"}}}%%
+%% Source: docs/05-api-and-data-contracts.md 3 (SQLite schema) + ADR-006 + NFR-SEC-001.
+%% Claim: exactly one column may hold verbatim model output, and it is masked before it is written.
+erDiagram
+  audit_records {
+    TEXT request_id PK "one record per request, append-only"
+    TEXT ts_utc
+    TEXT use_case "which pipeline"
+    INTEGER policy_version "which YAML version judged it"
+    TEXT conversation_id "nullable, enables conv_tracker"
+    TEXT stage_summary "input | streamed | completed"
+    TEXT verdict "CHECK: pass | edit | block | escalate"
+    TEXT signals_json "list[Signal] - evidence fields only, NO raw PII"
+    TEXT actions_json "transforms applied, spans, fallback used"
+    TEXT model_requested "tier chosen pre-dispatch"
+    TEXT model_used "tier that actually answered"
+    INTEGER cascade_escalated "probe rejected, went frontier"
+    INTEGER tokens_in
+    INTEGER tokens_out
+    REAL est_cost_usd
+    TEXT latency_json "per-detector ms + gateway_overhead_ms + upstream_ms"
+    INTEGER sampled_deep "was it handed to the deep lane"
+  }
+
+  review_items {
+    TEXT review_id PK
+    TEXT request_id FK "lineage back to the audit record"
+    TEXT ts_created
+    TEXT quarantined_text "THE ONLY verbatim output column - PII masked at write time"
+    TEXT status "CHECK: pending | approved | rejected"
+    TEXT decision_ts "nullable until reviewed"
+    TEXT reviewer_note "nullable - the override rationale"
+  }
+
+  deep_audit_results {
+    TEXT request_id FK "enriches, never alters the verdict"
+    TEXT ts
+    TEXT method "semantic_entropy | fairness_spot"
+    TEXT result_json "clusters, entropy value, or check outcome"
+  }
+
+  metrics_events {
+    TEXT ts
+    TEXT name "fixed vocabulary from 05 section 5"
+    REAL value
+    TEXT labels_json "use_case, verdict, detector, category"
+  }
+
+  cost_ledger {
+    TEXT use_case PK "composite key with month"
+    TEXT month PK
+    REAL spent_usd "read pre-dispatch by cost_budget"
+  }
+
+  audit_records ||--o| review_items : "ESCALATE creates one"
+  audit_records ||--o{ deep_audit_results : "if sampled_deep"
+  audit_records ||--o{ metrics_events : "emits"
+  audit_records }o--|| cost_ledger : "debits monthly spend"

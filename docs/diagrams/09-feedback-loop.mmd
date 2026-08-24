@@ -1,0 +1,52 @@
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Inter, Segoe UI, Helvetica, Arial, sans-serif","fontSize":"14px","primaryTextColor":"#111827","lineColor":"#374151"},"flowchart":{"curve":"basis","nodeSpacing":40,"rankSpacing":46}}}%%
+%% Source: docs/02-architecture.md 6 + docs/04 7 (feedback mechanics) + ADR-010 + charter S4 + demo beat 6.
+%% Claim: escalations are not a dead end. The system proposes, a human decides, every version is audited.
+flowchart TB
+
+  ESC["<b>ESCALATE verdict</b><br/>response quarantined, not delivered"]
+
+  RQ[("<b>review_items</b><br/>status: pending<br/><i>quarantined_text stored here ONLY,<br/>written post-masking of PII spans</i>")]
+
+  CLI["<b>admin endpoints + CLI</b> &nbsp;<i>(ADR-010)</i><br/>GET /admin/review?status=pending<br/>POST /admin/review/{id}<br/><i>no reviewer web app &mdash; deliberate scope choice</i>"]
+
+  HUMAN(["<b>HUMAN REVIEWER</b>"])
+
+  DEC{"decision"}
+  APP["<b>approve</b><br/>release the quarantined response<br/>mark signals as <b>FP candidates</b>"]
+  REJ["<b>reject</b><br/>confirm the catch<br/>signals recorded as <b>TP</b>"]
+
+  LINEAGE[("override appended to the<br/><b>same audit record lineage</b><br/>+ reviewer note &nbsp;<i>(FR-AUD-002)</i>")]
+
+  REPORT["<b>eval/override_report.py</b><br/>per use case, per label:<br/>fire counts, override rates, notes<br/><i>which labels over- or under-fire</i>"]
+
+  SUGGEST["<b>eval/suggest_thresholds.py</b><br/>recompute tau_low / tau_high as<br/>conformal-style quantiles over<br/>(labeled set &cup; override-adjudicated) scores"]
+
+  DIFF["<b>output: a proposed YAML diff</b><br/><i>nothing is applied automatically</i>"]
+
+  GATE{{"<b>HUMAN APPLIES THE DIFF</b><br/><i>no auto-apply, ever</i>"}}
+
+  BUMP["<b>policy_version bump</b><br/>YAML diff is itself the audit trail"]
+
+  BEHAVE["<b>re-fire a borderline case</b><br/>verdict changed<br/><i>demonstrable behaviour change (charter S4)</i>"]
+
+  ESC --> RQ --> CLI --> HUMAN --> DEC
+  DEC --> APP
+  DEC --> REJ
+  APP --> LINEAGE
+  REJ --> LINEAGE
+  LINEAGE --> REPORT --> SUGGEST --> DIFF --> GATE --> BUMP --> BEHAVE
+  BEHAVE -.->|"the loop is closed:<br/>next request is judged<br/>by the new version"| ESC
+
+  classDef esc fill:#ffedd5,stroke:#c2410c,color:#111827,font-weight:bold
+  classDef store fill:#f3f4f6,stroke:#4b5563,color:#111827
+  classDef human fill:#ecfdf5,stroke:#047857,color:#111827,font-weight:bold
+  classDef tool fill:#eff6ff,stroke:#1d4ed8,color:#111827
+  classDef gate fill:#eef2ff,stroke:#4338ca,color:#111827,font-weight:bold
+  classDef result fill:#fdf4ff,stroke:#a21caf,color:#111827,font-weight:bold
+
+  class ESC esc
+  class RQ,LINEAGE store
+  class HUMAN,APP,REJ human
+  class CLI,REPORT,SUGGEST,DIFF tool
+  class GATE,DEC gate
+  class BUMP,BEHAVE result

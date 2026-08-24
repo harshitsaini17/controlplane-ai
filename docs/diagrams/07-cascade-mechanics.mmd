@@ -1,0 +1,56 @@
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Inter, Segoe UI, Helvetica, Arial, sans-serif","fontSize":"14px","primaryTextColor":"#111827","lineColor":"#374151"},"flowchart":{"curve":"basis","nodeSpacing":40,"rankSpacing":48}}}%%
+%% Source: ADR-013 (cascade mechanics) + ADR-009 (two tiers) + ADR-002 (no recall) + 05 4 (audit fields).
+%% Claim: the probe is fully buffered BECAUSE a mid-stream re-dispatch would collide with the no-recall rule.
+flowchart TB
+
+  REQ(["Request, input lane cleared"])
+  ROUTE["<b>SEMANTIC ROUTER &mdash; pre-dispatch</b><br/>embedding-similarity intent match<br/>against a small labeled intent set<br/><i>no training (ADR-009)</i>"]
+  GATE{"policy<br/><b>cascade_probe</b>?"}
+
+  OFF["<b>off</b> &mdash; UC-3 finance_advisor<br/>high stakes: always frontier tier<br/><i>no probe, no added TTFB</i>"]
+
+  subgraph PROBE["cascade_probe: on &nbsp;&mdash;&nbsp; UC-1, UC-2"]
+    direction TB
+    P1["call <b>small tier</b><br/><b>NON-streaming &mdash; fully buffered</b><br/><i>nothing released yet</i>"]
+    P2{"probe confidence<br/>vs <b>tau_route</b>"}
+    P3["<b>&ge; tau_route</b><br/>deliver the buffered text<br/>through the normal sentence pipeline<br/><i>cheap answer, kept</i>"]
+    P4["<b>&lt; tau_route</b><br/>re-dispatch to <b>frontier</b> (streaming)<br/><i>cascade_escalated = true</i>"]
+    P1 --> P2
+    P2 --> P3
+    P2 --> P4
+  end
+
+  PIPE["<b>SENTENCE PIPELINE</b><br/>same checks either way<br/>routing does not exempt a response"]
+
+  AUDIT[("audit fields (05 &sect;4)<br/><b>model_requested</b> &middot; <b>model_used</b><br/><b>cascade_escalated</b>")]
+
+  FORBID["<b>✗ NEVER: mid-stream re-dispatch</b><br/>if the small tier streamed first, its early<br/>sentences would already be released &mdash; and<br/>released sentences cannot be recalled (ADR-002).<br/><i>Buffering the probe is what makes the<br/>cost mechanism compatible with the<br/>interception guarantee.</i>"]
+
+  COST["<i>Trade-off, stated in the demo: the probe adds TTFB<br/>(a full small-tier generation before the first byte).<br/>Measured in bench_latency, not hand-waved.</i>"]
+
+  REQ --> ROUTE --> GATE
+  GATE -->|"off"| OFF
+  GATE -->|"on"| P1
+  OFF --> PIPE
+  P3 --> PIPE
+  P4 --> PIPE
+  PIPE --> AUDIT
+  PROBE -.-x FORBID
+  PROBE --- COST
+
+  classDef ctrl fill:#eef2ff,stroke:#4338ca,color:#111827,font-weight:bold
+  classDef cost fill:#fffbeb,stroke:#b45309,color:#111827
+  classDef keep fill:#ecfdf5,stroke:#047857,color:#111827
+  classDef esc fill:#ffedd5,stroke:#c2410c,color:#111827
+  classDef bad fill:#fee2e2,stroke:#b91c1c,color:#7f1d1d,font-weight:bold
+  classDef note fill:#ffffff,stroke:#ffffff,color:#4b5563
+  classDef store fill:#f3f4f6,stroke:#4b5563,color:#111827
+
+  class ROUTE,GATE,PIPE ctrl
+  class P1,P2,OFF cost
+  class P3 keep
+  class P4 esc
+  class FORBID bad
+  class COST note
+  class AUDIT store
+  class REQ store

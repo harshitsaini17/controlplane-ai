@@ -1,0 +1,70 @@
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Inter, Segoe UI, Helvetica, Arial, sans-serif","fontSize":"14px","primaryTextColor":"#111827","lineColor":"#374151"}}}%%
+%% Source: docs/02-architecture.md 4 (request lifecycle) + ADR-013 (cascade) + ADR-014 (delivery mode).
+%% Claim: a flagged sentence is acted on before any of it is released.
+sequenceDiagram
+  autonumber
+  participant CL as Client app
+  participant IN as Ingress
+  participant IL as Input lane
+  participant DP as Dispatcher
+  participant UP as Upstream LLM
+  participant SBUF as Sentence buffer
+  participant PE as Policy engine
+  participant AU as Audit + review
+
+  CL->>IN: POST /v1/chat/completions<br/>X-ControlPlane-Use-Case
+  IN->>IN: resolve use case, bind policy_version<br/>unknown use case leads to 400 ERR-CFG-001
+  IN->>IL: input stage
+
+  rect rgb(255, 251, 235)
+    note over IL: t0+ input lane
+    IL->>IL: tier1_pii, tier1_blocklist
+    IL->>IL: tier2_injection
+    IL->>IL: cost_budget, loop_guard
+    IL->>PE: input-stage signals
+    alt input verdict is BLOCK or ESCALATE
+      PE-->>CL: short-circuit before dispatch<br/>zero upstream tokens, zero cost
+      PE->>AU: audit record, stage_summary = input
+    else input verdict PASS
+      IL->>IL: router picks model tier (pre-dispatch)
+    end
+  end
+
+  opt policy cascade_probe is on (ADR-013)
+    DP->>UP: small tier, NON-streaming (fully buffered)
+    UP-->>DP: complete text
+    DP->>DP: probe confidence versus tau_route
+    note over DP: below threshold: re-dispatch to frontier.<br/>There is never a mid-stream re-dispatch.
+  end
+
+  DP->>UP: dispatch (streaming when policy streaming is true)
+
+  rect rgb(239, 246, 255)
+    note over UP,PE: streaming path (UC-1, UC-2)
+    loop for each sentence s_i
+      UP-->>SBUF: tokens
+      SBUF->>SBUF: accumulate to sentence boundary (ADR-002)
+      SBUF->>PE: fast detectors in parallel, then converge
+      alt PASS
+        PE-->>CL: release s_i
+      else EDIT
+        PE-->>CL: release transformed s_i
+      else BLOCK
+        PE-->>CL: terminate stream, send block_fallback
+      else ESCALATE
+        PE-->>CL: terminate stream, send escalate_user_notice
+        PE->>AU: quarantine entire response, create review item
+      end
+    end
+  end
+
+  rect rgb(243, 244, 246)
+    note over UP,PE: non-streaming path (UC-3, ADR-014)
+    UP-->>SBUF: full response buffered
+    SBUF->>PE: all checks incl. consistency, single verdict
+    note over PE: nothing reaches the user before the verdict
+    PE-->>CL: whole response, or fallback / notice
+  end
+
+  PE->>AU: finalize: verdict, signal ids, policy_version,<br/>latencies, model, cost
+  AU-->>AU: sampled? enqueue deep audit (never awaited)

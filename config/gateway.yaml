@@ -1,0 +1,53 @@
+# Upstream provider + price table. Schema per 05 §6.
+#
+# Cost-plane consumers of this file: audit_records.tokens_in/out + est_cost_usd (05 §3),
+# cp_est_cost_usd_total (05 §5), and the 06 §5 cost simulation. Because those numbers are
+# judge-facing, every value here is either measured or explicitly stubbed — never guessed
+# (AGENTS.md §7).
+#
+# Verified against the running gateway on 2026-08-24: version 2.4.dev.13, 19 models,
+# POST /v1/messages and POST /v1/chat/completions live, wrong key -> 401.
+
+price_table_version: 0   # STUB(pending the price-source ruling; owner-decision-needed)
+
+provider:
+  name: kiro-local-gateway
+
+  # Anthropic-family calls append their own /v1/messages, so the SDK base_url is the bare
+  # host. Verified: POST /v1/messages is the real path; POST /messages is a 404.
+  base_url: http://localhost:8000
+
+  # 05 §6 normative env name. Its VALUE is the gateway's PROXY_API_KEY, and it lives only
+  # in .env — never in this file, never logged (NFR-SEC-002).
+  key_env: UPSTREAM_API_KEY
+
+  # Auth header for this family: x-api-key: ${UPSTREAM_API_KEY} plus
+  # anthropic-version: 2023-06-01. Bearer also works. / and /health need no auth.
+
+  # STUB(the local gateway publishes no per-token price and bills nothing, so there is no
+  # measured value to put here; owner-decision-needed)
+  # Blocks: est_cost_usd, cost_ledger, the 06 §5 cost simulation.
+  # See DEVIATION REPORT [D2-upstream-price-table-absent].
+  price_per_1k_in: null
+  price_per_1k_out: null
+
+# STUB(Q-02 named llama-3.2-3b via Ollama; the local Ollama daemon hosts only
+# minimax-m2.7:cloud, which is a REMOTE cloud model, so the documented local fallback does
+# not currently exist locally; owner-decision-needed)
+local_fallback:
+  model: null
+
+# ---------------------------------------------------------------------------
+# Tier -> model binding is NOT yet expressible in this schema.
+#
+# 05 §4 records model_requested / model_used as "small-tier" / "frontier", and ADR-009 +
+# ADR-013 route between them, but 05 §6 defines no key to bind a tier name to a concrete
+# model id. That is a doc gap, so rather than invent a key, the two verified candidates are
+# recorded here as a comment pending a 05 §6 amendment:
+#
+#   small-tier : claude-haiku-4.5    (verified: end_turn, 13 output tokens)
+#   frontier   : claude-sonnet-4.6   (verified: end_turn, matches the Q-02 ruling intent)
+#
+# Unknown model names are not rejected by the gateway — they pass through to Kiro, which is
+# the final arbiter. So a typo here fails at Kiro, not at config load.
+# ---------------------------------------------------------------------------

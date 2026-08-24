@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "controlplane-ai"
+version = "0.1.0"
+description = "ControlPlane.ai — real-time AI oversight gateway (Performance / Cost / Responsibility)"
+requires-python = ">=3.11"
+
+# Dependency set is bounded by docs/02 §8 (external dependencies). New deps require
+# an ADR note (02 §8) — do not add without one.
+dependencies = [
+    "fastapi==0.115.6",        # 02 §7/§8: gateway
+    "uvicorn==0.34.0",         # 02 §8: ASGI server
+    "pydantic==2.13.4",        # 04 §3: policy schema validation
+                               # 2.13+ required: earlier pydantic-core has no cp314 wheel
+                               # and its PyO3 build caps at Python 3.13.
+    "httpx==0.28.1",           # 02 §4: upstream dispatch (streaming)
+    "pyyaml==6.0.3",           # 02 §8 "YAML": policies/*.yaml, config/*.yaml
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.4",
+]
+# The 02 §8 model stack. Split into an extra, not dropped: Phase 1 (schema, policies,
+# audit DB, tests) needs none of it, and `sentence-transformers` pulls torch — install
+# CPU-only torch FIRST (AGENTS.md §10) or pip fetches the multi-GB CUDA stack for no
+# benefit, since NFR-P-002 budgets are CPU budgets. Required from the first detector sprint.
+ml = [
+    "sentence-transformers==3.3.1",  # 02 §8: MiniLM embeddings (consistency, router)
+    "spacy==3.8.16",           # 02 §8 + ADR-011: en_core_web_sm person-entity enrichment
+                               # 3.8.7+ required for Python 3.14 (earlier caps at <3.13).
+]
+# ADR-007 (Accepted 2026-08-24, Q-03): Streamlit dashboard reading SQLite.
+dashboard = [
+    "streamlit==1.41.1",
+]
+
+[tool.setuptools]
+packages = [
+    "controlplane",
+    "controlplane.gateway",
+    "controlplane.detectors",
+    "controlplane.policy",
+    "controlplane.audit",
+    "controlplane.deep_audit",
+    "controlplane.telemetry",
+    "eval",
+    "demo",
+    "dashboard",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

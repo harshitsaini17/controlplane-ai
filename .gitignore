@@ -1,0 +1,40 @@
+# Secrets — NFR-SEC-002: env only, never committed
+.env
+config/keys.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# Test / tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Runtime artefacts
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+
+# Generated reports (06 §8 — regenerate with the eval entry points, never hand-edit)
+reports/*
+!reports/.gitkeep
+
+# Model caches (sentence-transformers / spaCy)
+.cache/
+models/
+
+# Crash artefacts. The headless chromium used by the diagram renderer can dump an
+# 80M+ core into the output directory; it is not a deliverable.
+core.[0-9]*
+
+# Local diagram render toolchain (node_modules for mermaid-cli).
+# Rendered images in docs/diagrams/images/ ARE committed — the proposal, README and
+# video reference them, and judges clone a public repo without a node toolchain.
+.tools/

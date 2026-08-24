@@ -1,0 +1,59 @@
+# UC-2 hr_copilot — internal employee knowledge assistant (01 §3).
+# Profile: internal users, relaxed grounding, strict on personal-data exposure,
+# US geography. Demo role: the same PII content getting a different verdict than
+# UC-1 (07 beats 4a vs 4b).
+#
+# This file is the NORMATIVE source for UC-2's policy values (ADR-016); 01 §3 lists
+# distinguishing highlights only.
+schema_version: 1
+use_case: hr_copilot
+policy_version: 1
+geography: US                    # 01 §3 "US geography"
+risk_appetite: medium            # ADR-016
+
+streaming: true                  # consistency is off, so full buffering is not required
+sampling:
+  deep_audit_rate: 0.05          # 01 §3 "sampling 5%"
+consistency: "off"                 # 04 §2.3 + 01 §3 "relaxed grounding"
+cascade_probe: "on"                # ADR-013 "cascade_probe: on for ... hr_copilot"
+
+thresholds:
+  tau_low: 0.35                  # SEED(pre-calibration; 06 §3 calibration overwrites; never judge-facing)
+  tau_high: 0.70                 # SEED(pre-calibration; 06 §3 calibration overwrites; never judge-facing)
+  tau_route: 0.55                # SEED(pre-calibration; 06 §3 calibration overwrites; never judge-facing)
+
+budget:                          # ADR-016; 01 §3 "higher budget ceiling" — highest of the three
+  monthly_usd: 800
+  per_request_max_tokens: 8000
+  loop_max_requests_per_min: 30
+
+actions:
+  pii.*: block                   # 01 §3 "PII -> BLOCK (not redact — internal policy choice)"
+  security.prompt_injection: block
+  security.blocklist: block
+  toxicity.high: block
+  toxicity.moderate: pass        # ADR-016; internal audience
+  hallucination.*: pass          # 01 §3 "low-confidence -> PASS with logged flag"
+  privacy.person: block          # 01 §3 "strict on personal-data exposure (employee PII)";
+                                 # carries 07 beat 4b's BLOCK, since hallucination.* is pass
+  cost.budget_exceeded: block
+  cost.loop_detected: block
+  conversation.cumulative_risk: escalate
+default_action: pass
+
+fail_mode:                       # ADR-016
+  tier1: fail_closed             # strict on personal data
+  tier2: fail_open               # internal availability
+  performance: fail_open         # relaxed grounding
+  cost: fail_open
+
+messages:
+  block_fallback: "This answer was withheld under {use_case} policy because it may expose personal data. Contact HR directly for employee-specific information."
+  escalate_user_notice: "This request needs additional verification and has been routed for review."
+
+escalation:
+  notify: ["console"]
+  quarantine_ttl_s: 3600
+
+blocklist_extra: []
+detector_params: {}

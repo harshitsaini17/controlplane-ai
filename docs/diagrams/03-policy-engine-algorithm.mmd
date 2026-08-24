@@ -1,0 +1,78 @@
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Inter, Segoe UI, Helvetica, Arial, sans-serif","fontSize":"14px","primaryTextColor":"#111827","lineColor":"#374151"},"flowchart":{"curve":"basis","nodeSpacing":40,"rankSpacing":45}}}%%
+%% Source: docs/04-policy-and-detection-spec.md 4.3 (algorithm), ADR-012 (score kinds), ADR-015 (stage rule).
+%% Claim: one deterministic path from a set of signals to exactly one verdict.
+flowchart TB
+
+  START(["All fast-path signals for one unit<br/><i>input stage, or one output sentence</i>"])
+
+  S1["<b>STEP 1 &mdash; map labels to actions</b><br/>for each label: specific &gt; wildcard &gt; default_action<br/>signal action = <b>most severe</b> across its labels"]
+
+  KIND{"<b>STEP 2</b><br/>score_kind?<br/><i>ADR-012</i>"}
+
+  BYPASS["<b>detection</b> kind<br/><i>higher = worse</i><br/>tier1_*, tier2_*, numeric_claims,<br/>cost_*, loop_guard, conv_tracker<br/><br/><b>band logic never applies</b>"]
+
+  BAND{"<b>confidence</b> kind<br/><i>higher = better</i><br/>fast_consistency, rag_grounding<br/><br/>compare score to thresholds"}
+
+  B1["score &ge; tau_high<br/><b>drop signal</b><br/><i>not firing</i>"]
+  B2["tau_low &le; score &lt; tau_high<br/><b>borderline band</b><br/>action becomes ESCALATE"]
+  B3["score &lt; tau_low<br/><b>use mapped action</b><br/><i>as-is</i>"]
+
+  S3{"<b>STEP 3</b><br/>most severe action<br/>across surviving signals<br/><i>BLOCK &gt; ESCALATE &gt; EDIT &gt; PASS</i>"}
+
+  VPASS["<b>PASS</b><br/>no signals survived"]
+  VEDIT["<b>EDIT</b>"]
+  VBLOCK["<b>BLOCK</b>"]
+  VESC["<b>ESCALATE</b>"]
+
+  S4{"<b>STEP 4</b> &mdash; is each edit-mapped<br/>signal actually editable?<br/>has span, <b>or</b> stage = output_sentence<br/><i>ADR-015</i>"}
+
+  APPLY["apply 04 &sect;6 transforms<br/><b>redact</b> at pii.* spans<br/><b>soften</b> hallucination.* claim<br/><i>re-run tier1_pii once as a guard</i>"]
+  PROMOTE["<b>no editable extent</b><br/>promote signal to ESCALATE<br/><i>safe upgrade</i>"]
+
+  S5["<b>STEP 5 &mdash; stamp audit</b><br/>verdict, contributing signal_ids,<br/>policy_version"]
+  DONE(["Exactly one verdict<br/><i>deterministic for identical inputs (FR-POL-001)</i>"])
+
+  START --> S1 --> KIND
+  KIND -->|"detection"| BYPASS
+  KIND -->|"confidence"| BAND
+  BAND --> B1
+  BAND --> B2
+  BAND --> B3
+  BYPASS --> S3
+  B1 -.->|"signal removed"| S3
+  B2 --> S3
+  B3 --> S3
+
+  S3 -->|"none"| VPASS
+  S3 --> VEDIT
+  S3 --> VBLOCK
+  S3 --> VESC
+
+  VEDIT --> S4
+  S4 -->|"yes"| APPLY
+  S4 -->|"no"| PROMOTE
+  PROMOTE --> VESC
+
+  VPASS --> S5
+  APPLY --> S5
+  VBLOCK --> S5
+  VESC --> S5
+  S5 --> DONE
+
+  classDef step fill:#eef2ff,stroke:#4338ca,color:#111827
+  classDef det fill:#fffbeb,stroke:#b45309,color:#111827
+  classDef conf fill:#eff6ff,stroke:#1d4ed8,color:#111827
+  classDef vpass fill:#ecfdf5,stroke:#047857,color:#111827,font-weight:bold
+  classDef vedit fill:#fef3c7,stroke:#b45309,color:#111827,font-weight:bold
+  classDef vblock fill:#fee2e2,stroke:#b91c1c,color:#111827,font-weight:bold
+  classDef vesc fill:#ffedd5,stroke:#c2410c,color:#111827,font-weight:bold
+  classDef term fill:#f3f4f6,stroke:#4b5563,color:#111827
+
+  class S1,S3,S4,S5,APPLY step
+  class BYPASS det
+  class BAND,B1,B2,B3,KIND conf
+  class VPASS vpass
+  class VEDIT vedit
+  class VBLOCK vblock
+  class VESC,PROMOTE vesc
+  class START,DONE term

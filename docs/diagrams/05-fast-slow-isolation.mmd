@@ -1,0 +1,56 @@
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Inter, Segoe UI, Helvetica, Arial, sans-serif","fontSize":"14px","primaryTextColor":"#111827","lineColor":"#374151"},"flowchart":{"curve":"basis","nodeSpacing":40,"rankSpacing":50}}}%%
+%% Source: docs/02-architecture.md 3 + ADR-004 + NFR-P-003.
+%% Claim: the hot path never awaits the deep lane. Deep findings change the future, not this response.
+flowchart TB
+
+  REQ(["Request arrives"])
+
+  subgraph FAST["FAST LANE &nbsp;&mdash;&nbsp; synchronous, inside the request lifecycle"]
+    direction TB
+    FD["detectors run concurrently per unit<br/><i>asyncio.gather, each with a latency budget</i>"]
+    FB["<b>per-detector budgets (NFR-P-002)</b><br/>tier1 &lt; 2 ms &middot; tier2 &lt; 25 ms<br/>numeric_claims &lt; 5 ms &middot; grounding &lt; 30 ms<br/>consistency &lt; 60 ms &middot; cost &lt; 1 ms"]
+    FV["policy engine verdict<br/><i>then the sentence is released or acted on</i>"]
+    FD --> FB --> FV
+  end
+
+  DEL(["Response delivered to user<br/><b>gateway overhead target: P50 &lt; 40 ms, P99 &lt; 100 ms</b><br/><i>NFR-P-001, streaming path</i>"])
+
+  QUEUE[["<b>in-process asyncio queue</b><br/>sampled copy of (request, response, signals)<br/><i>sampling.deep_audit_rate per policy:<br/>UC-1 10% &middot; UC-2 5% &middot; UC-3 25%</i>"]]
+
+  subgraph SLOW["DEEP LANE &nbsp;&mdash;&nbsp; asynchronous, sampled, unbudgeted"]
+    direction TB
+    SE["<b>semantic entropy</b><br/>N=5 samples, clustering<br/><i>seconds, not milliseconds</i>"]
+    SF["<b>fairness spot checks</b><br/>safety-taxonomy sampling"]
+    SD["drift statistics"]
+  end
+
+  ENRICH[("enrich audit record<br/>+ dashboard panels")]
+  FEED{{"<b>feedback loop</b><br/>threshold + policy proposals<br/><i>influences future requests only</i>"}}
+
+  REQ --> FAST
+  FV --> DEL
+  FV -.->|"fire and forget<br/><b>never awaited</b>"| QUEUE
+  QUEUE --> SE
+  QUEUE --> SF
+  QUEUE --> SD
+  SE --> ENRICH
+  SF --> ENRICH
+  SD --> ENRICH
+  ENRICH --> FEED
+  FEED -.->|"next policy version"| REQ
+
+  FORBID["<b>✗ FORBIDDEN EDGE</b><br/>no hot-path await on the deep lane;<br/>the deep lane may never alter a<br/>verdict already delivered"]
+  SLOW -.-x FORBID
+  FORBID -.-x DEL
+
+  classDef fast fill:#eff6ff,stroke:#1d4ed8,color:#111827
+  classDef slow fill:#f5f3ff,stroke:#6d28d9,color:#111827
+  classDef gate fill:#f3f4f6,stroke:#4b5563,color:#111827
+  classDef bad fill:#fee2e2,stroke:#b91c1c,color:#7f1d1d,font-weight:bold
+  classDef term fill:#ecfdf5,stroke:#047857,color:#111827,font-weight:bold
+
+  class FD,FB,FV fast
+  class SE,SF,SD,FEED slow
+  class QUEUE,ENRICH gate
+  class FORBID bad
+  class REQ,DEL term

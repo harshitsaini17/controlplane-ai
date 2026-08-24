@@ -1,0 +1,48 @@
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Inter, Segoe UI, Helvetica, Arial, sans-serif","fontSize":"14px","primaryTextColor":"#111827","lineColor":"#374151"},"flowchart":{"curve":"basis","nodeSpacing":40,"rankSpacing":50}}}%%
+%% Source: docs/04-policy-and-detection-spec.md 5 + SC-3 + demo beat 7 + policies/*.yaml fail_mode.
+%% Claim: one identical fault, two opposite outcomes. Even our failures are policy decisions.
+flowchart TB
+
+  FAULT["<b>IDENTICAL INJECTED FAULT</b><br/><i>--inject-fault tier2</i><br/>tier2_toxicity raises DetectorTimeout"]
+
+  SYN["<b>gateway synthesizes one signal</b><br/>labels: [_meta.detector_failure]<br/>meta: {detector, error_class}<br/><i>not resolved by the actions map</i>"]
+
+  LOOKUP{"look up <b>fail_mode</b><br/>for that detector's class<br/><i>in the use case's own policy</i>"}
+
+  subgraph UC1["UC-1 support_bot &nbsp;&mdash;&nbsp; fail_mode.tier2: fail_open"]
+    direction TB
+    O1["<b>fail_open</b><br/>log + metric<br/>cp_detector_failures_total"]
+    O2["proceed <b>without</b><br/>that detector's signals"]
+    O3["<b>response PASSES</b><br/>failure recorded in audit<br/><i>availability over strictness</i>"]
+    O1 --> O2 --> O3
+  end
+
+  subgraph UC3["UC-3 finance_advisor &nbsp;&mdash;&nbsp; fail_mode.tier2: fail_closed"]
+    direction TB
+    C1["<b>fail_closed</b><br/>synthesized signal<br/>maps to ESCALATE"]
+    C2["<i>never a silent BLOCK &mdash;<br/>a human sees why</i>"]
+    C3["<b>response QUARANTINED</b><br/>review item created<br/><i>caution over availability</i>"]
+    C1 --> C2 --> C3
+  end
+
+  NOTE["<i>The support bot values availability. The finance tool values caution.<br/>Same fault, same code, same engine &mdash; different YAML line.<br/><b>Changing a fail_mode is a policy-version change.<br/>Changing the mechanism is a D7 deviation.</b></i>"]
+
+  FAULT --> SYN --> LOOKUP
+  LOOKUP -->|"policies/support_bot.yaml"| O1
+  LOOKUP -->|"policies/finance_advisor.yaml"| C1
+  O3 --- NOTE
+  C3 --- NOTE
+
+  classDef fault fill:#fee2e2,stroke:#b91c1c,color:#111827,font-weight:bold
+  classDef syn fill:#f3f4f6,stroke:#4b5563,color:#111827
+  classDef gate fill:#eef2ff,stroke:#4338ca,color:#111827,font-weight:bold
+  classDef open fill:#ecfdf5,stroke:#047857,color:#111827
+  classDef closed fill:#ffedd5,stroke:#c2410c,color:#111827
+  classDef note fill:#ffffff,stroke:#ffffff,color:#4b5563
+
+  class FAULT fault
+  class SYN syn
+  class LOOKUP gate
+  class O1,O2,O3 open
+  class C1,C2,C3 closed
+  class NOTE note
