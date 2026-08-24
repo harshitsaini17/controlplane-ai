@@ -17,6 +17,7 @@ Priorities: **P0** demo-critical · **P1** judged-differentiator · **P2** stret
 | FR-GW-003 | P0 | Every request is tagged with a use case; unknown use case → request rejected with a clear error. | 400 + `ERR-CFG-001`. |
 | FR-GW-004 | P1 | Non-streaming mode supported (whole-response check) for batch-style use cases. | Config flag `streaming: false` per use case. |
 | FR-GW-005 | P2 | Conversation ID accepted and threaded through for multi-turn tracking. | `X-ControlPlane-Conversation-Id` propagated to signals + audit. |
+| FR-GW-006 | P0 | **Startup canary + usage-sanity invariant.** At boot, one canary request compares `count_tokens` against the provider's reported prompt-token count. Delta > `usage_sanity.max_token_delta` (default 25) ⇒ the provider's accounting is untrustworthy: **measured-class fails boot**, **dev-class warns loudly and continues** (ADR-018). Any fallback engagement increments `cp_fallback_engaged_total` and logs at WARNING — never silently. | Boot refused for a miscounting measured-class provider; dev-class boot emits the warning; a silenced fallback fails the test. |
 
 ### Detection (DET)
 
@@ -90,17 +91,17 @@ These are simultaneously requirements, policy fixtures, and demo content. Full p
 
 ### UC-1 `support_bot` — customer-facing RAG support assistant
 - Profile: external users, low latency, moderate strictness, EU geography.
-- Policy highlights: PII → **EDIT** (redact); toxicity high → BLOCK, moderate → PASS; ungrounded/unsourced-numeric claim → **EDIT** (soften), low-confidence → ESCALATE (span-less by design, ADR-015); injection → BLOCK; deep-audit sampling 10%; budget $500/mo; `fail_mode: fail_closed` for Tier-1, `fail_open` for Tier-2 (availability over strictness), performance and cost.
+- Policy highlights: PII → **EDIT** (redact); toxicity high → BLOCK, moderate → PASS; ungrounded/unsourced-numeric claim → **EDIT** (soften), low-confidence → ESCALATE (span-less by design, ADR-015); `borderline_action: edit` (ADR-017 — a borderline-confidence claim gets softened, matching this UC's soften-first posture); injection → BLOCK; deep-audit sampling 10%; budget $500/mo; `fail_mode: fail_closed` for Tier-1, `fail_open` for Tier-2 (availability over strictness), performance and cost.
 - Demo role: shows EDIT actions and latency story.
 
 ### UC-2 `hr_copilot` — internal employee knowledge assistant
 - Profile: internal users, relaxed grounding, **strict on personal-data exposure** (employee PII), US geography.
-- Policy highlights: PII → BLOCK (not redact — internal policy choice); `privacy.person` → BLOCK (carries demo beat 4b); low-confidence → PASS with logged flag; toxicity moderate → PASS; `risk_appetite: medium`; highest budget ceiling of the three ($800/mo); sampling 5%; `fail_mode: fail_closed` for Tier-1 only, `fail_open` elsewhere.
+- Policy highlights: PII → BLOCK (not redact — internal policy choice); `privacy.person` → BLOCK (carries demo beat 4b); low-confidence → PASS with logged flag; `borderline_action: pass` (ADR-017 — consistent with the PASS-and-log posture; note this is the reading under which the open `[D4-enriched-label-survival-semantics]` question bites hardest, since a *follows-host* rule would let `privacy.person` pass here and cost beat 4b); toxicity moderate → PASS; `risk_appetite: medium`; highest budget ceiling of the three ($800/mo); sampling 5%; `fail_mode: fail_closed` for Tier-1 only, `fail_open` elsewhere.
 - Demo role: shows the *same PII content* getting a different verdict than UC-1 → policy-as-config beat #4a.
 
 ### UC-3 `finance_advisor` — regulated decision-support tool
 - Profile: high stakes, escalation-heavy, `fail_mode: fail_closed` everywhere, sampling 25%, **non-streaming** (`streaming: false` — full-response buffering so nothing precedes the verdict; ADR-014).
-- Policy highlights: low-confidence claim → **ESCALATE** (quarantine + review); any PII → ESCALATE; unsourced numeric claims → ESCALATE; strict budget.
+- Policy highlights: low-confidence claim → **ESCALATE** (quarantine + review); any PII → ESCALATE; unsourced numeric claims → ESCALATE; `borderline_action: escalate` (ADR-017 — the band collapses into this UC's default posture, so calibration cannot soften it); strict budget.
 - Demo role: the signature moment — the identical low-confidence response that UC-1 *edits* is *escalated* here (beat #4b); also the override/feedback beat.
 
 ### Cross-cutting scenario requirements

@@ -45,6 +45,12 @@ actions:
   conversation.cumulative_risk: escalate
 default_action: pass
 
+# ADR-017: action for a confidence-kind signal landing in [tau_low, tau_high).
+# `edit` matches UC-1's posture in 01 §3 — an ungrounded claim is softened, not
+# withheld. A borderline claim is the weaker version of the same case, so softening
+# it keeps the pipeline's voice consistent (and carries demo beat 4a).
+borderline_action: edit
+
 fail_mode:
   tier1: fail_closed             # 01 §3 "fail_closed for Tier-1"
   tier2: fail_open               # 01 §3 "fail_open for Tier-2 (availability over strictness)"; 07 beat 7

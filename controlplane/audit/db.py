@@ -36,7 +36,15 @@ SCHEMA_DDL: tuple[str, ...] = (
       verdict TEXT CHECK(verdict IN ('pass','edit','block','escalate')),
       signals_json TEXT,            -- list[Signal] per 04 §1 (evidence fields only — no raw PII)
       actions_json TEXT,            -- transforms applied, spans, fallback used
-      model_requested TEXT, model_used TEXT, cascade_escalated INTEGER,
+      -- Tier binding + provenance (05 §3 as amended by ADR-018 and the tier-mapping ruling).
+      -- `tier_requested` is the tier the router picked PRE-dispatch; `model_used` is the
+      -- CONCRETE provider model id that answered, so a tier name never masquerades as a
+      -- model. `upstream_class` travels with the row because whether a number may be
+      -- published is a property of the data, not of whoever reads it later (AGENTS.md §7).
+      tier_requested TEXT CHECK(tier_requested IN ('small','frontier')),
+      model_used TEXT,
+      upstream_class TEXT CHECK(upstream_class IN ('dev','measured')),
+      cascade_escalated INTEGER,
       tokens_in INTEGER, tokens_out INTEGER, est_cost_usd REAL,
       latency_json TEXT,            -- per-detector ms + gateway_overhead_ms + upstream_ms
       sampled_deep INTEGER DEFAULT 0

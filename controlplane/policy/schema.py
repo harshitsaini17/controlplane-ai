@@ -3,6 +3,7 @@
 Implements the policy schema in 04 §3 and its validation rules verbatim:
 
   * action values ∈ {pass, edit, block, escalate}                    -> `Action`
+  * `borderline_action` ∈ the same set (ADR-017)                     -> `borderline_action`
   * only span-emitting labels may map to `edit`                      -> `_check_edit_eligibility`
   * `tau_low` < `tau_high`                                           -> `Thresholds`
   * `consistency: on` ⇒ `streaming: false` (ADR-014)                 -> `_check_consistency_streaming`
@@ -260,6 +261,26 @@ class Policy(_Section):
 
     actions: dict[str, Action]
     default_action: Action
+
+    #: Action for a signal whose score lands in the borderline band
+    #: [tau_low, tau_high) — ADR-017. Per-label and policy-configurable, which is
+    #: what dissolved the "cap/floor" contradiction in the original 04 §4.3 step 2:
+    #: a cap downgraded BLOCK->ESCALATE (breaking beat 4b) while a floor upgraded
+    #: EDIT->ESCALATE (breaking beat 4a). Naming the band's action per policy means
+    #: neither direction is hardcoded.
+    #:
+    #: Only reachable by `score_kind == "confidence"` signals (ADR-012); detection-kind
+    #: signals bypass the band entirely, so this never applies to them.
+    #:
+    #: NOT edit-eligibility-checked here, deliberately. The labels the band can reach
+    #: depend on the unresolved enriched-label survival rule
+    #: ([D4-enriched-label-survival-semantics]): confidence-kind emitters are
+    #: `fast_consistency` and `rag_grounding`, both `hallucination.*` and both
+    #: edit-eligible — but an enriched `privacy.person` rides on a `rag_grounding`
+    #: signal and is NOT edit-eligible. Whether `borderline_action: edit` can therefore
+    #: reach an untransformable label is exactly what that report asks. Adding a
+    #: validator now would bake in one reading.
+    borderline_action: Action
 
     fail_mode: FailModes
     messages: Messages

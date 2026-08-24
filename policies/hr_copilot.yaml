@@ -41,6 +41,12 @@ actions:
   conversation.cumulative_risk: escalate
 default_action: pass
 
+# ADR-017: action for a confidence-kind signal landing in [tau_low, tau_high).
+# `pass` matches UC-2's "relaxed grounding" profile and 01 §3's "low-confidence →
+# PASS with logged flag" — the signal is still audited, it just does not act. UC-2's
+# strictness is spent on personal data, not on epistemic confidence.
+borderline_action: pass
+
 fail_mode:                       # ADR-016
   tier1: fail_closed             # strict on personal data
   tier2: fail_open               # internal availability

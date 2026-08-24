@@ -116,6 +116,9 @@ actions:                         # label → action map; unlisted label → defa
   cost.loop_detected: block
   conversation.cumulative_risk: escalate
 default_action: pass
+borderline_action: escalate      # ADR-017; action for a confidence-kind signal whose
+                                 # score lands in [tau_low, tau_high). Per-label, and
+                                 # per-policy — see §4.3 step 2.
 
 fail_mode:                       # per detector class, when timeout/error (§5)
   tier1: fail_closed
@@ -135,7 +138,7 @@ blocklist_extra: []
 detector_params: {}              # optional per-detector overrides (e.g., toxicity cutoffs)
 ```
 
-Validation: pydantic schema (`policy/schema.py`). Rules: action values ∈ {pass, edit, block, escalate}; **only labels with a defined §6 transform may map to `edit`** — normatively `{pii.*, hallucination.*}`, derived from the §6 transform table as the single source and exported as `EDIT_ELIGIBLE_LABELS` (ADR-015); tau_low < tau_high; `consistency: on` ⇒ `streaming: false` (ADR-014); `cascade_probe` ∈ {on, off} (ADR-013); unknown keys rejected. Wildcards (`pii.*`) expand at load; a specific key (`pii.email: edit`) overrides its wildcard.
+Validation: pydantic schema (`policy/schema.py`). Rules: action values ∈ {pass, edit, block, escalate}; `borderline_action` ∈ the same set and is **required** (ADR-017 — no default, because a silent default would decide the borderline band's behaviour for a policy author who never considered it); **only labels with a defined §6 transform may map to `edit`** — normatively `{pii.*, hallucination.*}`, derived from the §6 transform table as the single source and exported as `EDIT_ELIGIBLE_LABELS` (ADR-015); tau_low < tau_high; `consistency: on` ⇒ `streaming: false` (ADR-014); `cascade_probe` ∈ {on, off} (ADR-013); unknown keys rejected. Wildcards (`pii.*`) expand at load; a specific key (`pii.email: edit`) overrides its wildcard.
 
 **YAML quoting (Q-09).** `consistency` and `cascade_probe` values **must be quoted** in policy files. PyYAML implements YAML 1.1, where the bare tokens `on`/`off`/`yes`/`no` resolve to *booleans* — so `cascade_probe: on` loads as `True` and fails validation. `streaming` is a genuine boolean and stays unquoted. The loader raises a targeted error for this case rather than a bare enum mismatch.
 

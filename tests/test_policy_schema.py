@@ -252,6 +252,163 @@ def test_beat_4b_block_survives_the_added_pii_span() -> None:
     assert hr.action_for("privacy.person") is Action.BLOCK
 
 
+def test_beat_4_per_label_mapped_actions_are_pinned(
+) -> None:
+    """ADR-017: beat 4 at *per-label* granularity, not just the aggregate.
+
+    Band adjustment is applied per label (ADR-017), so the aggregate assertion in
+    `test_beat_4_fixture_labels_resolve_to_three_distinct_actions` can hold while an
+    individual label's mapping silently drifts. This pins each one.
+
+    Scope limit: these are the **mapped** actions (04 §4.3 step 1) — before band
+    adjustment and before the step-4 span check. The post-band expectations for the
+    enriched `privacy.person` label are blocked on the open DEVIATION REPORT
+    [D4-enriched-label-survival-semantics] and are deliberately absent here rather
+    than guessed at.
+    """
+    expected: dict[str, dict[str, Action]] = {
+        "support_bot.yaml": {
+            "hallucination.ungrounded_claim": Action.EDIT,   # soften
+            # `pass`, and beat 4a depends on it — see the guard test below. The
+            # hallucination label carries the action on UC-1; the privacy label adds
+            # no severity here (multi-label convergence, FR-DET-005 — not indifference
+            # to persons).
+            "privacy.person": Action.PASS,
+            "pii.email": Action.EDIT,                        # redact (via `pii.*`)
+        },
+        "hr_copilot.yaml": {
+            "hallucination.ungrounded_claim": Action.PASS,   # relaxed grounding
+            "privacy.person": Action.BLOCK,                  # carries beat 4b
+            "pii.email": Action.BLOCK,
+        },
+        "finance_advisor.yaml": {
+            "hallucination.ungrounded_claim": Action.ESCALATE,
+            "privacy.person": Action.ESCALATE,
+            "pii.email": Action.ESCALATE,
+        },
+    }
+    for filename, per_label in expected.items():
+        policy = Policy(**load_raw(filename))
+        for label, action in per_label.items():
+            assert policy.action_for(label) is action, (
+                f"{filename}: {label} mapped to {policy.action_for(label)}, expected {action}"
+            )
+
+
+def test_beat_4a_breaks_if_support_bot_hardens_privacy_person(
+    valid_policy_dict: dict[str, Any],
+) -> None:
+    """Guard on a real trap: raising UC-1's `privacy.person` silently kills beat 4a.
+
+    `support_bot` maps `privacy.person: pass`, which looks lax in isolation and invites
+    a well-meaning "harden the privacy plane" edit. But beat 4a's verdict is the most
+    severe action across the fixture's labels (04 §4.3), so any value above PASS
+    dominates the EDIT that the signature beat needs — the demo would then show
+    ESCALATE / BLOCK / ESCALATE and the config-not-code thesis would lose its contrast.
+
+    UC-1 is not indifferent to persons: the same span still fires
+    `hallucination.ungrounded_claim` → EDIT (soften) and `pii.*` → EDIT (redact). The
+    privacy label adds no *additional* severity here, which is the multi-label
+    convergence rule doing its job (FR-DET-005), not a gap.
+    """
+    fixture_labels = ["hallucination.ungrounded_claim", "privacy.person", "pii.email"]
+    support_raw = load_raw("support_bot.yaml")
+
+    def most_severe(policy: Policy) -> Action:
+        return max(
+            (policy.action_for(label) for label in fixture_labels),
+            key=lambda a: a.severity,
+        )
+
+    assert most_severe(Policy(**support_raw)) is Action.EDIT  # beat 4a, as shipped
+
+    for hardened in (Action.ESCALATE, Action.BLOCK):
+        mutated = copy.deepcopy(support_raw)
+        mutated["actions"]["privacy.person"] = hardened.value
+        assert most_severe(Policy(**mutated)) is not Action.EDIT, (
+            f"privacy.person={hardened.value} left beat 4a's EDIT intact — the coupling "
+            "this test guards has moved; re-derive it before relaxing the test."
+        )
+
+
+# --------------------------------------------------------------------------
+# ADR-017 — borderline_action
+# --------------------------------------------------------------------------
+
+
+def test_adr_017_ruled_borderline_actions_per_use_case() -> None:
+    """The ADR-017 ruling named one value per UC; each matches that UC's 01 §3 posture.
+
+    These are a *ruling*, not a preference — changing one is a policy-version bump and
+    an ADR amendment, not an edit.
+    """
+    ruled = {
+        "support_bot.yaml": Action.EDIT,          # soften-first posture
+        "hr_copilot.yaml": Action.PASS,           # PASS-and-log posture
+        "finance_advisor.yaml": Action.ESCALATE,  # escalation-heavy
+    }
+    for filename, action in ruled.items():
+        assert Policy(**load_raw(filename)).borderline_action is action, filename
+
+
+def test_adr_017_borderline_action_spans_three_distinct_actions() -> None:
+    """The three UCs must not collapse to one value, or the band proves nothing.
+
+    If all three agreed, `borderline_action` would be a constant wearing a config
+    costume and the ADR-017 ruling would have bought nothing (FR-POL-002).
+    """
+    values = {Policy(**load_raw(name)).borderline_action for name in POLICY_FILES}
+    assert len(values) == 3
+
+
+def test_adr_017_borderline_action_rejects_unknown_value(
+    valid_policy_dict: dict[str, Any],
+) -> None:
+    valid_policy_dict["borderline_action"] = "soften"
+    with pytest.raises(ValidationError):
+        Policy(**valid_policy_dict)
+
+
+@pytest.mark.parametrize("action", [a.value for a in Action])
+def test_adr_017_borderline_action_accepts_every_action_member(
+    valid_policy_dict: dict[str, Any], action: str
+) -> None:
+    """04 §3: `borderline_action` ∈ {pass, edit, block, escalate} — the full set.
+
+    Notably including `block`, which no shipped policy uses: the band is where a
+    *confidence* signal lands, and a policy author may legitimately want a borderline
+    ungrounded claim blocked outright.
+    """
+    valid_policy_dict["borderline_action"] = action
+    assert Policy(**valid_policy_dict).borderline_action is Action(action)
+
+
+def test_adr_017_borderline_action_edit_is_not_eligibility_checked_yet() -> None:
+    """Characterization test for a deliberate gap — delete it when D4 is ruled.
+
+    `support_bot` sets `borderline_action: edit`, and the schema does **not** verify
+    that the labels which can reach the band have a 04 §6 transform. That check is
+    withheld on purpose: the two confidence-kind emitters differ, so the correct
+    validator depends on the unruled [D4-enriched-label-survival-semantics].
+
+      - `rag_grounding`  → `hallucination.ungrounded_claim`, stage=output_sentence
+        ⇒ whole-sentence soften applies; `edit` is executable.
+      - `fast_consistency` → `hallucination.low_confidence`, output_full and span-less
+        ⇒ no editable extent; 04 §4.3 step 4 promotes it to ESCALATE at every firing.
+
+    So `edit` here is executable for one emitter and inert for the other. Adding a
+    naive eligibility validator now would either reject a legitimate policy or bless
+    a silently-promoted one.
+    """
+    support = Policy(**load_raw("support_bot.yaml"))
+    assert support.borderline_action is Action.EDIT
+    # The label that makes it executable does have a transform...
+    assert "hallucination.ungrounded_claim" in EDIT_ELIGIBLE_LABELS
+    # ...and so does the span-less one, which is exactly why label-set eligibility
+    # alone cannot decide this (ADR-015: eligibility is necessary, not sufficient).
+    assert "hallucination.low_confidence" in EDIT_ELIGIBLE_LABELS
+
+
 def test_uc3_escalation_heavy_profile_holds_across_taxonomy() -> None:
     """01 §3 UC-3: escalation-heavy. Nothing in UC-3 may resolve to EDIT."""
     finance = Policy(**load_raw("finance_advisor.yaml"))
@@ -529,6 +686,7 @@ def test_rule_misspelled_key_is_rejected_not_defaulted(
         "budget",
         "actions",
         "default_action",
+        "borderline_action",
         "fail_mode",
         "messages",
         "escalation",

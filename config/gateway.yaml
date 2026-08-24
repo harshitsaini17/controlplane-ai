@@ -1,53 +1,116 @@
-# Upstream provider + price table. Schema per 05 §6.
+# Upstream providers + price table. Schema per 05 §6 as amended by ADR-018.
 #
-# Cost-plane consumers of this file: audit_records.tokens_in/out + est_cost_usd (05 §3),
-# cp_est_cost_usd_total (05 §5), and the 06 §5 cost simulation. Because those numbers are
-# judge-facing, every value here is either measured or explicitly stubbed — never guessed
-# (AGENTS.md §7).
+# ADR-018 splits providers into two CLASSES, and the class is a provenance claim:
 #
-# Verified against the running gateway on 2026-08-24: version 2.4.dev.13, 19 models,
-# POST /v1/messages and POST /v1/chat/completions live, wrong key -> 401.
+#   measured — token counts and prices are trustworthy. Eval and demo data from this
+#              class may carry judge-facing numbers (AGENTS.md §7).
+#   dev      — convenient for development, but its usage accounting is NOT a
+#              measurement. Data produced here is tainted and must never reach a
+#              report, the README, the proposal, or the video.
+#
+# `upstream_class` is stamped onto every audit record and fixture (05 §3/§4) so the
+# provenance travels with the data rather than living in someone's memory. eval/ and
+# demo/ refuse dev-class data unless run with --allow-dev, which taints output filenames.
 
-price_table_version: 0   # STUB(pending the price-source ruling; owner-decision-needed)
+price_table_version: 1
 
-provider:
-  name: kiro-local-gateway
+providers:
 
-  # Anthropic-family calls append their own /v1/messages, so the SDK base_url is the bare
-  # host. Verified: POST /v1/messages is the real path; POST /messages is a 404.
-  base_url: http://localhost:8000
+  # --------------------------------------------------------------------------
+  # DEV CLASS — local Kiro gateway.
+  # --------------------------------------------------------------------------
+  # Verified live 2026-08-25: version 2.4.dev.13, 19 models, POST /v1/messages and
+  # POST /v1/chat/completions both live, wrong key -> 401.
+  #
+  # Class is `dev` for a measured reason, not a preference: this gateway reports a
+  # near-constant ~5000-token input floor on the NON-STREAMING path. Same 6-word
+  # prompt, claude-haiku-4.5:
+  #     count_tokens              ->   14
+  #     streaming message_start   ->   75
+  #     non-streaming             -> 5074      (65x)
+  # A longer prompt returned 5084, so it is a fixed additive offset, not a percentage
+  # error. OpenAI-family shows the same (prompt_tokens 5070). It also bills nothing, so
+  # there is no price to record. Filed as [D2-nonstreaming-token-counts-inflated] and
+  # [D2-upstream-price-table-absent]; FR-GW-006's usage-sanity invariant is what now
+  # catches this class of drift automatically at boot.
+  - name: kiro-local
+    upstream_class: dev
+    base_url: http://localhost:8000        # SDKs append /v1/messages themselves
+    key_env: UPSTREAM_API_KEY              # 05 §6 normative name; value lives only in .env
+    price_per_1k_in: null                  # unmetered — no measured value exists
+    price_per_1k_out: null
+    tiers:
+      small: claude-haiku-4.5              # verified: end_turn, 13 output tokens
+      frontier: claude-sonnet-4.6          # verified: end_turn
 
-  # 05 §6 normative env name. Its VALUE is the gateway's PROXY_API_KEY, and it lives only
-  # in .env — never in this file, never logged (NFR-SEC-002).
-  key_env: UPSTREAM_API_KEY
+  # --------------------------------------------------------------------------
+  # MEASURED CLASS — Groq.
+  # --------------------------------------------------------------------------
+  # Model ids verified against Groq's own model documentation on 2026-08-25; both are
+  # listed PRODUCTION (not preview — preview ids may be discontinued without notice,
+  # which would silently break the demo).
+  #
+  # PRICE PROVENANCE (read before quoting these): Groq's pricing page returned HTTP 404,
+  # so these are not first-party-verified in full.
+  #   llama-3.3-70b-versatile  $0.59 in / $0.79 out per 1M — stated by a groq.com blog
+  #                            post (first-party, but a 2024 post; re-verify before use)
+  #   llama-3.1-8b-instant     $0.05 in / $0.08 out per 1M — SECONDARY sources only
+  #                            (two independent trackers agree); NOT first-party
+  # A price that has not been re-verified against Groq's live pricing page is a
+  # `price_table_version` bump away from being wrong, and 06 §6 prints absolute dollars.
+  # Re-verify before any cost number is published. See STUB below.
+  - name: groq
+    upstream_class: measured
+    base_url: https://api.groq.com/openai/v1
+    key_env: GROQ_API_KEY
+    price_per_1k_in: 0.00005               # llama-3.1-8b-instant, the small tier
+    price_per_1k_out: 0.00008
+    tiers:
+      small: llama-3.1-8b-instant
+      frontier: llama-3.3-70b-versatile
+    # STUB(per-tier pricing needs its own key: one price pair per provider cannot express
+    # a two-tier cascade whose whole point is that the tiers cost different amounts.
+    # 05 §6 as amended still nests price at the provider level, so the frontier tier's
+    # $0.00059/$0.00079 has nowhere to live. This makes the 06 §6 cascade-savings
+    # simulation unimplementable as specified; owner-decision-needed)
+    # See DEVIATION REPORT [D2-price-table-cannot-express-per-tier-cost].
 
-  # Auth header for this family: x-api-key: ${UPSTREAM_API_KEY} plus
-  # anthropic-version: 2023-06-01. Bearer also works. / and /health need no auth.
+  # --------------------------------------------------------------------------
+  # MEASURED CLASS — local Ollama. Zero marginal token cost (local compute).
+  # --------------------------------------------------------------------------
+  # STUB(no genuinely local model is installed. The Ollama daemon on :11434 serves
+  # exactly one model, `minimax-m2.7:cloud`, whose remote_host is
+  # https://ollama.com:443 — a CLOUD model reached through a local daemon. It fails the
+  # no-remote_host assertion, so it cannot serve as the local fallback and cannot be
+  # `measured` on a zero-price basis (its tokens are billed by someone).
+  # `ollama pull <a-real-local-model>` is what unblocks this; owner-decision-needed)
+  # Q-02's local fallback is REOPENED in 08 until a model passes that assertion.
+  - name: ollama-local
+    upstream_class: measured
+    base_url: http://localhost:11434/v1
+    key_env: null                          # local daemon needs no credential
+    price_per_1k_in: 0.0                   # local compute: no per-token charge
+    price_per_1k_out: 0.0
+    tiers:
+      small: null                          # STUB(no local model installed)
+      frontier: null                       # STUB(no local model installed)
 
-  # STUB(the local gateway publishes no per-token price and bills nothing, so there is no
-  # measured value to put here; owner-decision-needed)
-  # Blocks: est_cost_usd, cost_ledger, the 06 §5 cost simulation.
-  # See DEVIATION REPORT [D2-upstream-price-table-absent].
-  price_per_1k_in: null
-  price_per_1k_out: null
-
-# STUB(Q-02 named llama-3.2-3b via Ollama; the local Ollama daemon hosts only
-# minimax-m2.7:cloud, which is a REMOTE cloud model, so the documented local fallback does
-# not currently exist locally; owner-decision-needed)
-local_fallback:
-  model: null
+# Which provider serves traffic. Anything eval/ or demo/ touches must be `measured`
+# class unless --allow-dev is passed (which taints the output filename).
+active_provider: kiro-local                # dev class — fine for building, not for numbers
 
 # ---------------------------------------------------------------------------
-# Tier -> model binding is NOT yet expressible in this schema.
+# FR-GW-006 — startup canary + usage-sanity invariant.
 #
-# 05 §4 records model_requested / model_used as "small-tier" / "frontier", and ADR-009 +
-# ADR-013 route between them, but 05 §6 defines no key to bind a tier name to a concrete
-# model id. That is a doc gap, so rather than invent a key, the two verified candidates are
-# recorded here as a comment pending a 05 §6 amendment:
-#
-#   small-tier : claude-haiku-4.5    (verified: end_turn, 13 output tokens)
-#   frontier   : claude-sonnet-4.6   (verified: end_turn, matches the Q-02 ruling intent)
-#
-# Unknown model names are not rejected by the gateway — they pass through to Kiro, which is
-# the final arbiter. So a typo here fails at Kiro, not at config load.
+# At boot the gateway fires one canary request at `active_provider` and compares
+# count_tokens against the reported prompt token count. delta > 25 tokens means the
+# provider's accounting cannot be trusted:
+#   measured class -> FAIL BOOT (refuse to start; a measured-class provider that
+#                     miscounts would silently corrupt every judge-facing number)
+#   dev class      -> WARN LOUDLY and continue (expected here; that is what `dev` means)
+# Any fallback engagement increments cp_fallback_engaged_total and logs at WARNING —
+# never silently. A silent fallback during the demo would look like success.
 # ---------------------------------------------------------------------------
+usage_sanity:
+  canary_on_startup: true
+  max_token_delta: 25

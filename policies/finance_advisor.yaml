@@ -38,6 +38,12 @@ actions:                         # label -> action map; unlisted label -> defaul
   conversation.cumulative_risk: escalate
 default_action: pass
 
+# ADR-017: action for a confidence-kind signal landing in [tau_low, tau_high).
+# `escalate` matches UC-3's escalation-heavy profile (01 §3) and is what makes demo
+# beat 4b work: the 05 §4 reference score of 0.41 sits inside the band at the ADR-016
+# seed thresholds, so the borderline case is precisely the one a human must see.
+borderline_action: escalate
+
 fail_mode:                       # per detector class, when timeout/error (04 §5)
   tier1: fail_closed
   tier2: fail_closed
