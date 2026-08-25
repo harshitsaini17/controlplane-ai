@@ -51,7 +51,9 @@ CREATE TABLE audit_records (
   conversation_id TEXT NULL, stage_summary TEXT,          -- input|streamed|completed
   verdict TEXT CHECK(verdict IN ('pass','edit','block','escalate')),
   signals_json TEXT,            -- list[Signal] per 04 §1 (evidence fields only — no raw PII)
-  actions_json TEXT,            -- transforms applied, spans, fallback used
+  actions_json TEXT,            -- transforms applied, spans, fallback used. Input-stage
+                                -- redaction (ADR-020) records its stage, spans and
+                                -- categories here — never the values (NFR-SEC-001)
   tier_requested TEXT CHECK(tier_requested IN ('small','frontier')),  -- tier picked pre-dispatch
   model_used TEXT,              -- CONCRETE provider model id that answered (not a tier name)
   upstream_class TEXT CHECK(upstream_class IN ('dev','measured')),    -- ADR-018 provenance
@@ -80,6 +82,12 @@ CREATE TABLE cost_ledger (
 ```
 Rule: nothing outside `review_items.quarantined_text` ever stores model output verbatim, and that column is written **post-masking** of Tier-1 PII spans (NFR-SEC-001).
 
+**Input EDIT leaves an audit trail, not a rewritten history (ADR-020).** Pre-dispatch
+redaction mutates the prompt actually sent upstream, so the record must distinguish the
+prompt *as received* from the prompt *as sent*. Neither is stored verbatim: `actions_json`
+carries the stage, the spans and the categories only, which is enough to prove what was
+removed without storing what it was.
+
 ## 4. Audit record — canonical JSON view
 
 The proposal/README show this shape (assembled from `audit_records`):
@@ -89,7 +97,9 @@ The proposal/README show this shape (assembled from `audit_records`):
   "verdict": "escalate",
   "signals": [{"detector":"fast_consistency","labels":["hallucination.low_confidence"],
                "score":0.41,"stage":"output_full","latency_ms":38.2}],
-  "actions": {"quarantined": true, "review_id":"…"},
+  "actions": {"quarantined": true, "review_id":"…",
+              "input_redactions": [{"stage":"input","category":"pii.ssn",
+                                    "span":{"start":42,"end":53}}]},
   "model": {"tier_requested":"small","used":"llama-3.3-70b-versatile",
             "upstream_class":"measured","cascade_escalated":true},
   "cost": {"tokens_in":812,"tokens_out":344,"est_usd":0.0041},
@@ -115,6 +125,7 @@ cp_est_cost_usd_total{use_case,model}     cp_cascade_escalations_total{use_case}
 cp_review_items_total{use_case,status}    cp_deep_audit_entropy{use_case}    (gauge)
 cp_consistency_lagged_total{use_case}     cp_probe_rejections_total{use_case}
 cp_fallback_engaged_total{from_provider,to_provider,reason}      # FR-GW-006
+cp_pricing_missing_total{provider,model}                        # ADR-022
 ```
 The definition of `cp_gateway_overhead_ms` / `latency_json.gateway_overhead_ms` is **normative in 06 §4** — implementations and dashboards must use that formula, not an ad-hoc one.
 
@@ -136,8 +147,11 @@ providers:
     upstream_class: dev | measured    # ADR-018 — a provenance claim, see below
     base_url: <url>
     key_env: <ENV_NAME> | null   # env var NAME only; the value lives in .env
-    price_per_1k_in: <float> | null    # null = unmetered / no measured price exists
-    price_per_1k_out: <float> | null
+    pricing:                     # ADR-022 — keyed by CONCRETE model id, or `unmetered`
+      source_url: <url>          # where these figures came from
+      retrieved: <YYYY-MM-DD>    # when — a stale price is a wrong price
+      models:
+        <model_id>: {per_1k_in: <float>, per_1k_out: <float>}
     tiers:                       # tier name → CONCRETE provider model id
       small: <model_id> | null
       frontier: <model_id> | null
@@ -160,5 +174,33 @@ which taints output filenames.
 binds each to a concrete model id, which is why `audit_records` records `tier_requested`
 (the pre-dispatch routing decision) *and* `model_used` (the concrete id that answered)
 rather than conflating them under one "model" column.
+
+**Pricing is keyed by model id, and is never estimated (ADR-022).** One price pair per
+provider could not express a two-tier cascade whose whole premise is that the tiers cost
+~12× differently, so `pricing.models` is keyed by the same concrete ids `tiers` binds and
+`audit_records.model_used` records — no new join, and re-pointing a tier keeps costs correct.
+`est_cost_usd` resolves through `model_used` and is **never averaged across tiers**: an
+average would erase the exact effect the cost plane exists to measure. Three behaviours keep
+a gap loud rather than silent:
+
+| situation | behaviour |
+|---|---|
+| model missing from `pricing.models` at runtime | `est_cost_usd` = **null** (not 0.0, not a guess) + `cp_pricing_missing_total` |
+| provider declares `pricing: null`, `measured` class | boot **warning** naming the provider |
+| model missing at boot **and** named in `tiers`, `measured` class | **hard boot failure** — it is on a routing path, so it will answer requests and produce unpriceable audit records |
+
+Both boot rows are **measured-class only**, and that scope is load-bearing rather than an
+omission. A `dev`-class provider exists under ADR-018 precisely to be usable *while*
+unpriceable — its numbers are barred from every judge-facing artifact anyway — so applying
+the fatal row to it would refuse to boot the documented development path in order to
+protect a report that path can never produce. The shipped `kiro-local` is exactly that
+case: `pricing: null` with both tiers bound.
+
+`pricing: unmetered` (the literal scalar, in place of the block) stays valid and is an
+**affirmative claim** that no per-token charge exists — local compute. It yields
+`est_cost_usd: 0.0`, which is a *measurement*. That is deliberately distinct from a missing
+entry, which yields `null` because the cost is **unknown**: zero and unknown are different
+facts and the schema keeps them apart. `price_table_version` is retained as a coarse
+bump-on-change marker, but per-provider `retrieved` is the finer and more honest provenance.
 
 Env vars: `UPSTREAM_API_KEY`, `GROQ_API_KEY`, `REVIEW_WEBHOOK_URL` (optional), `CP_DB_PATH`. Never printed, never committed (NFR-SEC-002).

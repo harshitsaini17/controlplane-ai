@@ -21,7 +21,8 @@ python -m eval.cost_simulation  # cascade savings simulation (ADR-009 framing)
 
 ## 2. Labeled dataset (`eval/dataset/*.jsonl`)
 
-Case format:
+### 2.1 Case format
+
 ```json
 {"case_id":"PII-012","kind":"output","use_case":"support_bot",
  "text":"…","context":null,
@@ -30,18 +31,82 @@ Case format:
  "notes":"email embedded mid-sentence"}
 ```
 
-Composition (~265 cases, v1):
+`kind` ∈ {`input`, `output`, `conversation`} (Q-11). A `conversation` case encodes its turns
+as `"user: …\nassistant: …"` lines inside `text` — the format gains no `turns` field.
 
-| File | Cases | Contents |
+### 2.2 Ground truth is causal, not literal (ADR-023)
+
+For a **detection-kind** label (04 §1.2) the expected action is a lookup, so it is recorded
+literally and that is exact. For a **confidence-kind** label — `hallucination.low_confidence`
+from `fast_consistency`, `hallucination.ungrounded_claim` from `rag_grounding` — it is not:
+the action depends on where the score falls against `tau_low`/`tau_high`, and §3 calibration is
+explicitly allowed to move both. A literal string would silently freeze the *seed* thresholds
+into ground truth, and a calibration run would leave those cases asserting outcomes the policy
+no longer produces, with nothing to notice the drift.
+
+Confidence-driven cases therefore carry two additional fields:
+
+| Field | Values | Meaning |
 |---|---|---|
-| `clean.jsonl` | 80 | benign inputs/outputs across all three use cases (FP pressure) |
-| `pii.jsonl` | 45 | SSN(8), CC(8), email(10), phone(9), API keys(5), multi-PII(5) — varied placement, obfuscation-lite (spaces/dashes) |
-| `injection.jsonl` | 20 | direct + indirect prompt injection attempts (input stage) |
-| `toxicity.jsonl` | 20 | high(8) / moderate(7) / borderline-clean(5) |
-| `halluc.jsonl` | 60 | context+response pairs: grounded(20), ungrounded(25), unsourced-numeric(15) |
-| `overlap.jsonl` | 10 | **OVLP-01…10**: fabricated details about identifiable people → expect multi-label `hallucination.* + privacy.person` (SC-1) |
-| `borderline.jsonl` | 20 | designed to land in [τ_low, τ_high) → expect ESCALATE on UC-3 |
-| `conversation.jsonl` | 10 | multi-turn sequences for cumulative-risk (SC-4) |
+| `grounded` | `yes` \| `no` \| `borderline` | band the confidence score should land in: `yes` ≥ `tau_high` (nothing fires) · `borderline` inside `[tau_low, tau_high)` · `no` < `tau_low` |
+| `person_present` | `true` \| `false` | whether `entity_enricher` should append `privacy.person` — outcome-relevant under ADR-019 |
+
+`grounded` is named for the dominant case; on a span-less `fast_consistency` case with no
+context it denotes self-consistency confidence rather than context grounding.
+
+`action_expected` is **retained**, and redefined as *the action expected at the v1 seeded
+thresholds*. The harness **verifies** it against its own derivation from (ground truth + the
+loaded policy + ADR-019's enriched-label branches + ADR-015's span-less rule). A mismatch is a
+dataset error today and a **calibration-drift alarm** later — which is exactly the tripwire
+F6 asked for, obtained for free. Detection-kind cases keep literal expectations only; adding a
+band field there would imply a band that never applies to them (ADR-012).
+
+**Multi-turn labelling is per breach unit (ADR-021), not the union of turns** — the breaching
+turn's own labels plus the conversation-stage signal. Earlier turns' PII is already scored by
+its own `pii.jsonl` cases; unioning would inflate per-detector recall denominators without
+changing any verdict. A reviewer reading PII recall needs this convention to read the
+denominator correctly.
+
+### 2.3 Composition (v1)
+
+Positives and negative controls are enumerated **separately**. Conflating them is what let a
+non-firing control silently consume a positive slot in the v1 draft (review findings F4/F5): a
+file can hit its target size while under-covering the thing it exists to measure. Negative
+controls are not filler — a detector whose false-positive behaviour is untested cannot be
+reported honestly — so they are counted, not hidden.
+
+| File | Positives | Negative controls | Design intent |
+|---|---|---|---|
+| `clean.jsonl` | 0 | 80 | benign inputs/outputs across all three use cases; ~half are near-miss FP pressure (digit strings, violent technical verbs, sensitive-but-correct HR vocabulary) |
+| `pii.jsonl` | 51 | 2 | output-stage: SSN · CC · email · phone · API key · multi-PII, varied placement, obfuscation-lite (spaces/dashes). Plus **input-stage** cases across categories (ADR-020: UC-1 redacts pre-dispatch, UC-2 blocks, UC-3 escalates) |
+| `injection.jsonl` | 20 | 0 | direct + indirect prompt injection (input stage) |
+| `toxicity.jsonl` | 15 | 5 | high / moderate / borderline-clean |
+| `halluc.jsonl` | 41 | 21 | context+response pairs: ungrounded, unsourced-numeric. Subjects are organizations, products and policies — **never people** (a PERSON entity would invoke `entity_enricher` and belongs in `overlap.jsonl`) |
+| `overlap.jsonl` | 15 | 0 | **OVLP-01…10** below `tau_low` (SC-1, multi-label `hallucination.* + privacy.person`); **OVLP-11…15** in-band, exercising ADR-019's unadjusted-enriched-label branch |
+| `borderline.jsonl` | 20 | 0 | designed to land in `[tau_low, tau_high)` |
+| `conversation.jsonl` | 7 | 3 | multi-turn cumulative-risk sequences (SC-4) |
+
+**Totals are derived from the files by `eval/validate_dataset.py`, never asserted here.** An
+asserted total is a number that can rot; a derived one cannot. The generated report states the
+count it actually loaded.
+
+All data synthetic (charter NG3), and safe by *construction* rather than by inspection:
+never-assigned SSN prefixes, Luhn-valid test BINs, the reserved `555-01xx` phone block, RFC
+2606 domains, published documentation literals for API keys.
+
+### 2.4 Freeze gate
+
+`python -m eval.validate_dataset` is the freeze gate. It checks the §2.1 format, the 04 §1.1
+closed taxonomy, `action_expected` key sets, and the ADR-023 derivation above. **It validates
+consistency, not label correctness** — that is what the second-teammate review in §1 is for,
+and its open items live in `eval/dataset/REVIEW_NEEDED.md` until ruled.
+
+**Band membership is a hypothesis until measured (F6).** `borderline.jsonl`'s placement rests
+on a semantic proxy — a claim whose core fact is supported but whose elaboration is not — since
+no detector existed when the cases were authored and the τ values are `# SEED(pre-calibration)`.
+Membership is **empirically re-verified after calibration, before any band-dependent number is
+published.** Until then the file's *purpose* is unproven even where its expected actions are
+robust.
 
 ## 3. Metrics computed
 

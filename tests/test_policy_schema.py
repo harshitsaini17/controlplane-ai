@@ -211,10 +211,9 @@ def test_beat_4_fixture_labels_resolve_to_three_distinct_actions() -> None:
     (ADR-015). Per 04 §4.3 the verdict is the most severe mapped action across the
     fixture's labels, so this asserts EDIT / BLOCK / ESCALATE without needing the engine.
 
-    NOTE: this is necessary but not sufficient for the beat. Band adjustment
-    (04 §4.3 step 2) can still move UC-1's EDIT once the engine exists — see the open
-    DEVIATION REPORT [D1-band-logic-vs-beat-4b]. Extend this test to full verdicts
-    when the engine lands.
+    Scope: **mapped** actions only (04 §4.3 step 1). Band adjustment can still move
+    these, which ADR-017 ruled and ADR-019 completed — that derivation is asserted in
+    `test_adr_019_beat_4_survives_band_adjustment_in_band` below.
     """
     fixture_labels = ["hallucination.ungrounded_claim", "privacy.person", "pii.email"]
 
@@ -261,10 +260,8 @@ def test_beat_4_per_label_mapped_actions_are_pinned(
     individual label's mapping silently drifts. This pins each one.
 
     Scope limit: these are the **mapped** actions (04 §4.3 step 1) — before band
-    adjustment and before the step-4 span check. The post-band expectations for the
-    enriched `privacy.person` label are blocked on the open DEVIATION REPORT
-    [D4-enriched-label-survival-semantics] and are deliberately absent here rather
-    than guessed at.
+    adjustment and before the step-4 span check. The post-band expectations, which
+    ADR-019 unblocked, are asserted separately below.
     """
     expected: dict[str, dict[str, Action]] = {
         "support_bot.yaml": {
@@ -293,6 +290,150 @@ def test_beat_4_per_label_mapped_actions_are_pinned(
             assert policy.action_for(label) is action, (
                 f"{filename}: {label} mapped to {policy.action_for(label)}, expected {action}"
             )
+
+
+# --------------------------------------------------------------------------
+# ADR-019 — beat 4 after band adjustment (04 §4.3 step 2)
+# --------------------------------------------------------------------------
+
+#: The beat-4 / OVLP signal: one `rag_grounding` signal whose host label is the
+#: hallucination and whose `privacy.person` was appended by the enricher (04 §2.2).
+#: Score 0.41 sits inside `[0.35, 0.70)` on all three shipped policies, so this is
+#: precisely the in-band case ADR-019 governs.
+BEAT_4_HOST_LABEL = "hallucination.ungrounded_claim"
+BEAT_4_ENRICHED_LABEL = "privacy.person"
+BEAT_4_SCORE = 0.41
+
+
+def _post_band_action(policy: Policy, label: str, *, enriched: bool, score: float) -> Action | None:
+    """04 §4.3 step 2 for one confidence-kind label. `None` = dropped, not firing.
+
+    Derived from the doc rather than imported: `policy/engine.py` is still a stub, and a
+    test that called the implementation would only prove it agrees with itself.
+    """
+    mapped = policy.action_for(label)
+    tau_low, tau_high = policy.thresholds.tau_low, policy.thresholds.tau_high
+    if enriched:
+        # Exactly two branches, and no third (ADR-019).
+        return None if score >= tau_high else mapped
+    if score >= tau_high:
+        return None
+    if score >= tau_low:
+        return policy.borderline_action
+    return mapped
+
+
+def test_adr_019_beat_4_survives_band_adjustment_in_band() -> None:
+    """★ The signature beat, asserted *post*-band — what the mapped-action test cannot.
+
+    The aggregate mapped-action test above holds even under a wrong band rule, because
+    beat 4's fixture also carries a `pii.email` span that maps to BLOCK on UC-2. This
+    test therefore checks the labels the band actually touches, in isolation from that
+    over-determining span — which is how OVLP-11..15 (in-band, person-bearing, no PII
+    span) will reach the engine.
+    """
+    expected: dict[str, tuple[Action, Action]] = {
+        # filename: (host hallucination label, enriched privacy.person)
+        "support_bot.yaml": (Action.EDIT, Action.PASS),        # borderline_action: edit
+        "hr_copilot.yaml": (Action.PASS, Action.BLOCK),        # ★ pass host, BLOCK person
+        "finance_advisor.yaml": (Action.ESCALATE, Action.ESCALATE),
+    }
+    for filename, (host_action, enriched_action) in expected.items():
+        policy = Policy(**load_raw(filename))
+        assert (
+            _post_band_action(
+                policy, BEAT_4_HOST_LABEL, enriched=False, score=BEAT_4_SCORE
+            )
+            is host_action
+        ), f"{filename}: host label post-band"
+        assert (
+            _post_band_action(
+                policy, BEAT_4_ENRICHED_LABEL, enriched=True, score=BEAT_4_SCORE
+            )
+            is enriched_action
+        ), f"{filename}: enriched label post-band"
+
+
+def test_adr_019_verdicts_stay_distinct_after_band_adjustment() -> None:
+    """The thesis — same signal, three verdicts, config alone — still holds post-band."""
+    verdicts = {}
+    for filename in POLICY_FILES:
+        policy = Policy(**load_raw(filename))
+        surviving = [
+            action
+            for label, enriched in (
+                (BEAT_4_HOST_LABEL, False),
+                (BEAT_4_ENRICHED_LABEL, True),
+            )
+            if (
+                action := _post_band_action(
+                    policy, label, enriched=enriched, score=BEAT_4_SCORE
+                )
+            )
+            is not None
+        ]
+        assert surviving, f"{filename}: every label dropped, so no signal survives"
+        verdicts[filename] = max(surviving, key=lambda a: a.severity)
+    assert verdicts["support_bot.yaml"] is Action.EDIT
+    assert verdicts["hr_copilot.yaml"] is Action.BLOCK
+    assert verdicts["finance_advisor.yaml"] is Action.ESCALATE
+
+
+def test_adr_019_rejected_follows_host_reading_would_break_beat_4b() -> None:
+    """The counterfactual ADR-019 was decided on — pinned so it cannot be re-adopted.
+
+    Under the rejected reading (a), an enriched label follows its host through the band
+    and so takes `borderline_action`. On `hr_copilot` that is `pass`, which turns a
+    borderline-grounded fabrication about a *named employee* into a PASS — on the one use
+    case whose strictness is spent precisely on personal data. A grounding confidence of
+    0.5 says "this claim is half-supported"; it does not say "this person is
+    half-identifiable".
+    """
+    hr = Policy(**load_raw("hr_copilot.yaml"))
+    follows_host = _post_band_action(
+        hr, BEAT_4_ENRICHED_LABEL, enriched=False, score=BEAT_4_SCORE
+    )
+    assert follows_host is Action.PASS          # what the rejected reading produces
+    assert hr.borderline_action is Action.PASS  # ...and where it comes from
+    ruled = _post_band_action(
+        hr, BEAT_4_ENRICHED_LABEL, enriched=True, score=BEAT_4_SCORE
+    )
+    assert ruled is Action.BLOCK                # ADR-019 keeps beat 4b intact
+
+
+def test_adr_019_enriched_label_is_dropped_with_its_host_above_tau_high() -> None:
+    """The other of the two branches: at `score >= tau_high` nothing fires at all.
+
+    Both partitions drop together, so a well-grounded sentence that merely *names* a
+    person does not fire `privacy.person` — the rejected reading (b) would have.
+    """
+    for filename in POLICY_FILES:
+        policy = Policy(**load_raw(filename))
+        above = policy.thresholds.tau_high + 0.05
+        assert (
+            _post_band_action(policy, BEAT_4_HOST_LABEL, enriched=False, score=above)
+            is None
+        )
+        assert (
+            _post_band_action(policy, BEAT_4_ENRICHED_LABEL, enriched=True, score=above)
+            is None
+        )
+
+
+def test_adr_019_below_tau_low_both_partitions_take_mapped_actions() -> None:
+    """OVLP-01..10's band: the enriched label is mapped-unadjusted either way, so the
+    two branches coincide here — which is why the in-band cases (OVLP-11..15) are the
+    ones that actually discriminate between the readings."""
+    hr = Policy(**load_raw("hr_copilot.yaml"))
+    below = hr.thresholds.tau_low - 0.05
+    assert (
+        _post_band_action(hr, BEAT_4_HOST_LABEL, enriched=False, score=below)
+        is Action.PASS  # hr_copilot maps hallucination.* to pass (relaxed grounding)
+    )
+    assert (
+        _post_band_action(hr, BEAT_4_ENRICHED_LABEL, enriched=True, score=below)
+        is Action.BLOCK
+    )
 
 
 def test_beat_4a_breaks_if_support_bot_hardens_privacy_person(
@@ -383,13 +524,14 @@ def test_adr_017_borderline_action_accepts_every_action_member(
     assert Policy(**valid_policy_dict).borderline_action is Action(action)
 
 
-def test_adr_017_borderline_action_edit_is_not_eligibility_checked_yet() -> None:
-    """Characterization test for a deliberate gap — delete it when D4 is ruled.
+def test_adr_017_borderline_action_edit_is_not_eligibility_checked_here() -> None:
+    """Why no eligibility validator sits on `borderline_action`, post-ADR-019.
 
-    `support_bot` sets `borderline_action: edit`, and the schema does **not** verify
-    that the labels which can reach the band have a 04 §6 transform. That check is
-    withheld on purpose: the two confidence-kind emitters differ, so the correct
-    validator depends on the unruled [D4-enriched-label-survival-semantics].
+    ADR-019 settled the enriched-label half of the original reason: only HOST labels
+    reach `borderline_action`, so an enriched `privacy.person` can never arrive here and
+    a label-set validator would now pass trivially. What survives is ADR-015 — the two
+    confidence-kind emitters host edit-eligible labels but differ in whether an edit is
+    *executable*:
 
       - `rag_grounding`  → `hallucination.ungrounded_claim`, stage=output_sentence
         ⇒ whole-sentence soften applies; `edit` is executable.

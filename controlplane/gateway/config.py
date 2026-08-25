@@ -16,9 +16,11 @@ call and belongs with the gateway app.
 
 from __future__ import annotations
 
+import datetime
 import enum
+import warnings
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -26,7 +28,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 __all__ = [
     "CONFIG_PATH",
     "TAINT_MARKER",
+    "UNMETERED",
     "GatewayConfig",
+    "ModelPrice",
+    "PriceTable",
+    "PricingWarning",
     "Provider",
     "TaintedDataError",
     "Tiers",
@@ -43,6 +49,20 @@ CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "gateway.yaml"
 #: Inserted into any filename produced from dev-class data. Deliberately shouty: the
 #: point is that a tainted report cannot be mistaken for a measurement at a glance.
 TAINT_MARKER = "DEV-TAINTED"
+
+#: The literal scalar that may stand in place of a `pricing` block (ADR-022). It is an
+#: *affirmative* claim that no per-token charge exists — local compute — and it yields
+#: `est_cost_usd == 0.0`, a measurement. `pricing: null` is the different claim that no
+#: price information exists, and yields `None`. Zero and unknown are not the same fact.
+UNMETERED = "unmetered"
+
+
+class PricingWarning(UserWarning):
+    """A measured-class provider carries no price information at all (ADR-022).
+
+    Legal — a provider can be declared before its prices are known — but it is warned by
+    name at boot rather than discovered later in a report full of nulls.
+    """
 
 
 class UpstreamClass(str, enum.Enum):
@@ -76,6 +96,37 @@ class Tiers(BaseModel):
         return getattr(self, tier, None)
 
 
+class ModelPrice(BaseModel):
+    """USD per 1K tokens for one concrete model id.
+
+    Split in/out because output tokens cost several times input tokens at every provider
+    we price, and a single blended rate would misreport any workload whose ratio differs
+    from whatever mix the blend assumed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    per_1k_in: float = Field(ge=0.0)
+    per_1k_out: float = Field(ge=0.0)
+
+
+class PriceTable(BaseModel):
+    """Per-model prices plus their provenance (ADR-022, 05 §6.1).
+
+    `source_url` and `retrieved` are required, not decorative. A price is a claim about
+    the world that expires; an unattributed one cannot be re-checked, and a stale price
+    is a wrong price. `source_url` must name a page that actually contains the figures —
+    pointing at a canonical-but-empty pricing URL is worse than leaving it blank, because
+    it manufactures confidence.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_url: str = Field(min_length=1)
+    retrieved: datetime.date
+    models: dict[str, ModelPrice] = Field(min_length=1)
+
+
 class Provider(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -85,27 +136,71 @@ class Provider(BaseModel):
     #: Env var *NAME* only — the value lives in `.env` and is never read into config
     #: (NFR-SEC-002). `None` for providers needing no credential.
     key_env: str | None = None
-    price_per_1k_in: float | None = Field(default=None, ge=0.0)
-    price_per_1k_out: float | None = Field(default=None, ge=0.0)
+    #: One of the three ADR-022 states: a `PriceTable`, the literal `"unmetered"`, or
+    #: `None`. The union is deliberately not collapsed to a nullable table — see
+    #: `UNMETERED` for why the two non-table states mean different things.
+    pricing: PriceTable | Literal["unmetered"] | None = None
     tiers: Tiers = Field(default_factory=Tiers)
 
-    @property
-    def can_price(self) -> bool:
-        """Whether a cost figure may be computed from this provider at all.
+    def price_for(self, model_id: str) -> ModelPrice | None:
+        """Price for one concrete model id, or `None` when the price is UNKNOWN.
 
-        Not a validation rule, deliberately. 05 §6.1 documents `null` as "unmetered / no
-        measured price exists" without restricting it by class, and a local model with
-        trustworthy token accounting and no price list is exactly that case — so
-        requiring prices of every `measured` provider would reject a legitimate config
-        and, worse, advise reclassifying it as `dev` when its counts are fine.
+        `None` is returned for both `pricing: null` and a model absent from a declared
+        `pricing.models` table — in each case no price information exists for this model,
+        which is the state ADR-022 requires be propagated as null rather than guessed.
 
-        The guard belongs where the number is produced: a caller computing cost must
-        check this and refuse rather than let a null read as $0.00. That path does not
-        exist yet — the cost plane is blocked on
-        `[D2-price-table-cannot-express-per-tier-cost]`, which has to be ruled before
-        per-tier cost is expressible at all.
+        `pricing: unmetered` resolves to a genuine zero for every model, because that is
+        an affirmative claim about local compute rather than an absence. Callers must
+        keep the distinction: 0.0 is a measurement, `None` is not a number at all.
         """
-        return self.price_per_1k_in is not None and self.price_per_1k_out is not None
+        if self.pricing is None:
+            return None
+        if self.pricing == UNMETERED:
+            return ModelPrice(per_1k_in=0.0, per_1k_out=0.0)
+        return self.pricing.models.get(model_id)
+
+    def can_price(self, model_id: str) -> bool:
+        """Whether a cost figure may be computed for `model_id` at all.
+
+        Per-model, not per-provider: ADR-022 keys prices by concrete model id precisely
+        because one provider serves both cascade tiers at ~12x different rates, so
+        "can this provider price?" is not a well-formed question.
+
+        Not a validation rule at runtime, deliberately — the boot ladder in
+        `GatewayConfig` is where a missing price becomes loud. In the hot path the guard
+        belongs where the number is produced: a caller computing cost must check this and
+        record null rather than let an absence read as $0.00.
+        """
+        return self.price_for(model_id) is not None
+
+    def est_cost_usd(self, model_id: str, tokens_in: int, tokens_out: int) -> float | None:
+        """Cost for one request, or `None` when this model has no known price.
+
+        Never estimated and never averaged across tiers (ADR-022): an average would erase
+        the exact ~12x tier gap the cost plane exists to measure, and a fallback figure
+        would be a fabricated measurement. `None` is the honest return, and the caller
+        that receives it must write null into `est_cost_usd` and increment
+        `cp_pricing_missing_total` (05 §5).
+
+        STUB(the metric increment is the caller's, and `telemetry/metrics.py` is still a
+        docstring stub — so nothing counts these yet. This function is the arithmetic
+        only; wiring the counter belongs with the cost plane in phase 2.)
+        """
+        price = self.price_for(model_id)
+        if price is None:
+            return None
+        return (tokens_in / 1000.0) * price.per_1k_in + (
+            tokens_out / 1000.0
+        ) * price.per_1k_out
+
+    @property
+    def priced_tier_models(self) -> dict[str, str]:
+        """`{tier: model_id}` for tiers this provider actually binds."""
+        return {
+            tier: model
+            for tier in ("small", "frontier")
+            if (model := self.tiers.resolve(tier)) is not None
+        }
 
 
 class UsageSanity(BaseModel):
@@ -142,6 +237,7 @@ class GatewayConfig(BaseModel):
                 f"active_provider {self.active_provider!r} is not a declared provider "
                 f"(declared: {', '.join(names)})"
             )
+        self._check_price_coverage()
         active = next(p for p in self.providers if p.name == self.active_provider)
         if active.tiers.small is None and active.tiers.frontier is None:
             raise ValueError(
@@ -150,6 +246,53 @@ class GatewayConfig(BaseModel):
                 "`providers` with null tiers, but it cannot be the active one."
             )
         return self
+
+    def _check_price_coverage(self) -> None:
+        """ADR-022 boot ladder: warn on an unpriced provider, refuse an unpriced route.
+
+        **Scoped to measured-class providers, and that scope is load-bearing.** 05 §6.1
+        lists the hard-failure row as "missing at boot *and* named in `tiers`", refining
+        the warning row above it, which is measured-class. Read as class-agnostic instead,
+        it would refuse to boot the shipped dev-class `kiro-local` — whose whole purpose
+        under ADR-018 is to be usable *while* unpriceable, since its numbers are barred
+        from judge-facing artifacts anyway. Bricking the documented development path to
+        protect a report that can never be produced from it is the wrong trade, so
+        ADR-018's dev-class semantics win here.
+
+        For a measured-class provider the reasoning inverts: its data is allowed to carry
+        judge-facing numbers, so an unpriced model on a routing path *will* answer real
+        requests and mint audit records that can never be costed. That is a config bug
+        discoverable at boot, and 05 §6.1 makes it fatal rather than let it surface as a
+        column of nulls after the run.
+        """
+        for provider in self.providers:
+            if provider.upstream_class is not UpstreamClass.MEASURED:
+                continue
+            unpriced = {
+                tier: model
+                for tier, model in provider.priced_tier_models.items()
+                if not provider.can_price(model)
+            }
+            if unpriced:
+                detail = ", ".join(
+                    f"{tier}={model!r}" for tier, model in sorted(unpriced.items())
+                )
+                raise ValueError(
+                    f"measured-class provider {provider.name!r} binds {detail} to a "
+                    "model with no entry in `pricing.models`, so it sits on a routing "
+                    "path and would answer requests that can never be costed "
+                    "(ADR-022, 05 §6.1). Add the price, or bind the tier to a priced "
+                    "model."
+                )
+            if provider.pricing is None:
+                warnings.warn(
+                    f"measured-class provider {provider.name!r} declares "
+                    "`pricing: null`, so every cost figure from it will be null. Legal, "
+                    "but note `unmetered` is the different — and affirmative — claim "
+                    "that no per-token charge exists (ADR-022).",
+                    PricingWarning,
+                    stacklevel=2,
+                )
 
     @property
     def active(self) -> Provider:

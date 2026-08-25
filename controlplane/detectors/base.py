@@ -40,6 +40,8 @@ from controlplane.policy.schema import TAXONOMY
 
 __all__ = [
     "BUDGETS_MS",
+    "ENRICHED_LABELS_KEY",
+    "ENRICHED_ONLY_LABELS",
     "Detector",
     "DetectorError",
     "DetectorFailure",
@@ -54,6 +56,23 @@ __all__ = [
     "registered_names",
     "run_with_budget",
 ]
+
+
+#: `meta` key holding the labels the enrichment stage appended (04 §2.2, ADR-019).
+#: A literal rather than an inline string: 04 §4.3 step 2 partitions a signal's labels on
+#: exactly this key, so a typo on either side would silently produce an all-host partition
+#: — the failure mode ADR-019 exists to prevent.
+ENRICHED_LABELS_KEY = "enriched_labels"
+
+#: Labels that can ONLY reach a signal by enrichment (04 §1.1: "no detector emits it
+#: directly"; §2.2 names `entity_enricher` as the sole producer).
+#:
+#: This is what makes the first direction of the ADR-019 contract checkable at all. The
+#: general rule "record every appended label" is unverifiable from a finished signal —
+#: nothing distinguishes an appended label from a detector's own. For this set the
+#: provenance is known a priori, so its presence without a matching `enriched_labels`
+#: entry is a detectable contract violation rather than an unknowable one.
+ENRICHED_ONLY_LABELS: frozenset[str] = frozenset({"privacy.person"})
 
 
 # --------------------------------------------------------------------------
@@ -269,6 +288,83 @@ class Signal(BaseModel):
                 f"stage={self.stage.value!r} cannot carry a span: a conversation-level "
                 "signal describes accumulated state, not an extent in one checked text "
                 "(04 §1)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_enriched_labels_contract(self) -> "Signal":
+        """ADR-019 / 04 §2.2: `meta.enriched_labels` is a contract, not a note.
+
+        04 §4.3 step 2 partitions a signal's labels on this list — a host label is
+        band-adjusted, an appended one is never — so the list is not annotation, it
+        *selects the branch each label takes*. Both directions are rejected here:
+
+        * an **unrecorded append** would be band-adjusted as though the detector had
+          scored it, which is exactly the beat-4b failure ADR-019 rules out (a
+          borderline grounding score must not soften `privacy.person` into a pass);
+        * a **recorded label absent from `labels`** describes a signal that does not
+          exist, and would silently shrink the host partition.
+
+        The check lives in the model, not the engine: a malformed signal then cannot be
+        constructed at all, rather than surfacing only on whichever paths happen to run.
+        The engine may therefore trust the partition without re-validating it.
+        """
+        raw = self.meta.get(ENRICHED_LABELS_KEY)
+        if raw is None:
+            enriched: list[str] = []
+        elif isinstance(raw, list) and all(isinstance(item, str) for item in raw):
+            enriched = raw
+        else:
+            raise ValueError(
+                f"meta[{ENRICHED_LABELS_KEY!r}] must be a list of label strings, got "
+                f"{type(raw).__name__}: §4.3 step 2 partitions `labels` on this value, "
+                "so a malformed one would silently yield an all-host partition and "
+                "band-adjust an appended label (ADR-019)"
+            )
+
+        if len(set(enriched)) != len(enriched):
+            raise ValueError(
+                f"duplicate entries in meta[{ENRICHED_LABELS_KEY!r}]={enriched}: the "
+                "list is a set of appended labels, and a repeat signals a double append"
+            )
+
+        # Direction 2 — recorded but not present.
+        orphans = sorted(set(enriched) - set(self.labels))
+        if orphans:
+            raise ValueError(
+                f"meta[{ENRICHED_LABELS_KEY!r}] records {orphans} which are absent from "
+                f"labels={self.labels}: that describes a signal that does not exist, and "
+                "would shrink the host partition of 04 §4.3 step 2 (ADR-019)"
+            )
+
+        # Direction 1 — present but unrecorded, checkable only for enricher-only labels.
+        unrecorded = sorted((set(self.labels) & ENRICHED_ONLY_LABELS) - set(enriched))
+        if unrecorded:
+            raise ValueError(
+                f"labels {unrecorded} can only be appended by the enrichment stage "
+                f"(04 §2.2) but are missing from meta[{ENRICHED_LABELS_KEY!r}]: they "
+                "would be treated as host labels and band-adjusted, which is precisely "
+                "what ADR-019 forbids. The enricher must record every label it appends."
+            )
+
+        # A signal whose every label is enriched is an append with nothing to append to:
+        # §2.2 has the enricher add to the *same* signal, which keeps its own labels, and
+        # step 2 reads the score as the host's. Not a documented case — rejected so it
+        # cannot arrive as one.
+        if enriched and set(enriched) == set(self.labels):
+            raise ValueError(
+                f"every label in {self.labels} is marked enriched, leaving no host "
+                "label: enrichment appends to an existing signal (04 §2.2), and the "
+                "score 04 §4.3 step 2 reads belongs to that host"
+            )
+
+        # The enricher adds `responsibility` alongside `privacy.person` (04 §1.1/§2.2);
+        # without it the signal misreports which plane fired to metrics and the dashboard.
+        if "privacy.person" in enriched and Plane.RESPONSIBILITY not in self.planes:
+            raise ValueError(
+                "an enriched `privacy.person` must carry the `responsibility` plane: "
+                "04 §2.2 appends label and plane together, and omitting the plane "
+                f"misreports which plane fired (planes={[p.value for p in self.planes]})"
             )
         return self
 

@@ -18,6 +18,8 @@ from pydantic import ValidationError
 
 from controlplane.detectors.base import (
     BUDGETS_MS,
+    ENRICHED_LABELS_KEY,
+    ENRICHED_ONLY_LABELS,
     Detector,
     DetectorError,
     DetectorFailure,
@@ -103,7 +105,12 @@ def test_signal_ids_are_unique_per_signal() -> None:
 
 
 def test_fr_det_005_signal_is_multi_label_across_planes() -> None:
-    """FR-DET-005: one signal, several labels, several planes — the overlap case."""
+    """FR-DET-005: one signal, several labels, several planes — the overlap case.
+
+    This is the OVLP-01 shape, and post-ADR-019 it must declare `privacy.person` as
+    enriched: the label reaches a signal only by the §2.2 enrichment stage, and 04 §4.3
+    step 2 needs that provenance to know the label is *not* band-adjusted.
+    """
     signal = make_signal(
         detector="rag_grounding",
         labels=["hallucination.ungrounded_claim", "privacy.person"],
@@ -111,6 +118,7 @@ def test_fr_det_005_signal_is_multi_label_across_planes() -> None:
         score=0.41,
         score_kind=ScoreKind.CONFIDENCE,
         evidence="category:ungrounded claim; PERSON entity in span window",
+        meta={ENRICHED_LABELS_KEY: ["privacy.person"]},
     )
     assert len(signal.labels) == 2
     assert Plane.PERFORMANCE in signal.planes and Plane.RESPONSIBILITY in signal.planes
@@ -483,7 +491,118 @@ def test_taxonomy_is_shared_with_policy_schema_not_duplicated() -> None:
 
 
 def test_every_taxonomy_label_can_appear_on_a_signal() -> None:
-    """No label in 04 §1.1 is unreachable through the signal model."""
+    """No label in 04 §1.1 is unreachable through the signal model.
+
+    `ENRICHED_ONLY_LABELS` are reachable only as an append onto a host signal (04 §2.2
+    — no detector emits them directly), so they are built that way here. That is not an
+    exemption from the claim but the precise form the claim takes for them.
+    """
     for label in sorted(TAXONOMY):
+        if label in ENRICHED_ONLY_LABELS:
+            signal = make_signal(
+                labels=["hallucination.ungrounded_claim", label],
+                planes=[Plane.PERFORMANCE, Plane.RESPONSIBILITY],
+                score=0.41,
+                score_kind=ScoreKind.CONFIDENCE,
+                evidence=f"category:ungrounded claim; category:{label.split('.')[-1]}",
+                meta={ENRICHED_LABELS_KEY: [label]},
+            )
+            assert label in signal.labels
+            continue
         signal = make_signal(labels=[label], evidence=f"category:{label.split('.')[-1]}")
         assert signal.labels == [label]
+
+
+# --------------------------------------------------------------------------
+# ADR-019 — meta.enriched_labels as a construction-time contract (04 §2.2)
+# --------------------------------------------------------------------------
+
+
+def _enriched_signal(**overrides: object) -> Signal:
+    """The canonical enriched overlap signal: hallucination host + appended person."""
+    fields: dict[str, object] = {
+        "detector": "rag_grounding",
+        "labels": ["hallucination.ungrounded_claim", "privacy.person"],
+        "planes": [Plane.PERFORMANCE, Plane.RESPONSIBILITY],
+        "score": 0.41,
+        "score_kind": ScoreKind.CONFIDENCE,
+        "evidence": "category:ungrounded claim; PERSON entity in span window",
+        "meta": {ENRICHED_LABELS_KEY: ["privacy.person"]},
+    }
+    fields.update(overrides)
+    return make_signal(**fields)
+
+
+def test_adr_019_enriched_label_declares_its_provenance() -> None:
+    """The happy path: the partition 04 §4.3 step 2 computes is readable off the signal."""
+    signal = _enriched_signal()
+    enriched = set(signal.meta[ENRICHED_LABELS_KEY])
+    host = set(signal.labels) - enriched
+    assert enriched == {"privacy.person"}
+    assert host == {"hallucination.ungrounded_claim"}
+
+
+def test_adr_019_unrecorded_append_is_rejected() -> None:
+    """Direction 1 — and the reason the guard exists at all.
+
+    An unrecorded `privacy.person` would be partitioned as a HOST label and so
+    band-adjusted by the host's grounding score. On `hr_copilot` (`borderline_action:
+    pass`) that silently turns beat 4b's BLOCK into a PASS — a calibration change
+    breaking the demo's thesis with nothing to notice it.
+    """
+    with pytest.raises(ValidationError, match="missing from meta"):
+        _enriched_signal(meta={})
+
+
+def test_adr_019_unrecorded_append_rejected_even_with_the_key_present() -> None:
+    """A present-but-incomplete list is the likelier bug than a missing key."""
+    with pytest.raises(ValidationError, match="missing from meta"):
+        _enriched_signal(meta={ENRICHED_LABELS_KEY: []})
+
+
+def test_adr_019_recorded_label_absent_from_labels_is_rejected() -> None:
+    """Direction 2: it describes a signal that does not exist, and shrinks the host set."""
+    with pytest.raises(ValidationError, match="absent from labels"):
+        make_signal(
+            labels=["pii.ssn"],
+            meta={ENRICHED_LABELS_KEY: ["privacy.person"]},
+        )
+
+
+def test_adr_019_malformed_enriched_labels_value_is_rejected() -> None:
+    """A non-list would make the partition silently all-host — the exact failure mode."""
+    with pytest.raises(ValidationError, match="must be a list"):
+        _enriched_signal(meta={ENRICHED_LABELS_KEY: "privacy.person"})
+
+
+def test_adr_019_duplicate_enriched_entries_are_rejected() -> None:
+    with pytest.raises(ValidationError, match="duplicate entries"):
+        _enriched_signal(
+            meta={ENRICHED_LABELS_KEY: ["privacy.person", "privacy.person"]}
+        )
+
+
+def test_adr_019_all_enriched_leaves_no_host_label() -> None:
+    """Enrichment appends to an existing signal (§2.2); the step-2 score is the host's."""
+    with pytest.raises(ValidationError, match="no host label"):
+        make_signal(
+            labels=["privacy.person"],
+            meta={ENRICHED_LABELS_KEY: ["privacy.person"]},
+        )
+
+
+def test_adr_019_enriched_person_must_carry_the_responsibility_plane() -> None:
+    """§2.2 appends label and plane together; omitting the plane misreports the firing."""
+    with pytest.raises(ValidationError, match="responsibility"):
+        _enriched_signal(planes=[Plane.PERFORMANCE])
+
+
+def test_adr_019_ordinary_signal_needs_no_meta_key() -> None:
+    """The overwhelmingly common case stays boilerplate-free: no key means no appends."""
+    assert make_signal().meta == {}
+
+
+def test_adr_019_unrelated_meta_keys_are_untouched() -> None:
+    """`meta` is a free-form bag (04 §1); only the one reserved key is constrained."""
+    signal = make_signal(meta={"method": "embedding_cosine", "samples": 2})
+    assert signal.meta["method"] == "embedding_cosine"

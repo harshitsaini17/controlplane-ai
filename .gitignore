@@ -30,9 +30,13 @@ reports/*
 .cache/
 models/
 
-# Crash artefacts. The headless chromium used by the diagram renderer can dump an
-# 80M+ core into the output directory; it is not a deliverable.
-core.[0-9]*
+# Crash artefacts. The headless chromium used by the diagram renderer dumps a core
+# into the output directory (one was 342 MB); it is not a deliverable. A core dump can
+# also contain process memory — including env-loaded secrets — so it must never be
+# committed (NFR-SEC-002). Broadened from `core.[0-9]*` to cover `core`, `core.dmp` and
+# any other suffix; verified no tracked file matches `core.*` at the time of widening.
+core
+core.*
 
 # Local diagram render toolchain (node_modules for mermaid-cli).
 # Rendered images in docs/diagrams/images/ ARE committed — the proposal, README and

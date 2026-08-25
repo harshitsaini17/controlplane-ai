@@ -1,11 +1,23 @@
 # Dataset label review — open items before freeze
 
-**Status:** 265/265 cases authored per 06 §2 composition. **Not frozen.** Every item below is
-a label I could not derive from the docs alone, so it rests on my judgement and needs a
-second pair of eyes (06 §1: "labels are assigned at authoring time and reviewed by a second
-teammate; label disputes → 08-open-questions").
+**Status:** **280 cases** authored (was 265; the Checkpoint-1 dispositions grew the set by
+15 rather than relabelling it). **Not frozen.** Every item still marked open below is a label
+I could not derive from the docs alone, so it rests on my judgement and needs a second pair of
+eyes (06 §1: "labels are assigned at authoring time and reviewed by a second teammate; label
+disputes → 08-open-questions").
+
+`python -m eval.validate_dataset` — the freeze gate named in 06 §2.4 — **passes on all 280
+cases**, including its re-derivation of every expected action from ground truth plus the
+shipped policies (ADR-023). That is consistency, **not** label correctness: whether `HAL-047`
+really is an unsourced numeric is what this document is for.
 
 No eval metric has been computed. Nothing here is a measurement.
+
+**Six items below are now CLOSED by adjudication** (ADR-019 · ADR-020 · ADR-021 · ADR-023 and
+the Checkpoint-1 dispositions F1/F2/F3/F4/F5). They are kept rather than deleted, because the
+reasoning that made each one a genuine question is what shows the ruling was applied
+deliberately — and a reviewer re-reading this file needs to see which of their concerns were
+answered, not just find them gone.
 
 **How to use this:** items are grouped by what a wrong answer would cost. §1 changes the
 dataset's *shape* (cases missing, or scored against the wrong ground truth). §2 changes
@@ -32,15 +44,32 @@ score. That is the only thing available pre-calibration, but it means:
 - **Recommended:** after Step 3, re-measure and re-place these cases before any judged
   number cites them. Treat the current placement as a hypothesis.
 
+**STILL OPEN, and now written into the spec.** 06 §2.4 carries the rule this asked for: band
+membership is empirically re-verified after calibration, before any band-dependent number is
+published. `grounded: "borderline"` on all 20 cases (ADR-023) is what makes the re-verification
+mechanical — the gate re-derives each expectation from that field, so if calibration moves the
+scores out of band, the recorded expectations and the derivation part company and the gate
+fails. The hypothesis now has a tripwire instead of a note.
+
 The saving grace, verified numerically: for every UC, the mapped action for
 `hallucination.ungrounded_claim` and that UC's `borderline_action` **agree** (ADR-017 ruled
 them to match each UC's posture). So `action_expected` in this file is robust whether or not
 a case actually lands in-band. Only the *purpose* of the file depends on placement.
 
-### 1.2 Missing coverage: in-band × person is absent, pending `[D4-enriched-label-survival-semantics]`
+### 1.2 ✅ CLOSED by ADR-019 — in-band × person cases added (`OVLP-11`…`OVLP-15`)
 
-This is the one cell where the three readings of the open BLOCKER **diverge**, verified
-against the shipped policies:
+**Ruling: reading A.** An enriched label has exactly two branches and no third — dropped with
+its host at `score >= tau_high`, otherwise its **mapped** action, unadjusted. `borderline_action`
+never reaches it. The divergent `hr_copilot` cell below therefore resolves to **block**, and
+demo beat 4b is safe from calibration.
+
+**Applied:** five in-band person cases added — `grounded: "borderline"`, `person_present: true`,
+expectations verified by the gate's own derivation rather than asserted by me. The regression
+this section said the dataset could not detect is now detectable, and
+`test_adr_019_enriched_label_takes_its_mapped_action_in_band` pins the divergent cell so
+re-adopting reading B fails the suite rather than the demo.
+
+The original analysis, kept because it is what identified the divergent cell:
 
 | | reading A (person bypasses band) | reading B (person follows host) |
 |---|---|---|
@@ -54,15 +83,33 @@ I therefore authored **every** person-bearing case (all 10 `overlap.jsonl`, plus
 as unambiguously fabricated — flatly contradicted by context, i.e. below τ_low — where all
 three readings converge. Those labels are safe under any ruling.
 
-**Consequence the reviewer must accept or reject:** the dataset currently has **zero**
-in-band person cases, so it cannot detect a regression in the D4 behaviour once ruled. After
-the ruling, roughly 3–5 cases should be added to `overlap.jsonl` (or a new file) covering
-borderline-confidence claims about named people. I did not author them speculatively because
-their `action_expected` is exactly what the ruling decides.
+~~**Consequence the reviewer must accept or reject:** the dataset currently has zero in-band
+person cases…~~ — **resolved**: 5 cases added (the upper end of the 3–5 estimate). What is
+left for the reviewer is ordinary label judgement on those five, not a structural gap:
+each asserts that a *hedged* claim about a named person is still in-band rather than grounded,
+which is a semantic call like any other in §3.
 
-### 1.3 Missing coverage: input-stage PII, pending `[D4-input-stage-pii-edit-unresolvable]`
+### 1.3 ✅ CLOSED by ADR-020 — input-stage PII added (`PII-048`…`PII-053`)
 
-All 45 `pii.jsonl` cases are `kind: "output"`. I read 06 §2's "varied placement" as placement
+**Ruling: input EDIT is supported**, as pre-dispatch redaction — spans replaced in the prompt
+before the upstream call, categories audited, dispatch proceeds. This **overruled** the
+deviation's own recommendation (which was to keep the ban and escalate instead): the input is
+fully buffered, so it is the *easy* case, not the hard one, and "the provider never receives
+the raw value" is a demo-able feature rather than a limitation.
+
+**Applied:** six input-stage cases across all five categories, including two multi-PII —
+UC-1 redacts pre-dispatch, UC-2 blocks, UC-3 escalates. So the file now varies placement
+*within the text* **and** across stages, which is what §1.3's ambiguity was about.
+
+One judgement call worth a look, recorded rather than special-cased: `PII-052` is an
+input-stage credential, and UC-1's `pii.*: edit` mapping means it is redacted and dispatched.
+A reviewer might reasonably argue a leaked API key should never be forwarded at all even on
+the permissive use case. That would be a *policy* change (UC-1 mapping `pii.api_key`
+separately), not a label change — flagging it here rather than encoding my preference in code.
+
+The original analysis:
+
+All 45 `pii.jsonl` cases were `kind: "output"`. I read 06 §2's "varied placement" as placement
 *within the text* (position 0, mid-sentence, end, multi-span) and covered that thoroughly.
 
 If it was meant as *stage* variety, the file is under-specified — but input-stage PII is
@@ -90,7 +137,15 @@ field — a field would be cleaner but is an undocumented schema change; (b) tha
 `kind: "conversation"` is the intended third value. **Logged as a MINOR doc gap** for 08 per
 AGENTS.md §6.
 
-### 1.5 Which turn's labels belong in a conversation case?
+### 1.5 ✅ CLOSED by ADR-021 — per breach unit, and it is now normative
+
+**Ruling: the breaching turn's own labels + the conversation-stage signal** — my reading, now
+written into 04 §2.2.1 and 06 §2.2 as the labelling convention rather than left as an
+inference. **Applied:** `CONV-07` lost its `pii.email` (the email belongs to an earlier turn
+and is already scored by its own `pii.jsonl` case); the other six firing cases were already
+labelled this way and are unchanged.
+
+The reasoning, which the ruling adopted:
 
 For `CONV-01/02/03/07` I put **the breaching turn's own label + `conversation.cumulative_risk`**
 (e.g. CONV-01: `pii.phone` + cumulative), on the reading that 04 §4.1 evaluates "one output
@@ -102,9 +157,19 @@ The alternative is the **union** of every turn's labels. That changes per-detect
 denominators (it would triple the PII count in CONV-01) without changing any verdict.
 If the reviewer prefers the union reading, all 7 firing CONV cases need relabelling.
 
-### 1.6 `CONV-10` — does `conv_tracker` count PII in *user* turns?
+### 1.6 ✅ CLOSED by ADR-021 — `conv_tracker` is stage-scoped; `CONV-10` stays clean
 
-The sharpest case in the file, and I am genuinely unsure. The user volunteers their own email
+**Ruling: output-stage and conversation-stage signals only.** Input-stage signals never
+accumulate, so my clean label stands. The reasoning in the ruling matches the one below: the
+control plane exists to stop the *assistant* disclosing data, and counting a user's voluntary
+disclosure would produce a metric measuring user behaviour rather than model behaviour. Input
+PII is still acted on immediately by its own mapping (and redacted pre-dispatch on UC-1 per
+ADR-020) — it simply does not accumulate. 04 §2's ambiguous "running totals" wording is now
+resolved in 04 §2.2.1.
+
+The original uncertainty, kept because the doc genuinely did not say:
+
+The sharpest case in the file, and I was genuinely unsure. The user volunteers their own email
 and the assistant never repeats it. I labelled it **clean** (no fire), reasoning that the
 control plane exists to stop the *assistant* leaking data, and that penalising a user for
 disclosing their own address would make the tracker fire on ordinary support conversations.
@@ -118,7 +183,20 @@ reads it literally, CONV-10 becomes a firing case and my label is wrong.
 
 ## 2. Per-detector recall — verdicts unaffected, metrics affected
 
-### 2.1 Should `unsourced_numeric` cases *also* carry `ungrounded_claim`? (13 cases)
+### 2.1 ✅ CLOSED — multi-label reading adopted (F1/F2)
+
+**Ruling: the multi-label reading**, which is what I leaned toward and what FR-DET-005 implies.
+**Applied:** `HAL-046`…`HAL-058` gained `hallucination.ungrounded_claim` (13 cases), and
+`OVLP-04` keeps all three labels — so the inconsistency this section identified is resolved in
+the direction that made `OVLP-04` right rather than by stripping it.
+
+`HAL-059` was the subtler half (F2) and is now the most interesting case in the file: it keeps
+its `numeric_claims` negative-control role (the citation marker suppresses `unsourced_numeric`)
+**and** gains `hallucination.ungrounded_claim`, because the context never states the figure. A
+citation is not a source. It is the only case that separates the two detectors on identical
+text, and it fails any implementation treating a citation marker as blanket absolution.
+
+The analysis:
 
 `HAL-046` … `HAL-058` are all "a figure with no citation, in a sentence whose context does not
 support it". I labelled each with **`hallucination.unsourced_numeric` only**. But per 04 §2
@@ -132,7 +210,7 @@ detectors would plausibly fire.
 - **`rag_grounding` recall is very much affected**: under the two-label reading, 13 cases
   currently counted as true negatives for that detector become false negatives.
 
-Note I was **not consistent**: `OVLP-04` carries all three labels
+Note I was **not consistent** (this is what the ruling resolved): `OVLP-04` carries all three labels
 (`ungrounded_claim` + `privacy.person` + `unsourced_numeric`), because a fabricated salary is
 both. If the single-label reading is correct, OVLP-04 should lose `unsourced_numeric`; if the
 multi-label reading is correct, HAL-046…058 should gain `ungrounded_claim`. **One of these two
@@ -201,9 +279,18 @@ to flatter the number.
    here. `INJ-020` (forged-turn injection) was authored to keep that file at 20 genuine
    attempts.
 4. **`halluc.jsonl` subjects are organizations, products, and policies — never people.** A
-   PERSON entity would invoke `entity_enricher` (ADR-011) and append `privacy.person`, pulling
-   those cases into the blocked D4 territory of §1.2. Person cases are confined to
-   `overlap.jsonl` and `CONV-06`, where the overlap is the point.
+   PERSON entity would invoke `entity_enricher` (ADR-011) and append `privacy.person`, which
+   changes the case's *plane* and its band behaviour (ADR-019). Person cases are confined to
+   `overlap.jsonl` and `CONV-06`, where the overlap is the point. Originally this kept those
+   cases out of then-blocked D4 territory; now that ADR-019 has ruled, it survives as a
+   cleaner reason — one file measures grounding, the other measures overlap, and mixing them
+   would make per-detector recall unreadable. **This one is an authoring-time convention that is NOT machine-checked**, and it is the
+   only claim in this file I cannot back with a command: verifying it needs NER, the ADR-011
+   `en_core_web_sm` model is not installed in this environment, and the freeze gate therefore
+   does not check it. A reviewer confirming §4.4 is confirming my reading of 62 + 20 + 80
+   subject lines, not a tool's. The real check arrives with `entity_enricher` — once it runs,
+   a stray PERSON in `halluc.jsonl` shows up as an unexpected `privacy.person` label, so this
+   becomes self-enforcing rather than trusted.
 5. **UC-2 passing things UC-1 edits is a documented posture, not a gap.** `hr_copilot` maps
    `hallucination.*: pass` (01 §3 "relaxed grounding"), so ~40 hallucination cases expect
    `pass` there. That will show as a high under-flagging rate for UC-2 in the 06 §3 matrix.
@@ -215,33 +302,38 @@ to flatter the number.
 
 ## Counts as authored
 
-| File | Cases | 06 §2 target | Composition |
+**Counts below are as-authored at Checkpoint 1b. They are reported, never asserted** — 06 §2.3
+derives composition from the files and `eval/validate_dataset.py` prints what it actually
+loaded, so this table is a snapshot for the reviewer rather than a target to conform to.
+
+| File | Cases | 06 §2.3 (pos + ctl) | Composition |
 |---|---|---|---|
-| `clean.jsonl` | 80 | 80 | 24 input / 56 output, ~half adversarial FP pressure |
-| `pii.jsonl` | 45 | 45 | ssn 8 · cc 8 · email 9 · phone 8 · api_key 5 · multi-PII 5 · **negative controls 2** — all output stage (§1.3). Counts deviate from 06 §2 — see the note below |
-| `injection.jsonl` | 20 | 20 | 16 without context docs (15 direct + 1 forged-turn) / 4 indirect via context docs |
-| `toxicity.jsonl` | 20 | 20 | high 8 · moderate 7 · borderline-clean 5 |
-| `halluc.jsonl` | 60 | 60 | grounded 20 · ungrounded 25 · unsourced-numeric 13 · negative controls 2 |
-| `overlap.jsonl` | 10 | 10 | OVLP-01…10, all below-band by design (§1.2) |
-| `borderline.jsonl` | 20 | 20 | 16 `ungrounded_claim` (context) / 4 `low_confidence` (no context) |
-| `conversation.jsonl` | 10 | 10 | 7 firing / 3 negative controls |
-| **total** | **265** | **~265** | |
+| `clean.jsonl` | 80 | 0 + 80 | 24 input / 56 output, ~half adversarial FP pressure |
+| `pii.jsonl` | 53 | 51 + 2 | 47 output + **6 input** (§1.3). ssn · cc · email · phone · api_key · multi-PII, varied placement and stage |
+| `injection.jsonl` | 20 | 20 + 0 | 16 without context docs (15 direct + 1 forged-turn) / 4 indirect via context docs |
+| `toxicity.jsonl` | 20 | 15 + 5 | high 8 · moderate 7 · borderline-clean 5 |
+| `halluc.jsonl` | 62 | 41 + 21 | grounded 20 · ungrounded 26 · ungrounded+unsourced-numeric 15 · control 1 |
+| `overlap.jsonl` | 15 | 15 + 0 | OVLP-01…10 below-band · **OVLP-11…15 in-band** (§1.2) |
+| `borderline.jsonl` | 20 | 20 + 0 | 16 `ungrounded_claim` (context) / 4 `low_confidence` (no context) |
+| `conversation.jsonl` | 10 | 7 + 3 | 7 firing / 3 negative controls |
+| **total** | **280** | **169 + 111** | positives and controls enumerated separately per 06 §2.3 |
 
-`pii.jsonl` note: 06 §2 specifies "SSN(8), CC(8), email(10), phone(9), API keys(5),
-multi-PII(5)". The firing counts above are email **9** and phone **8**, which looks one short
-in each — but the two negative controls belong to those categories: `PII-024` is the
-spelled-out-obfuscation email case (§3) and `PII-035` is the 7-digit-count phone case. Counted
-against their categories, the allocation is exactly 8 · 8 · 10 · 9 · 5 · 5 = 45. Confirm that
-attribution; the alternative is to author 2 more firing cases and treat the controls as extra,
-which would push the file to 47.
+✅ **Both count notes are CLOSED (F4/F5), and the resolution was growth, not deletion.** The
+attribution I proposed — counting a negative control against its category's quota — was
+**rejected**, and rightly: a file can hit its target size while under-covering the thing it
+exists to measure, which is exactly what happened (9 firing email cases and 8 phone against a
+stated 10 and 9; 13 unsourced-numeric against a stated 15). So the controls stay, and the
+missing positives were **added**: `PII-046` (email), `PII-047` (phone), `HAL-061`/`HAL-062`
+(unsourced-numeric).
 
-`halluc.jsonl` note: 06 §2 specifies "grounded(20), ungrounded(25), unsourced-numeric(15)".
-I authored 13 unsourced-numeric plus 2 explicit negative controls (`HAL-059` cited-source,
-`HAL-060` grounded version numbers) inside that 15-case allocation, because a detector whose
-FP behaviour is untested cannot be reported honestly. Confirm that substitution, or I will
-convert the two controls into unsourced-numeric cases and move the controls to `clean.jsonl`.
+06 §2.3 now enumerates positives and negative controls in **separate columns**, so the class of
+error is gone rather than patched — a control can no longer silently consume a positive slot,
+because the two are never added together.
 
-Structural validation (06 §2 case format, 04 §1.1 closed taxonomy, `action_expected` keys, and
-a cross-check of every detection-kind expectation against the actual shipped policies) passes
-with 0 errors on all 265 cases. That checks consistency, **not** label correctness — which is
-what this review is for.
+The freeze gate (`python -m eval.validate_dataset`, 06 §2.4) passes with **0 violations on all
+280 cases**: §2.1 format, 04 §1.1 closed taxonomy, `action_expected` key sets, ADR-023 causal
+fields, synthetic-safety construction (never-assigned SSN ranges, Luhn, RFC 2606 including
+subdomains, the reserved 555-01xx block), and a re-derivation of **every** expected action
+across all three policies from ground truth + ADR-017/019 band logic + ADR-015's span-less
+promotion. That checks consistency, **not** label correctness — which is what this review is
+for, and §1.1 · §2.2 · §2.3 · §3 · §4 remain open for it.

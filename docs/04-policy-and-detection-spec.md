@@ -36,7 +36,7 @@ cost.budget_exceeded | cost.request_too_large | cost.loop_detected
 conversation.cumulative_risk
 ```
 
-**Overlap rule (FR-DET-005):** the fabricated-personal-detail case emits ONE signal with `labels:["hallucination.ungrounded_claim","privacy.person"]` and `planes:["performance","responsibility"]`. The policy engine resolves multi-label signals by taking the **most severe** mapped action across labels (§4.3). Producer: the `entity_enricher` stage (§2.2) appends `privacy.person` to the hallucination signal — no detector emits it directly.
+**Overlap rule (FR-DET-005):** the fabricated-personal-detail case emits ONE signal with `labels:["hallucination.ungrounded_claim","privacy.person"]` and `planes:["performance","responsibility"]`. The policy engine resolves multi-label signals by taking the **most severe** mapped action across labels (§4.3). Producer: the `entity_enricher` stage (§2.2) appends `privacy.person` to the hallucination signal — no detector emits it directly. An appended label is recorded in `meta.enriched_labels` and its band behaviour differs from its host's: see §2.2 and §4.3 step 2 (ADR-019).
 
 ### 1.2 Score semantics (ADR-012 — polarity is normative, not stylistic)
 
@@ -62,11 +62,19 @@ Common contract: `async detect(ctx) -> list[Signal]`; must respect its latency b
 | `numeric_claims` | output_sentence | <5 ms | `hallucination.unsourced_numeric` | heuristic: currency/percent/large-number patterns with no citation marker and no match in provided context; high-stakes use cases map it to ESCALATE |
 | `cost_budget` | input | <1 ms | `cost.*` | ledger lookup; token estimate via tokenizer count × price table |
 | `loop_guard` | input | <1 ms | `cost.loop_detected` | sliding window per conversation |
-| `conv_tracker` | conversation | <1 ms | `conversation.cumulative_risk` | running totals of pii/hallucination signals per conversation id |
+| `conv_tracker` | conversation | <1 ms | `conversation.cumulative_risk` | running totals of pii/hallucination signals per conversation id — **`stage` ∈ {output_sentence, output_full, conversation} only** (ADR-021) |
 
 ### 2.2 Enrichment stage — `entity_enricher` (ADR-011)
 
 Runs after fast-path detection, before the policy engine. For each span-bearing `hallucination.*` signal: spaCy `en_core_web_sm` NER over the span (± its sentence window); a PERSON entity appends `privacy.person` to `labels` and `responsibility` to `planes` of the **same** signal (one-signal rule, FR-DET-005). Budget < 10 ms per enriched span. Enrichment failure → skip + log; it never blocks and is not a policy `fail_mode` class.
+
+**`meta.enriched_labels` is a contract, not a note (ADR-019).** The enricher MUST record every label it appends in `meta.enriched_labels`. §4.3 step 2 partitions a signal's labels on exactly this list — a host label is band-adjusted, an appended one is not — so an unrecorded append is silently mis-adjusted, and a recorded label that is not actually in `labels` describes a signal that does not exist. Both directions are therefore rejected at `Signal` construction (`detectors/base.py`), not merely documented: an unrecorded `privacy.person`, and an `enriched_labels` entry missing from `labels`, are both construction errors. The check lives in the model so a malformed signal cannot be built at all, rather than in the engine where it would surface only on the paths that happen to run.
+
+### 2.2.1 `conv_tracker` accumulation scope (ADR-021)
+
+`conv_tracker` accumulates **output-stage and conversation-stage signals only**. Input-stage signals are excluded: the control plane exists to stop the *assistant* disclosing data, and a user quoting their own order number or email is the normal case, not the risk — accumulating it would make cumulative risk fire on ordinary support conversations and would measure user behaviour instead of model behaviour. Input-stage PII is not ignored, it is acted on immediately by its own policy mapping at the input stage (and redacted pre-dispatch where the policy maps it to edit, §4.5); it simply does not accumulate.
+
+**Dataset consequence (normative for 06 §2).** A multi-turn case is labelled **per breach unit** — the breaching turn's own labels plus the conversation-stage signal — never as the union of every turn's labels. This follows §4.1, where the evaluated unit is one output sentence plus conversation-stage signals, so ground truth describes the unit where the verdict lands. Earlier turns' PII is already scored by its own `pii.jsonl` cases; unioning would inflate per-detector recall denominators without changing any verdict.
 
 ### 2.3 Consistency modes & sample-lag semantics (ADR-014)
 
@@ -154,14 +162,28 @@ All fast-path signals for the current unit (input stage, or one output sentence 
 
 ### 4.3 Algorithm (deterministic — FR-POL-001)
 ```
-1. For each signal:
-     for each label → look up action in policy.actions (specific > wildcard > default_action)
-   Signal action = most severe among its labels.          # multi-label rule
-2. Band adjustment — ONLY signals with score_kind == "confidence" (ADR-012).
-   detection-kind signals (incl. deterministic numeric_claims at 1.0) BYPASS this step:
-     score >= tau_high            → treat as not firing (drop signal)
-     tau_low <= score < tau_high  → cap/floor its action to ESCALATE   # borderline band
-     score < tau_low              → use mapped action as-is
+1. For each signal, for each label → look up action in policy.actions
+     (specific > wildcard > default_action).
+2. Band adjustment — applied PER LABEL (ADR-017), and ONLY to signals whose
+   score_kind == "confidence" (ADR-012). detection-kind signals (including the
+   deterministic numeric_claims at 1.0) BYPASS this step entirely.
+
+   First partition the signal's labels using meta.enriched_labels (ADR-019):
+     HOST     = labels absent from meta.enriched_labels   (the detector's own)
+     ENRICHED = labels present in meta.enriched_labels    (appended by §2.2)
+
+   HOST labels — by the signal's score:
+     score >= tau_high            → drop the label (not firing)
+     tau_low <= score < tau_high  → use policy.borderline_action        # ADR-017
+     score < tau_low              → use the mapped action as-is
+
+   ENRICHED labels — exactly two branches, and no third (ADR-019):
+     score >= tau_high            → dropped, together with the HOST labels
+     score < tau_high             → mapped action, UNADJUSTED.
+                                    borderline_action NEVER applies here.
+
+   A signal whose every label was dropped does not survive.
+   Signal action = most severe among its SURVIVING labels.   # multi-label rule
 3. Verdict = most severe action across surviving signals; none → PASS.
 4. EDIT verdict: apply §6 transforms to every edit-mapped signal — at its span, or
    over the whole sentence when the signal is stage=output_sentence without a span;
@@ -176,7 +198,15 @@ All fast-path signals for the current unit (input stage, or one output sentence 
 - ESCALATE: stream terminated; **entire response** (released + unreleased parts) quarantined as a review item; user gets `escalate_user_notice`.
 
 ### 4.5 Input-stage verdicts
-Input BLOCK/ESCALATE short-circuits before dispatch (no upstream call, no cost). Input EDIT is not supported in v1 (input labels must not map to edit; schema-enforced).
+Input BLOCK/ESCALATE short-circuits before dispatch (no upstream call, no cost).
+
+**Input EDIT is supported, as pre-dispatch redaction (ADR-020).** Spans are replaced in the prompt *before* the upstream call, the categories are audited, and dispatch proceeds — so the provider never receives the raw value. The input is fully buffered before dispatch, so this is strictly simpler than the mid-stream output-sentence case: no partial release, no recall problem, no latency race.
+
+Two guards, both carried over rather than invented:
+- the redacted prompt **re-runs `tier1_pii` once** before dispatch (the same transform-error guard §6 applies to edited output); a second failure promotes to ESCALATE and does **not** dispatch;
+- the ADR-015 span-less rule applies at input too — an edit-mapped input signal carrying neither a span nor whole-sentence scope has no editable extent and is promoted to ESCALATE (§4.3 step 4).
+
+This supersedes the v1 ban, which was unenforceable as written: it claimed schema enforcement, but `tier1_pii` runs at input **and** output (§2), so an edit-mapped `pii.*` label is legitimately edit-eligible at one stage and was silently barred at the other. A schema sees labels, not stages, and so could never have caught it.
 
 ## 5. Failure semantics (fail-open / fail-closed) — FR-POL-006
 
@@ -197,9 +227,9 @@ separately. Adding a transform here is what makes a new label edit-eligible.
 
 | Transform | Trigger labels | Behavior |
 |---|---|---|
-| `redact` | `pii.*` (span required) | replace span with `[REDACTED:{category}]`; multi-span safe (apply right-to-left) |
+| `redact` | `pii.*` (span required) | replace span with `[REDACTED:{category}]`; multi-span safe (apply right-to-left). Applies at **both** stages: on an output sentence before release, and on the prompt before dispatch (input EDIT, §4.5 / ADR-020) |
 | `soften` | `hallucination.*` (span, **or** stage=output_sentence → whole-sentence scope) | template rewrite: assertive claim → hedged form ("Based on available information, … may …") + append `⚠ unverified` marker; template list in `policy/actions.py`, not LLM-generated (deterministic, testable) |
-Edited output re-runs `tier1_pii` once (guard against transform errors); a second failure promotes to ESCALATE.
+Edited text re-runs `tier1_pii` once (guard against transform errors); a second failure promotes to ESCALATE. This applies to an edited output sentence before release **and** to a redacted prompt before dispatch — in the input case the promotion means the request is never dispatched at all.
 
 ## 7. Feedback loop mechanics (FR-FBK-001/002)
 
@@ -209,4 +239,4 @@ Edited output re-runs `tier1_pii` once (guard against transform errors); a secon
 4. Human applies diff → `policy_version` bump → demo shows changed behavior (charter S4). No auto-apply, ever.
 
 ## 8. Explicit exclusions (v1)
-Input-stage edits; token-level redaction inside a released sentence; recall of released sentences; LLM-generated rewrites; cross-use-case policy inheritance (each YAML standalone); deep-lane verdict changes.
+Token-level redaction inside a released sentence; recall of released sentences; LLM-generated rewrites; cross-use-case policy inheritance (each YAML standalone); deep-lane verdict changes.

@@ -1,4 +1,4 @@
-# Upstream providers + price table. Schema per 05 §6 as amended by ADR-018.
+# Upstream providers + price table. Schema per 05 §6.1 as amended by ADR-018 and ADR-022.
 #
 # ADR-018 splits providers into two CLASSES, and the class is a provenance claim:
 #
@@ -11,6 +11,20 @@
 # `upstream_class` is stamped onto every audit record and fixture (05 §3/§4) so the
 # provenance travels with the data rather than living in someone's memory. eval/ and
 # demo/ refuse dev-class data unless run with --allow-dev, which taints output filenames.
+#
+# ADR-022 keys prices by CONCRETE MODEL ID, because a two-tier cascade whose premise is
+# that the tiers cost ~12x differently cannot be expressed by one price pair per
+# provider. Three distinct states, deliberately not collapsible:
+#
+#   pricing: {source_url, retrieved, models: {...}}  — a price per model id
+#   pricing: unmetered                               — AFFIRMATIVE claim of no
+#                                                      per-token charge (local compute).
+#                                                      Yields est_cost_usd 0.0, which is
+#                                                      a MEASUREMENT.
+#   pricing: null                                    — no price information exists.
+#                                                      Yields est_cost_usd null, which is
+#                                                      UNKNOWN. Zero and unknown are
+#                                                      different facts.
 
 price_table_version: 1
 
@@ -29,16 +43,20 @@ providers:
   #     streaming message_start   ->   75
   #     non-streaming             -> 5074      (65x)
   # A longer prompt returned 5084, so it is a fixed additive offset, not a percentage
-  # error. OpenAI-family shows the same (prompt_tokens 5070). It also bills nothing, so
-  # there is no price to record. Filed as [D2-nonstreaming-token-counts-inflated] and
-  # [D2-upstream-price-table-absent]; FR-GW-006's usage-sanity invariant is what now
-  # catches this class of drift automatically at boot.
+  # error. OpenAI-family shows the same (prompt_tokens 5070). Root-caused and closed by
+  # ADR-018: the dev/measured split is the structural answer, and FR-GW-006's
+  # usage-sanity canary is what catches this class of drift automatically at boot.
+  #
+  # `pricing: null`, NOT `unmetered`. It bills the operator nothing, but it is a proxy in
+  # front of a hosted model whose tokens are charged to someone — so "no per-token charge
+  # exists" would be a false affirmative claim, and 0.0 would be a fabricated
+  # measurement from a provider whose accounting is already disclaimed. Unknown is the
+  # honest state, and it is the state ADR-022 reserves for exactly this.
   - name: kiro-local
     upstream_class: dev
     base_url: http://localhost:8000        # SDKs append /v1/messages themselves
     key_env: UPSTREAM_API_KEY              # 05 §6 normative name; value lives only in .env
-    price_per_1k_in: null                  # unmetered — no measured value exists
-    price_per_1k_out: null
+    pricing: null                          # unknown — see above; NOT a zero
     tiers:
       small: claude-haiku-4.5              # verified: end_turn, 13 output tokens
       frontier: claude-sonnet-4.6          # verified: end_turn
@@ -46,51 +64,67 @@ providers:
   # --------------------------------------------------------------------------
   # MEASURED CLASS — Groq.
   # --------------------------------------------------------------------------
-  # Model ids verified against Groq's own model documentation on 2026-08-25; both are
-  # listed PRODUCTION (not preview — preview ids may be discontinued without notice,
-  # which would silently break the demo).
+  # Model ids verified first-party on 2026-08-25 against console.groq.com/docs/models;
+  # both sit in the PRODUCTION section (not preview — preview ids may be discontinued
+  # without notice, which would silently break the demo).
   #
-  # PRICE PROVENANCE (read before quoting these): Groq's pricing page returned HTTP 404,
-  # so these are not first-party-verified in full.
-  #   llama-3.3-70b-versatile  $0.59 in / $0.79 out per 1M — stated by a groq.com blog
-  #                            post (first-party, but a 2024 post; re-verify before use)
-  #   llama-3.1-8b-instant     $0.05 in / $0.08 out per 1M — SECONDARY sources only
-  #                            (two independent trackers agree); NOT first-party
-  # A price that has not been re-verified against Groq's live pricing page is a
-  # `price_table_version` bump away from being wrong, and 06 §6 prints absolute dollars.
-  # Re-verify before any cost number is published. See STUB below.
+  # PRICE PROVENANCE — READ BEFORE QUOTING A DOLLAR FIGURE FROM THIS PROVIDER.
+  # These prices are NOT first-party-verifiable as of 2026-08-25. Re-checked live:
+  #   groq.com/pricing            -> 308 redirect to a homepage carrying no price content
+  #   console.groq.com/docs/pricing -> 404
+  #   console.groq.com/settings/billing -> authenticated, no public table
+  #   the per-model doc pages     -> zero dollar figures
+  # The figures below therefore rest on SECONDARY aggregators (CloudZero, Metatext and
+  # two others converge on the same numbers) plus a December-2024 groq.com blog post that
+  # states the 70B pair first-party but is stale by any reasonable standard.
+  #
+  # `source_url` points at a page that ACTUALLY CONTAINS the figures rather than at the
+  # canonical-but-empty pricing URL, because a provenance field naming a page without the
+  # numbers is worse than no field. This is what ADR-022's source_url/retrieved exist to
+  # make visible instead of burying: the weakness is in the config, in the open.
+  # STUB(price provenance is secondary-source only; re-verify against a first-party Groq
+  # price table before any absolute dollar figure is published in a report, the README,
+  # the proposal or the video (AGENTS.md §7). The 06 §6 cost simulation reports a
+  # RELATIVE delta, which survives a proportional error in both tiers; an absolute figure
+  # does not. owner-decision-needed if no first-party table has appeared by then)
   - name: groq
     upstream_class: measured
     base_url: https://api.groq.com/openai/v1
     key_env: GROQ_API_KEY
-    price_per_1k_in: 0.00005               # llama-3.1-8b-instant, the small tier
-    price_per_1k_out: 0.00008
+    pricing:
+      source_url: https://www.cloudzero.com/blog/groq-pricing/
+      retrieved: 2026-08-25
+      models:
+        # USD per 1K tokens. Vendor quotes per 1M, so these are /1000 of the quote.
+        llama-3.1-8b-instant:                    # small tier
+          per_1k_in: 0.00005                     # $0.05 / 1M
+          per_1k_out: 0.00008                    # $0.08 / 1M
+        llama-3.3-70b-versatile:                 # frontier tier — ~12x the small tier,
+          per_1k_in: 0.00059                     # $0.59 / 1M    which is the whole
+          per_1k_out: 0.00079                    # $0.79 / 1M    premise of ADR-009
     tiers:
       small: llama-3.1-8b-instant
       frontier: llama-3.3-70b-versatile
-    # STUB(per-tier pricing needs its own key: one price pair per provider cannot express
-    # a two-tier cascade whose whole point is that the tiers cost different amounts.
-    # 05 §6 as amended still nests price at the provider level, so the frontier tier's
-    # $0.00059/$0.00079 has nowhere to live. This makes the 06 §6 cascade-savings
-    # simulation unimplementable as specified; owner-decision-needed)
-    # See DEVIATION REPORT [D2-price-table-cannot-express-per-tier-cost].
 
   # --------------------------------------------------------------------------
   # MEASURED CLASS — local Ollama. Zero marginal token cost (local compute).
   # --------------------------------------------------------------------------
+  # `pricing: unmetered` is the affirmative claim ADR-022 defines: local compute levies
+  # no per-token charge, so est_cost_usd 0.0 is a measurement here, not a placeholder.
+  #
   # STUB(no genuinely local model is installed. The Ollama daemon on :11434 serves
   # exactly one model, `minimax-m2.7:cloud`, whose remote_host is
   # https://ollama.com:443 — a CLOUD model reached through a local daemon. It fails the
-  # no-remote_host assertion, so it cannot serve as the local fallback and cannot be
-  # `measured` on a zero-price basis (its tokens are billed by someone).
-  # `ollama pull <a-real-local-model>` is what unblocks this; owner-decision-needed)
+  # no-remote_host assertion, so it cannot serve as the local fallback, and binding it
+  # here would ALSO falsify the `unmetered` claim above, since its tokens are billed by
+  # someone. `ollama pull <a-real-local-model>` is what unblocks this;
+  # owner-decision-needed)
   # Q-02's local fallback is REOPENED in 08 until a model passes that assertion.
   - name: ollama-local
     upstream_class: measured
     base_url: http://localhost:11434/v1
     key_env: null                          # local daemon needs no credential
-    price_per_1k_in: 0.0                   # local compute: no per-token charge
-    price_per_1k_out: 0.0
+    pricing: unmetered                     # local compute: no per-token charge exists
     tiers:
       small: null                          # STUB(no local model installed)
       frontier: null                       # STUB(no local model installed)

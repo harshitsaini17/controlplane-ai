@@ -71,9 +71,12 @@ FAMILIES: frozenset[str] = frozenset(label.split(".", 1)[0] for label in TAXONOM
 #: ESCALATE by the engine at 04 §4.3 step 4 — that check is per-signal and so lives
 #: in `policy/engine.py`, not here.
 #:
-#: This constant also enforces 04 §4.5 ("input labels must not map to edit;
-#: schema-enforced") as a side effect: the input-only labels
-#: (`security.prompt_injection`, `cost.*`) have no transform and are already excluded.
+#: This constant does NOT enforce any input-stage restriction, and no longer claims to.
+#: The v1 04 §4.5 ban on input-stage edit was withdrawn by ADR-020 (input EDIT is
+#: pre-dispatch redaction), and the old claim was unenforceable regardless: `tier1_pii`
+#: runs at input *and* output (04 §2), so a `pii.*` label is edit-eligible at both, and a
+#: schema sees labels, not stages. The input-only labels (`security.prompt_injection`,
+#: `cost.*`) are excluded here simply because 04 §6 defines no transform for them.
 EDIT_ELIGIBLE_LABELS: frozenset[str] = frozenset(
     label for label in TAXONOMY if label.startswith(("pii.", "hallucination."))
 )
@@ -272,14 +275,20 @@ class Policy(_Section):
     #: Only reachable by `score_kind == "confidence"` signals (ADR-012); detection-kind
     #: signals bypass the band entirely, so this never applies to them.
     #:
-    #: NOT edit-eligibility-checked here, deliberately. The labels the band can reach
-    #: depend on the unresolved enriched-label survival rule
-    #: ([D4-enriched-label-survival-semantics]): confidence-kind emitters are
-    #: `fast_consistency` and `rag_grounding`, both `hallucination.*` and both
-    #: edit-eligible — but an enriched `privacy.person` rides on a `rag_grounding`
-    #: signal and is NOT edit-eligible. Whether `borderline_action: edit` can therefore
-    #: reach an untransformable label is exactly what that report asks. Adding a
-    #: validator now would bake in one reading.
+    #: NOT edit-eligibility-checked here, and ADR-019 changed *why* rather than removing
+    #: the reason. The enriched-label question is now settled: per ADR-019 only HOST
+    #: labels reach `borderline_action`, an enriched `privacy.person` never does, and both
+    #: confidence-kind emitters (`fast_consistency`, `rag_grounding`) host
+    #: `hallucination.*` labels that are edit-eligible. So a label-set validator here
+    #: would pass trivially while proving nothing.
+    #:
+    #: What it would miss is ADR-015: eligibility is necessary, not sufficient.
+    #: `hallucination.low_confidence` is edit-eligible yet span-less by design
+    #: (`output_full`), so 04 §4.3 step 4 promotes it to ESCALATE at every firing —
+    #: `borderline_action: edit` is executable for `rag_grounding` and inert for
+    #: `fast_consistency`. That distinction is per-*signal*, not per-label, so it can only
+    #: live in `policy/engine.py`. A validator here would bless the inert case as though
+    #: it were checked.
     borderline_action: Action
 
     fail_mode: FailModes

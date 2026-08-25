@@ -224,6 +224,7 @@ real boolean and stays unquoted.
 - Lead with the decision needed, not the narrative of how you got there.
 - Deviation reports use the §5.3 format, verbatim.
 - End-of-task summaries: what changed / requirements satisfied / stubs remaining / docs touched / deviations open.
+- **STOP-point reports must enumerate EVERY open deviation, including ones filed in earlier sessions — not only the ones this task raised.** State the count explicitly, and state it even when it is zero. A report listing three new deviations while two older ones sit unruled reads as "three decisions needed" when it is five, and the human cannot approve work whose blockers they cannot see. The ledger in `docs/08-open-questions.md` is the source to enumerate from; if a slug appears in code or doc prose but not in that table, the table is the thing that is wrong.
 - If you notice something wrong outside your current task (doc rot, a latent bug, a risk to the demo), flag it in one line — don't fix it unprompted.
 
 ---
