@@ -39,6 +39,16 @@ Options: (a) `ollama pull` a small genuinely-local model (~2 GB) and assert no `
 Assumption: **(a)**, gated on the assertion actually passing — the entry stays `STUB` until then. Until it passes, treat fallback as unavailable rather than as working, and never report a fallback latency or cost number from it (AGENTS.md §7).
 Deadline: before the consistency detector sprint (it needs the 2nd sample) — earlier if the cost plane is demoed. Status: **OPEN**
 
+**Q-18 — What counts as a "citation marker" for `numeric_claims`?**
+Why: 04 §2's `numeric_claims` row turns on the phrase "with no citation marker" and **nothing in the docs defines it.** No 04 section, no ADR; the only other "citation" hits are ADR-008 and the charter, which govern *our* citations in the proposal, not markers in model output. The clause is one of the detector's three, so it cannot run without a definition — a provisional one is therefore **already in use** and no work is blocked. What this gates is **publication**, not progress.
+In use now (`_CITATION_MARKER`, `detectors/numeric_claims.py`): numeric footnotes `[1]` · author-year `[Smith 2024]` / `(Smith, 2024)` · bare `(2024)` · URLs · attribution phrases ("according to", "as reported by", "per the") · `Source:`-style leaders · structural pointers (`section 4`, `§ 12`) · named regulatory documents (10-K, prospectus, filing). Deliberately **narrow**: each shape either names a source or points at one.
+Excluded on purpose: **hedges are not citations.** "Roughly $4M" is an epistemic qualifier and 04 §6 `soften` handles those; admitting hedges would let an unsourced figure pass as attributed.
+Options: (a) confirm the shipped set as-is; (b) amend it — one regex, nothing else depends on the membership; (c) write it into 04 §2 as normative so it stops being an implementation detail.
+Assumption: **(a)**, and until it is ruled every `numeric_claims` FP/FN figure is provisional.
+⚠ **Publication gate.** This definition directly shapes the `numeric_claims` false-positive rate, and its exact membership is a judgement call — so it is the thing to challenge in review, and **no `numeric_claims` FP/FN number may be published until it is confirmed** (AGENTS.md §7).
+⚠ A marker is **not** a verification. It suppresses only this detector, whose question is "was this figure attributed?" — never "is the attribution true?", which is `rag_grounding`'s independent question. The two are *meant* to disagree on a plausible citation for a figure the context never states; 06 keeps that pair as a control and `test_a_citation_is_not_a_verification` pins it.
+Deadline: before any `numeric_claims` number reaches a report, the README, the proposal or the video. Status: **OPEN**
+
 ---
 
 ## Deviation ledger
@@ -66,6 +76,27 @@ simulation may publish rather than blocking it.
 
 ## Resolved
 *(move items here with the ruling + date + ADR link)*
+
+**Q-17 — 04 §2 names "Aho-Corasick keyword sets"; the implementation uses a compiled regex alternation.** — RESOLVED 2026-08-26 (MINOR gap, AGENTS.md §6; agent-resolved).
+Why: `pyahocorasick` is not a declared dependency, and the documented term source (`blocklist_extra`) ships **empty** in all three policies — so the structure would be carrying zero terms.
+Ruling: **compiled regex alternation, sorted longest-first.** The doc names a data structure in a Notes column; the *requirement* is the <2 ms NFR-P-002 budget, and the semantics (leftmost-longest over a fixed term set, word-boundary anchored) are identical at this size. `_compile_terms` is the single seam to swap.
+⚠ Offered rather than assumed: if the data structure is considered **normative**, this is a D2 and I will swap the implementation — it is one function, and no other code depends on the choice.
+
+**Q-16 — Who detects `pii.person_data`?** — RESOLVED 2026-08-26 (MINOR gap, AGENTS.md §6; agent-resolved).
+Why: the label is in the 04 §1.1 taxonomy and **no 04 §2 row says how to detect it.** It is a category ("employee record", "date of birth"), not a shape a Tier-1 pattern can match.
+Ruling: **`tier1_pii` never emits it.** It also has **zero cases in the frozen corpus**, so the omission leaves nothing unmeasured; the label stays in the taxonomy for the policy files that already map it. If it should ever fire, that needs a documented detector row first (doc change), not a regex invented here.
+
+**Q-15 — What is `tier1_blocklist`'s base term list?** — RESOLVED 2026-08-26 (MINOR gap, AGENTS.md §6; agent-resolved).
+Why: 04 §2 describes `blocklist_extra` as "per-use-case **extra** terms", wording that implies a base list the docs specify **nowhere**.
+Ruling: **there is no base list; `blocklist_extra` is the only term source.** All three shipped policies set it to `[]`, so the detector correctly emits nothing on the documented configuration — wired, budgeted and tested, with no terms to match. Inventing a base list would be writing policy into Python, the AGENTS.md §9.1 trap.
+⚠ **Reporting consequence, stated rather than buried:** `security.blocklist` therefore has **zero positives** in the frozen corpus, so this detector's recall is **undefined — not 1.0**. `eval/run_all.py` must report it as no-cases; an empty denominator rendering as a perfect score would be a fabricated number (AGENTS.md §7).
+
+**Q-14 — What does a detector receive as `ctx`?** — RESOLVED 2026-08-26 (MINOR gap, AGENTS.md §6; agent-resolved).
+Why: 04 §2 fixes the contract as `async detect(ctx) -> list[Signal]` and **never says what `ctx` holds**, so no detector could be written against it.
+Ruling: `DetectorContext` in `detectors/base.py`, containing only what the *documented* rows require — `text` + `stage` (every row), `context_docs` (`rag_grounding`, `numeric_claims`; source `controlplane.context` per 05 §1.1), `conversation_id` (`loop_guard`, `conv_tracker`), and the two policy fields 04 §2/§3 hand to a detector (`blocklist_extra`, `detector_params`).
+⚠ Not a 05 addition: 05 governs endpoints, persisted schemas, config keys, metrics and log fields. `DetectorContext` is an internal call shape, none of those.
+⚠ Load-bearing detail: **policy values arrive as plain data, never a `Policy` object.** base.py's stated asymmetry is that nothing there reads a policy, and it is what keeps FR-POL-002 true — a detector that could see the label→action map could start deciding actions. The engine projects the two documented fields in, and the detector stays unable to tell which use case it is serving (AGENTS.md §9.1).
+
 
 **Q-13 — Does the ADR-022 hard-boot-failure rule apply to a `dev`-class provider?** — RESOLVED 2026-08-25 (MINOR gap, AGENTS.md §6; agent-resolved).
 Why: 05 §6.1's table said "model missing at boot **and** named in `tiers` ⇒ hard boot failure" without naming a class. Read literally that refuses to boot the shipped `active_provider: kiro-local`, which is `dev`-class with `pricing: null` and both tiers bound — i.e. the documented development path would not start.

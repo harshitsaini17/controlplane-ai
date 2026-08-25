@@ -21,21 +21,34 @@ This is a **hackathon prototype**, and this README will not pretend otherwise wh
 | Specification (`docs/00`–`08`) | complete — 23 ADRs ruled |
 | Policy schema + 3 use-case policies | implemented, validated, tested |
 | Detector contract (`Signal`, budgets, failure vocabulary) | implemented, tested |
-| Labeled eval dataset (280 cases) | authored; passes the consistency gate, **label review pending** |
+| Deterministic detectors — `tier1_pii`, `tier1_blocklist`, `numeric_claims` | implemented, tested (3 of the 11 rows in `docs/04` §2) |
+| Labeled eval dataset (280 cases) | authored and **frozen**; passes the consistency gate, **label review pending** |
 | Audit DB schema | implemented |
-| Gateway hot path, detectors, policy engine | **not yet implemented** |
+| Model-backed detectors — injection, toxicity, consistency, grounding, NER enrichment | **not yet implemented** |
+| Gateway hot path, policy engine, cost detectors | **not yet implemented** |
 | Eval harness, dashboard, demo runner | **not yet implemented** |
 
-`python -m eval.validate_dataset` passes. `python -m pytest` passes (234 tests). Nothing in
+`python -m eval.validate_dataset` passes. `python -m pytest` passes (364 tests). Nothing in
 `docs/07-demo-script.md` runs end to end yet.
+
+**The detectors that exist have not been scored yet.** They were built from the `docs/04` §2
+contracts and deliberately never iterated against the eval corpus, so their accuracy is
+genuinely unknown until `eval/run_all.py` runs — which is why every row in the table below
+still reads *not yet measured*. Two known gaps travel with them, stated here rather than
+discovered later: `tier1_blocklist` emits nothing on the shipped policies (they ship an empty
+`blocklist_extra`, its only documented term source), so its recall will be reported as
+**undefined, not 1.0**; and the definition of a "citation marker" that `numeric_claims` turns
+on is not in the spec — it is provisional, tracked as Q-18 in `docs/08`, and gates publication
+of that detector's FP/FN figures.
 
 ## Setup
 
 ```sh
 python -m venv .venv
 .venv/bin/pip install -e ".[dev]"
-.venv/bin/python -m pytest -q             # 234 tests
-.venv/bin/python -m eval.validate_dataset # dataset freeze gate (06 §2.4)
+.venv/bin/python -m pytest -q                       # 364 tests
+.venv/bin/python -m eval.validate_dataset           # consistency gate (06 §2.4)
+.venv/bin/python -m eval.validate_dataset --freeze  # + assert the dataset is the frozen one
 ```
 
 The full model stack (detectors, embeddings, NER) needs the CPU-only torch wheel installed
@@ -86,7 +99,7 @@ controlplane/  gateway, detectors, policy engine, audit, telemetry
 policies/      one YAML per use case — the behaviour lives here, not in Python
 config/        upstream providers + price table (05 §6.1)
 eval/          labeled dataset + evaluation harness (06)
-tests/         234 tests, named against the requirement IDs they cover
+tests/         364 tests, named against the requirement IDs they cover
 AGENTS.md      binding operating manual for coding agents on this repo
 ```
 

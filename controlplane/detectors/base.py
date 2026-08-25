@@ -40,6 +40,7 @@ from controlplane.policy.schema import TAXONOMY
 
 __all__ = [
     "BUDGETS_MS",
+    "DetectorContext",
     "ENRICHED_LABELS_KEY",
     "ENRICHED_ONLY_LABELS",
     "Detector",
@@ -367,6 +368,45 @@ class Signal(BaseModel):
                 f"misreports which plane fired (planes={[p.value for p in self.planes]})"
             )
         return self
+
+
+# --------------------------------------------------------------------------
+# Detector input (DOC GAP — 04 §2 names `ctx` but never defines it)
+# --------------------------------------------------------------------------
+
+
+class DetectorContext(BaseModel):
+    """What a detector receives. 04 §2 writes `async detect(ctx) -> list[Signal]` and
+    never says what `ctx` holds, so this is the minimal shape the *documented* detector
+    rows actually require — logged as a doc gap for 04 §2 rather than invented freely:
+
+    * `text` + `stage` — every row checks some text at some stage.
+    * `context_docs` — `rag_grounding` ("only when request carries `context` docs") and
+      `numeric_claims` ("no match in provided context"). Source: `controlplane.context`
+      (05 §1.1).
+    * `conversation_id` — `loop_guard` and `conv_tracker` are per-conversation (04 §2).
+    * `blocklist_extra` / `detector_params` — the two policy fields 04 §2/§3 hand to a
+      detector.
+
+    **Policy values arrive as plain data, never as a `Policy` object.** base.py's stated
+    asymmetry is that nothing here reads a policy, and it is what keeps FR-POL-002 true:
+    a detector that could see the label→action map could start deciding actions. So the
+    engine projects the two documented fields into `ctx` and the detector stays unable to
+    know which use case it is serving (AGENTS.md §9.1).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = ""
+    stage: Stage
+    context_docs: list[str] = Field(default_factory=list)
+    conversation_id: str | None = None
+    blocklist_extra: list[str] = Field(default_factory=list)
+    detector_params: dict[str, dict[str, float]] = Field(default_factory=dict)
+
+    def params_for(self, detector: str) -> dict[str, float]:
+        """Per-detector overrides (04 §3 `detector_params`), empty when unset."""
+        return self.detector_params.get(detector, {})
 
 
 # --------------------------------------------------------------------------

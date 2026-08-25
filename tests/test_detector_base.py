@@ -19,6 +19,7 @@ from pydantic import ValidationError
 from controlplane.detectors.base import (
     BUDGETS_MS,
     ENRICHED_LABELS_KEY,
+    DetectorContext,
     ENRICHED_ONLY_LABELS,
     Detector,
     DetectorError,
@@ -606,3 +607,69 @@ def test_adr_019_unrelated_meta_keys_are_untouched() -> None:
     """`meta` is a free-form bag (04 §1); only the one reserved key is constrained."""
     signal = make_signal(meta={"method": "embedding_cosine", "samples": 2})
     assert signal.meta["method"] == "embedding_cosine"
+
+
+# --------------------------------------------------------------------------
+# DetectorContext — the shape 04 §2 names as `ctx` but never defines (Q-14)
+# --------------------------------------------------------------------------
+
+
+def test_ctx_requires_a_stage() -> None:
+    """Every 04 §2 row checks some text at some stage; the stage is never implicit."""
+    with pytest.raises(ValidationError):
+        DetectorContext(text="hello")  # type: ignore[call-arg]
+
+
+def test_ctx_defaults_are_empty_not_absent() -> None:
+    """A detector reads `context_docs` and `blocklist_extra` unconditionally, so the
+    unset case must be an empty container rather than None."""
+    ctx = DetectorContext(stage=Stage.INPUT)
+    assert ctx.text == ""
+    assert ctx.context_docs == []
+    assert ctx.blocklist_extra == []
+    assert ctx.detector_params == {}
+    assert ctx.conversation_id is None
+
+
+def test_ctx_rejects_unknown_fields() -> None:
+    """`extra="forbid"` so a typo'd field name fails loudly instead of being silently
+    ignored by the detector that expected to read it."""
+    with pytest.raises(ValidationError):
+        DetectorContext(stage=Stage.INPUT, contextdocs=["oops"])  # type: ignore[call-arg]
+
+
+def test_ctx_params_for_returns_the_detectors_own_overrides() -> None:
+    """04 §3 `detector_params` is keyed by detector name (e.g. toxicity cutoffs)."""
+    ctx = DetectorContext(
+        stage=Stage.OUTPUT_SENTENCE,
+        detector_params={"tier2_toxicity": {"moderate": 0.4, "high": 0.75}},
+    )
+    assert ctx.params_for("tier2_toxicity") == {"moderate": 0.4, "high": 0.75}
+
+
+def test_ctx_params_for_is_empty_for_a_detector_with_no_overrides() -> None:
+    ctx = DetectorContext(stage=Stage.INPUT, detector_params={"tier2_toxicity": {"high": 0.9}})
+    assert ctx.params_for("tier1_pii") == {}
+
+
+def test_fr_pol_002_ctx_carries_no_policy_and_no_action_map() -> None:
+    """The load-bearing property, pinned so a later convenience edit fails loudly.
+
+    base.py's stated asymmetry is that nothing in it reads a policy, and that is what keeps
+    FR-POL-002 true: a detector able to see the label→action map could start deciding
+    actions, which 04 §1 reserves to the engine. So the engine projects in exactly the two
+    documented policy fields as plain data — never a `Policy` object — and the detector
+    cannot tell which use case it is serving (AGENTS.md §9.1).
+
+    Asserting the whole field set rather than "no policy field" is deliberate: it also
+    catches the subtler version, where someone adds `use_case` or `label_actions` for
+    convenience and re-opens the door a different way.
+    """
+    assert set(DetectorContext.model_fields) == {
+        "text",
+        "stage",
+        "context_docs",
+        "conversation_id",
+        "blocklist_extra",
+        "detector_params",
+    }
