@@ -101,7 +101,18 @@ the raw value" is a demo-able feature rather than a limitation.
 UC-1 redacts pre-dispatch, UC-2 blocks, UC-3 escalates. So the file now varies placement
 *within the text* **and** across stages, which is what §1.3's ambiguity was about.
 
-One judgement call worth a look, recorded rather than special-cased: `PII-052` is an
+**CLOSED — ruled by ADR-024, which agreed with the reviewer.** The original flag is kept
+below because it is the question the ADR answers.
+
+The ruling adds the specific mapping `pii.api_key: block` to UC-1 (`policy_version` 1 → 2);
+04 §3's specific-beats-wildcard precedence means no code changed. Applying it reached **seven**
+cases, not just `PII-052`: every case carrying `pii.api_key` (`PII-036`…`PII-040`, `PII-045`,
+`PII-052`). That is forced rather than chosen — the action map is keyed by label and
+`derive_action` never sees `kind`, so no configuration blocks the input-stage credential while
+leaving the output-stage ones at `edit`. **No label changed**, which is what keeps the v1
+detector metrics valid over an identical label set. The freeze was bumped accordingly (06 §1).
+
+The original flag: `PII-052` is an
 input-stage credential, and UC-1's `pii.*: edit` mapping means it is redacted and dispatched.
 A reviewer might reasonably argue a leaked API key should never be forwarded at all even on
 the permissive use case. That would be a *policy* change (UC-1 mapping `pii.api_key`

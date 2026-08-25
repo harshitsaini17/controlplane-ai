@@ -6,7 +6,7 @@
 # distinguishing highlights only.
 schema_version: 1
 use_case: support_bot
-policy_version: 1
+policy_version: 2                # bumped by ADR-024 (pii.api_key -> block)
 geography: EU                    # 01 §3 "EU geography"
 risk_appetite: medium            # 01 §3 "moderate strictness"
 
@@ -28,6 +28,13 @@ budget:                          # ADR-016
 
 actions:
   pii.*: edit                    # 01 §3 "PII -> EDIT (redact)"; 04 §6 redact transform
+  # ADR-024 — the one PII category this UC does NOT redact-and-continue. A typed
+  # credential is already compromised the moment it is typed, so redaction treats a
+  # security incident like a phone number: the value is stripped, the request proceeds,
+  # and the leaked key stays valid. Rotation is the only correct response, and BLOCK is
+  # what surfaces the incident to the caller. Specific key beats the pii.* wildcard by
+  # the 04 §3 precedence rule, so this needs no code change.
+  pii.api_key: block
   security.prompt_injection: block   # 01 §3 "injection -> BLOCK" (07 beat 3)
   security.blocklist: block
   toxicity.high: block           # 01 §3 "toxicity high -> BLOCK"

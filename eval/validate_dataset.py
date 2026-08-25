@@ -44,7 +44,12 @@ from controlplane.policy.schema import TAXONOMY, Action, Policy
 DATASET_DIR = Path(__file__).resolve().parent / "dataset"
 POLICY_DIR = Path(__file__).resolve().parents[1] / "policies"
 
-#: Checkpoint 1b freeze, approved 2026-08-26 (06 §1). `FROZEN_COMMIT` names the commit whose
+#: Freeze 2, approved 2026-08-26 with ADR-024 (06 §1). Supersedes the Checkpoint 1b freeze
+#: (digest `3b39313…`), which remains the state the **v1** detector metrics were measured
+#: against. The bump changed seven `action_expected` entries and **no label**, so those v1
+#: numbers stay valid over an identical label set — see 06 §1.
+#:
+#: `FROZEN_COMMIT` names the commit whose
 #: TREE HOLDS the frozen cases — not the later commit that recorded these constants, which
 #: touches only docs and this module.
 #:
@@ -54,7 +59,7 @@ POLICY_DIR = Path(__file__).resolve().parents[1] / "policies"
 #: checked against. It is taken over a `glob`, so ADDING a file breaks the freeze too; a fixed
 #: file list would let a new `extra.jsonl` in unnoticed.
 FROZEN_COMMIT = "b37d1909f5fb16db2b1fa38f5fbc64ceb70c3d02"
-FROZEN_SHA256 = "3b3931365a3c29187d111266fffe45071717de48ba9b55688e60556c492b9996"
+FROZEN_SHA256 = "6a3ecbbe75fd020bf806bf647d572c85ee187198fb9828eaac5e1c6e00737fbd"
 
 #: The three UC pipelines (01 §3). `action_expected` must carry exactly these keys — a
 #: missing one is an unstated expectation and a fourth is a use case that does not exist.

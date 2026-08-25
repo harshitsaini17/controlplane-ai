@@ -91,7 +91,10 @@ These are simultaneously requirements, policy fixtures, and demo content. Full p
 
 ### UC-1 `support_bot` — customer-facing RAG support assistant
 - Profile: external users, low latency, moderate strictness, EU geography.
-- Policy highlights: PII → **EDIT** (redact — at *both* stages per ADR-020: an output span before release, and a prompt span **before dispatch**, so the provider never receives the raw value); toxicity high → BLOCK, moderate → PASS; ungrounded/unsourced-numeric claim → **EDIT** (soften), low-confidence → ESCALATE (span-less by design, ADR-015); `borderline_action: edit` (ADR-017 — a borderline-confidence claim gets softened, matching this UC's soften-first posture); injection → BLOCK; deep-audit sampling 10%; budget $500/mo; `fail_mode: fail_closed` for Tier-1, `fail_open` for Tier-2 (availability over strictness), performance and cost.
+- Policy highlights: PII → **EDIT** (redact — at *both* stages per ADR-020: an output span before release, and a prompt span **before dispatch**, so the provider never receives the raw value) — **except `pii.api_key` → BLOCK
+(ADR-024)**, because a typed credential is already compromised and redact-and-continue leaves
+the leaked key valid while hiding the incident from the caller, for whom rotation is the only
+real remedy; toxicity high → BLOCK, moderate → PASS; ungrounded/unsourced-numeric claim → **EDIT** (soften), low-confidence → ESCALATE (span-less by design, ADR-015); `borderline_action: edit` (ADR-017 — a borderline-confidence claim gets softened, matching this UC's soften-first posture); injection → BLOCK; deep-audit sampling 10%; budget $500/mo; `fail_mode: fail_closed` for Tier-1, `fail_open` for Tier-2 (availability over strictness), performance and cost.
 - Demo role: shows EDIT actions and latency story.
 
 ### UC-2 `hr_copilot` — internal employee knowledge assistant

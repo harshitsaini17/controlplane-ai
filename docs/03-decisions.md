@@ -207,6 +207,50 @@ pricing:                         # or the literal `pricing: unmetered`
 **Trade-offs:** the case format grows two optional fields and the validator grows a derivation that must track the engine's step 2 — a real duplication risk, mitigated by deriving from the *loaded policy objects* rather than from hardcoded action strings, so a policy edit moves both together. The literal field is kept rather than dropped because a human reviewing a diff needs to see the expected outcome without running anything.
 **Docs touched:** 06 §2 (case format + composition table + freeze gate), `eval/validate_dataset.py` (new), all confidence-driven dataset files.
 
+## ADR-024 — `pii.api_key` blocks on `support_bot`: a credential is an incident, not a field to redact
+
+**Context:** UC-1 maps `pii.*: edit`, so a leaked API key was redacted and the request
+proceeded. `PII-052` was authored as an input-stage credential and the tension was flagged in
+`eval/dataset/REVIEW_NEEDED.md` rather than special-cased in code — the reviewer's question was
+whether the permissive use case should forward a credential at all. Redaction is the right
+default for a phone number: the value is removed and the interaction continues, no harm done.
+It is the wrong default for a credential, because **a typed credential is already compromised
+the moment it is typed.** Stripping it from the payload does not un-leak it — the key is still
+valid, and the only correct response is rotation. Redact-and-continue therefore treats a
+security incident as a formatting problem and, worse, hides it: the caller sees a normal
+answer and never learns to rotate.
+**Options:** (a) leave `pii.*: edit` covering credentials, accepting silent forwarding; (b) add
+a specific `pii.api_key: block` mapping on UC-1; (c) build per-label block messages so the
+fallback can say "rotate this key".
+**Decision:** **(b).** `support_bot` gains the specific mapping `pii.api_key: block`, and
+`policy_version` bumps 1 → 2. This needs **no code change**: 04 §3's precedence rule is
+specific > wildcard > default, and `expand_actions` already applies specific keys after
+wildcards, so the new key overrides `pii.*` regardless of YAML order. The standard
+`block_fallback` is used; **(c) is rejected** as machinery for one label, and a fallback that
+names the leak is arguably worse than a generic one.
+**Dataset consequence, and a scope correction found while applying it:** the ruling named
+`PII-052`. Applying it revealed the change reaches **seven** cases — `PII-036`…`PII-040`,
+`PII-045` (output-stage) and `PII-052` (input-stage) — every case carrying `pii.api_key`. This
+is mechanically forced, not a judgement call: the authorized mechanism is the label-keyed
+`actions` map, and `validate_dataset.derive_action` is a pure function of (labels, policy).
+Neither sees `kind`, so no configuration can block the input-stage credential while leaving the
+output-stage ones at `edit`. Doing that would require a **stage-conditional action map** — a new
+schema feature this ADR does not grant, and one that cuts against its own rejection of
+per-label machinery. `labels_expected` is **unchanged** on all seven, which is what preserves
+the v1 detector metrics: they were measured over an identical label set.
+**The ADR-023 harness re-derived `block` unaided**, naming all six unedited cases as
+mismatches before any of them was touched — the tripwire behaving exactly as designed, so
+there is no harness bug to report. It is also what caught the scope difference.
+**Trade-offs:** UC-1's demo posture is "soften and redact first", and this puts one BLOCK into
+it, so the use-case profile is now *mostly* permissive rather than uniformly so — a more honest
+description of any real policy. No demo beat is affected (beats 2 and 4a use `pii.email` /
+`pii.phone`; no beat exercises `pii.api_key`). The freeze is bumped rather than broken, and the
+bump is reviewed inside the Checkpoint 2 re-review.
+**Docs touched:** `policies/support_bot.yaml` (mapping + version), 01 §3 UC-1 highlights, 06 §1
+(new frozen hash + the identical-label-set note), `eval/validate_dataset.py`
+(`FROZEN_COMMIT`/`FROZEN_SHA256`), `eval/dataset/pii.jsonl` (7 cases),
+`eval/dataset/REVIEW_NEEDED.md` (item closed).
+
 ## Minor resolutions log (review findings 6–8 — doc edits, no ADR needed)
 
 - **F6:** Cost plane gets a live enforcement moment — demo beat 7b added (budget-exhaustion BLOCK, SC-2 now covered live).
