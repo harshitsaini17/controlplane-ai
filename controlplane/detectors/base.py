@@ -36,7 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # set; a second copy here would be a silent divergence waiting to happen the first
 # time the doc adds a label. `policy.schema` happens to be where it landed first —
 # that is a code-layout accident, not a claim that the taxonomy belongs to policy.
-from controlplane.policy.schema import TAXONOMY
+from controlplane.policy.schema import TAXONOMY, ParamValue
 
 __all__ = [
     "BUDGETS_MS",
@@ -402,10 +402,21 @@ class DetectorContext(BaseModel):
     context_docs: list[str] = Field(default_factory=list)
     conversation_id: str | None = None
     blocklist_extra: list[str] = Field(default_factory=list)
-    detector_params: dict[str, dict[str, float]] = Field(default_factory=dict)
+    detector_params: dict[str, dict[str, ParamValue]] = Field(default_factory=dict)
 
-    def params_for(self, detector: str) -> dict[str, float]:
-        """Per-detector overrides (04 §3 `detector_params`), empty when unset."""
+    def params_for(self, detector: str) -> dict[str, ParamValue]:
+        """Per-detector overrides (04 §3 `detector_params`), empty when unset.
+
+        Values are scalars or lists of scalars (D2 ruling, 2026-08-26). `ParamValue` is
+        imported from `policy.schema` rather than redeclared here: this field mirrors
+        `Policy.detector_params`, and two definitions of one contract eventually disagree. The
+        import direction is the pre-existing one — this module already reads `TAXONOMY` from
+        there and nothing in `policy/` imports detectors, so base.py's stated asymmetry (no
+        function here reads a policy) is unchanged.
+
+        A caller wanting a number must narrow, which is the point: the widened type makes the
+        mismatch a type error at the call site instead of a surprise at runtime.
+        """
         return self.detector_params.get(detector, {})
 
 

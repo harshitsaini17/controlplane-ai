@@ -208,11 +208,26 @@ def _identifier_spans(text: str) -> list[tuple[int, int]]:
 # the `ref:`/`see:` leaders; it adds `as per`, `cited by`, `based on`, `study by`,
 # `survey by`, `data from`, `figures from`. Both directions move the FP rate, which is why
 # the delta is recorded in docs/08 under Q-18 rather than left for someone to diff.
+#
+# `per` IS NOT A BARE TOKEN HERE (D1 ruling, ADR-025 amendment 1). ADR-025 first listed
+# `"per "`, but `per` in English is overwhelmingly the RATE preposition, so a bare token
+# silenced every rate-shaped figure — `$4 million per year` emitted nothing, and two corpus
+# cases labelled `unsourced_numeric` were suppressed. The discriminator is grammatical: a
+# rate takes a lowercase common noun (`per user`, `per month`); an attribution takes
+# determiner + source (`per the filing`) or a proper noun (`per Gartner`). Hence three narrow
+# forms instead of one broad one.
+#
+# `(?-i:[A-Z])` scopes case-sensitivity to that one branch. The pattern is globally `(?i)`,
+# so a bare `[A-Z]` would match lowercase too and readmit the rate preposition wholesale —
+# the exact bug this amendment exists to remove. The scoped flag is load-bearing, not style.
 # --------------------------------------------------------------------------
 
 _CITATION_MARKER = re.compile(
     r"""(?xi)
-    \baccording\ to\b | \bas\ per\b | \bper\s
+    \baccording\ to\b
+  | \bas\ per\b                                  # retained from v1: unambiguously attributive
+  | \bper\s+(?:the|this|that|its|their)\b       # determiner form -> a source is named
+  | \bper\s+(?-i:[A-Z])                          # proper-noun form: "per Gartner"
   | \bas\ reported\ by\b | \breported\ by\b
   | \bcited\ by\b | \bcited\ in\b
   | \bsource:

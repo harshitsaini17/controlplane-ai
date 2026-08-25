@@ -102,9 +102,26 @@ def test_numeric_claims_multi_match_spans_are_exact() -> None:
 
 
 def test_numeric_citation_marker_suppresses_only_its_sentence() -> None:
+    """The reviewer's property — a marker suppresses its own sentence and no later one — held
+    with a marker the ruled list still recognises.
+
+    REVIEW_TEXTS[4] ("Per section 9, ...") no longer carries a marker at all: ADR-025 dropped
+    structural pointers from the list, and the D1 ruling removed the bare `per ` token that
+    was incidentally catching this one. So the original fixture passed for a reason that no
+    longer exists, and asserting on it would test nothing. Both facts are asserted below: the
+    fixture's new behaviour, and the scoping property itself.
+    """
+    # Structural pointer is not a marker (ADR-025), so both figures fire.
     text = REVIEW_TEXTS[4] + " A later estimate was 27,600 operations."
     signals = _run(numeric_claims, _ctx(text))
-    assert [text[s.span.start : s.span.end] for s in signals] == ["27,600"]
+    assert [text[s.span.start : s.span.end] for s in signals] == ["18,400", "27,600"]
+
+    # The property, with a ruled determiner-form marker. Load-bearing under ADR-014: UC-3
+    # buffers a whole response, so a text-wide search would let one citation in the opening
+    # line silence every later figure — the highest-stakes use case getting the weakest check.
+    scoped = "Throughput reached 18,400 operations per the filing. A later estimate was 27,600."
+    scoped_signals = _run(numeric_claims, _ctx(scoped))
+    assert [scoped[s.span.start : s.span.end] for s in scoped_signals] == ["27,600"]
 
 
 def test_phone_shaped_price_remains_a_currency_claim() -> None:

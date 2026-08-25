@@ -150,6 +150,18 @@ class FailMode(str, Enum):
 
 Probability = Annotated[float, Field(ge=0.0, le=1.0)]
 
+#: A `detector_params` value: a scalar, or a list of scalars (04 §3, D2 ruling 2026-08-26).
+#:
+#: The field was originally `dict[str, float]`, shaped by the only consumer that existed —
+#: `tier2_toxicity`'s moderate/high cutoffs. ADR-025 §2.4.4 then made `numeric_claims`' `units`
+#: and `citation_markers` extensible per use case, and those are lists of strings, which a
+#: float-only mapping cannot hold: the documented extension point did not exist.
+#:
+#: Widened rather than paired with a second `detector_lists` field, so there is one override
+#: mechanism keyed by detector name instead of two that a reader must tell apart.
+ParamScalar = str | int | float | bool
+ParamValue = ParamScalar | list[ParamScalar]
+
 
 class _Section(BaseModel):
     """Base for every policy section: unknown keys are rejected (04 §3)."""
@@ -296,7 +308,8 @@ class Policy(_Section):
     escalation: Escalation
 
     blocklist_extra: list[Annotated[str, Field(min_length=1)]] = Field(default_factory=list)
-    detector_params: dict[str, dict[str, float]] = Field(default_factory=dict)
+    #: Per-detector overrides keyed by registry name; values are scalars or lists of scalars.
+    detector_params: dict[str, dict[str, ParamValue]] = Field(default_factory=dict)
 
     # -- validators ------------------------------------------------------
 

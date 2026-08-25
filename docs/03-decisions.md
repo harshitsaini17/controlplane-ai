@@ -291,6 +291,36 @@ was catching identifiers at three times the rate. The lexical marker list also c
 **Docs touched:** 04 §2 registry row + new §2.4/§2.4.1–4, 06 §3 (revision methodology),
 `docs/08` (Q-18 closed, D8 closed), `controlplane/detectors/numeric_claims.py`, its tests.
 
+### Amendment 1 — 2026-08-26: `per` is not a bare marker token (resolves D1-BLOCKER)
+
+The list above shipped `"per "` as an attribution phrase. Implementing it exposed a defect in
+the ruling itself, filed as `[D1-citation-marker-per-matches-the-rate-preposition]` **before**
+the ADR-026 §5 re-measurement, so this amendment lands ahead of that measurement and the
+one-re-measurement rule is not violated.
+
+**The defect:** `per` in English is overwhelmingly the *rate* preposition. As a bare token the
+marker suppressed every rate-shaped figure — `Cost is $4 million per year` emitted nothing —
+including two frozen-corpus cases labelled `unsourced_numeric` (HAL-049, HAL-052). Rates are the
+shape financial and performance claims most often take, and this detector's UC-3 mapping is
+ESCALATE, so the miss landed on the highest-stakes path. It was not narrowable in code: there is
+no reading of a literal `"per "` that excludes `per year`.
+
+**The ruling (option A):** remove the bare token; add three attribution forms — `as per`
+(retained from v1), the determiner form (`per the|this|that|its|their`), and the proper-noun
+form (`per` + capitalized token). **Rationale:** the rate preposition takes a lowercase common
+noun (`per user`, `per month`); attribution takes determiner + source or a proper noun. The
+discriminator is grammatical, which is why it can be lexical.
+
+**Accepted documented edge:** sentence-initial `Per company filings, …` fires, because the
+capitalization test reads the *following* word and that word is a lowercase common noun. It is a
+false positive on a cited claim — the safe direction for a label mapped to EDIT/ESCALATE, where
+the opposite error puts an unsourced figure in front of a user. Stated in 04 §2.4.2 alongside
+the converse bound (a capitalized unit rate such as `per GB` reads as a proper noun and is
+suppressed; measured corpus exposure: zero cases).
+
+Verified against the freeze before measuring: HAL-049 and HAL-052 are **no longer suppressed**,
+and CLN-062 (`… per the filing`) correctly remains suppressed.
+
 ## ADR-026 — Disclosed revision protocol for `tier1_pii` (resolves D3)
 
 **Context:** `tier1_pii` measured **recall 0.8361** against NFR-EVAL-001's 0.95, with precision
@@ -311,9 +341,10 @@ considered and refused. The protocol:
    precision 1.000 never disappears from the record.
 2. **v2 patterns derive from named published specs only**, each cited in 04 §2.5: ITU-T E.164;
    NANP conventions including the `N ∈ [2–9]` constraint; RFC 7519/7515 for JWT. The `eyJ` anchor
-   is **permitted and must be justified in writing as spec-derived** — it is the base64url
-   encoding of `{"`, the mandatory opening of every JOSE header — and *that written justification
-   is what makes the pattern auditable as non-fixture-shaped*. Hex secrets fire only with a
+   is **permitted and must be justified in writing as spec-derived** — ~~it is the base64url
+   encoding of `{"`, the mandatory opening of every JOSE header~~ (**this clause is wrong; see
+   Correction 2026-08-26 below**) — and *that written justification is what makes the pattern
+   auditable as non-fixture-shaped*. Hex secrets fire only with a
    credential cue word in the same sentence.
 3. **Two scope exclusions**, documented as precision-grounded DLP trade-offs and not fixture
    avoidance: bare 7-digit local numbers (indistinguishable from order/ticket ids — exactly
@@ -333,6 +364,60 @@ however carefully derived; the dual column exists so nobody has to take that on 
 **Docs touched:** 04 §2 registry row + new §2.5, 06 §3 (revision methodology + the report's
 dual-column requirement), `docs/08` (D3 closed after re-measurement),
 `controlplane/detectors/tier1_patterns.py`, its tests, `eval/run_all.py`, README claims rows.
+
+### Correction — 2026-08-26: the `eyJ` derivation above is arithmetically wrong (resolves D2-eyj)
+
+**The original claim, preserved verbatim:** *"it is the base64url encoding of `{"`, the mandatory
+opening of every JOSE header."*
+
+**It is false.** `base64url('{"') == "eyI="`, not `"eyJ"`. Base64 packs three input bytes into
+four output characters, so two bytes cannot determine the third character. The third character is
+
+    ((0x22 & 0x0F) << 2) | (next_byte >> 6)  =  8 | (next_byte >> 6)
+
+and base64 index 9 is `J`, so the anchor holds exactly when `next_byte >> 6 == 1` — i.e. the byte
+following `"` lies in `0x40`–`0x7F`, which every ASCII letter does. RFC 7515 §4 makes the JOSE
+header a JSON object and every registered header parameter name (`alg`, `typ`, `kid`, `crit`,
+`jku`, `jwk`, `x5u`, `x5c`, `x5t`, `cty`) begins with a letter, so the anchor **does** hold for
+every conforming header whose first member is a registered parameter.
+
+**The decision stands; only its stated reason was wrong.** The anchor remains spec-derived, and
+therefore still auditable as non-fixture-shaped, which is what ADR-026 §2 requires of it.
+
+**Narrow theoretical miss, now documented:** a header whose first key begins with a non-letter,
+and a pretty-printed header — JSON permits whitespace after `{`, and `base64url('{ "alg"')` is
+`eyIg…`, no anchor. Neither shape appears in any conforming library's output, but the bound is
+real and is stated rather than left implicit.
+
+The error was the adjudicator's, not the implementer's, and it was caught by an implementation
+test asserting the justification rather than restating it. That test pair is retained as the
+artifact: `test_rfc_7515_eyj_anchor_is_a_property_of_the_format` asserts the false literal **as
+false**, then asserts the true condition across nine registered parameter names and the
+whitespace bound.
+
+### Amendment 1 — 2026-08-26: what the NANP `N ∈ [2–9]` constraint actually earns (resolves D2-nanp)
+
+§2 above cites the NANP `N ∈ [2–9]` constraint, and 04 §2.5 claimed it "happens to reject the
+digit runs that would otherwise false-positive." **In the composed detector it rejects nothing.**
+v1's `_PHONE` pattern (`(?:\(\d{3}\)|\b\d{3})[-.\s]?\d{3}[-.\s]?\d{4}`, unconstrained
+digits) is deliberately **retained** and evaluated **first**, matching the same extent, so
+longest-match-wins hands it the span before either NANP row is consulted.
+
+**The composition is kept as-is, and the description is corrected to match it.** Keeping it is
+load-bearing: the v1 baseline's meaning depends on v2 being a **superset** of v1, and narrowing
+`_PHONE` would change v1-derived behaviour, so the permanent precision-1.000 figure would no
+longer describe any code that ships.
+
+Corrected statement of what the constraint earns:
+
+- it is **live only on shapes v1 did not cover** — chiefly the spaced-parenthesis variant
+  `( 415 ) 555-0123`, which v1's `\(\d{3}\)` could not match;
+- **elsewhere the pre-existing v1 pattern shadows it**;
+- the two NANP rows therefore add **zero recall on this corpus**;
+- the entire v2 phone gain is **E.164 plus the spaced-parenthesis variant**.
+
+**`(115) 555-0123` firing is documented v1-superset behaviour, not a bug.** Precision hardening
+of `_PHONE` is future work for a later freeze cycle, and must not ride along with a measurement.
 
 ## Minor resolutions log (review findings 6–8 — doc edits, no ADR needed)
 

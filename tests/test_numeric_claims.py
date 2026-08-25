@@ -209,7 +209,6 @@ def test_year_exclusion_is_a_known_heuristic_limit() -> None:
         "According to the report, revenue was $4 million.",
         "Revenue was $4 million as reported by the auditor.",
         "Per the filing, revenue was $4 million.",
-        "Revenue was $4 million per § 12.",
         "Source: revenue was $4 million.",
         "Revenue was $4 million, see https://example.com/report.",
     ],
@@ -219,11 +218,88 @@ def test_a_citation_marker_suppresses_the_signal(text: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "text",
+    [
+        "As per the auditor, revenue was $4 million.",
+        "Per the filing, revenue was $4 million.",
+        "Per this report, revenue was $4 million.",
+        "Per that analysis, revenue was $4 million.",
+        "Per its own disclosure, revenue was $4 million.",
+        "Per their guidance, revenue was $4 million.",
+        "Per Gartner, revenue was $4 million.",
+        "Revenue was $4 million per Reuters.",
+    ],
+)
+def test_per_in_an_attribution_form_is_a_marker(text: str) -> None:
+    """The D1 ruling's three narrow forms: `as per`, determiner, proper noun (04 §2.4.2)."""
+    assert scan(text) == []
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("Cost is $4 million per year.", "$4 million"),
+        ("Latency was 250 ms per request.", "250 ms"),
+        ("Throughput hit 22% per node.", "22%"),
+        ("We store 4 TB per tenant.", "4 TB"),
+        ("That is 30k per employee.", "30k"),
+        ("Roughly 1,200 events per day.", "1,200"),
+    ],
+)
+def test_per_as_the_rate_preposition_is_not_a_marker(text: str, expected: str) -> None:
+    """The D1 regression, asserted so it cannot come back.
+
+    ADR-025 first listed the bare token `"per "`. `per` in English is overwhelmingly the
+    **rate** preposition, so the bare token silenced every rate-shaped figure — and rates are
+    the shape financial and performance claims most often take, on the detector whose UC-3
+    mapping is ESCALATE. Two frozen-corpus cases labelled `unsourced_numeric` were suppressed
+    by it. The discriminator is grammatical: a rate takes a lowercase common noun, an
+    attribution takes determiner + source or a proper noun.
+    """
+    assert fired(text) == [expected]
+
+
+def test_case_sensitivity_of_the_proper_noun_form_is_load_bearing() -> None:
+    """The marker pattern is globally `(?i)`, so the proper-noun branch scopes it off with
+    `(?-i:[A-Z])`. An unscoped `[A-Z]` would match lowercase under the global flag and
+    readmit the rate preposition wholesale — reintroducing D1 while looking correct.
+    """
+    from controlplane.detectors.numeric_claims import _CITATION_MARKER
+
+    assert _CITATION_MARKER.search("per Gartner")
+    assert not _CITATION_MARKER.search("per gartner")
+    assert not _CITATION_MARKER.search("per user")
+
+
+def test_documented_edge_sentence_initial_per_plus_common_noun() -> None:
+    """A stated bound of the D1 ruling, asserted rather than left to be discovered.
+
+    `Per company filings, ...` is a real attribution whose object is a lowercase common noun,
+    so no form matches and the figure fires — a false positive on a cited claim. That is the
+    **safe** direction for a label mapped to EDIT/ESCALATE: it costs a softening or a review,
+    where the opposite error costs an unsourced figure reaching a user.
+    """
+    assert fired("Per company filings, revenue was $4 million.") == ["$4 million"]
+
+
+def test_capitalized_unit_rates_are_a_known_bound_of_the_proper_noun_form() -> None:
+    """The other side of the same bound: a capitalized *unit* reads as a proper noun.
+
+    `per GB` and `per API call` are rates, but the proper-noun branch cannot tell them from
+    `per Gartner` without a lexicon. Measured exposure on the frozen corpus is **zero** cases,
+    so it moves no number; it is asserted so the limit is visible in the suite rather than
+    found later in a report.
+    """
+    assert scan("Storage costs $4 million per GB.") == []
+
+
+@pytest.mark.parametrize(
     "text,expected",
     [
         ("Revenue was $4 million [Smith 2024].", "$4 million"),
         ("See section 4: revenue was $4 million.", "$4 million"),
         ("The 10-K states revenue was $4 million.", "$4 million"),
+        ("Revenue was $4 million per § 12.", "$4 million"),
     ],
 )
 def test_shapes_dropped_from_the_ruled_marker_list_still_fire(

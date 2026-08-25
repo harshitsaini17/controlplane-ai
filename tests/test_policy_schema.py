@@ -883,3 +883,37 @@ def test_fr_pol_004_block_fallback_must_be_non_empty(
     valid_policy_dict["messages"]["block_fallback"] = ""
     with pytest.raises(ValidationError):
         Policy(**valid_policy_dict)
+
+
+# --------------------------------------------------------------------------
+# detector_params value types — D2 ruling, 2026-08-26
+# --------------------------------------------------------------------------
+
+
+def test_detector_params_accepts_lists_of_scalars(valid_policy_dict: dict[str, Any]) -> None:
+    """ADR-025 §2.4.4's extension point, now expressible in the schema.
+
+    `units` and `citation_markers` are lists of strings. The field was originally typed
+    `dict[str, dict[str, float]]` — shaped by `tier2_toxicity`'s cutoffs, the only consumer
+    that existed when it was written — so the documented per-use-case override could not be
+    written down. Widened to scalars-or-lists rather than paired with a second
+    `detector_lists` field, so one mechanism is keyed by detector name instead of two.
+    """
+    valid_policy_dict["detector_params"] = {
+        "numeric_claims": {
+            "units": ["ms", "GB", "bps"],
+            "citation_markers": ["per our filing", "as disclosed in"],
+        },
+        "tier2_toxicity": {"moderate": 0.4, "high": 0.75},
+    }
+    policy = Policy(**valid_policy_dict)
+    assert policy.detector_params["numeric_claims"]["units"] == ["ms", "GB", "bps"]
+    assert policy.detector_params["tier2_toxicity"]["high"] == 0.75
+
+
+def test_detector_params_rejects_a_nested_mapping(valid_policy_dict: dict[str, Any]) -> None:
+    """Widened to scalars and lists, not to arbitrary JSON — a nested dict is still invalid,
+    so the field cannot drift into a general config dumping ground."""
+    valid_policy_dict["detector_params"] = {"numeric_claims": {"units": {"time": "ms"}}}
+    with pytest.raises(ValidationError):
+        Policy(**valid_policy_dict)

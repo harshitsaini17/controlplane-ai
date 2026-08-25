@@ -652,6 +652,63 @@ def test_ctx_params_for_is_empty_for_a_detector_with_no_overrides() -> None:
     assert ctx.params_for("tier1_pii") == {}
 
 
+def test_detector_params_holds_lists_of_scalars() -> None:
+    """The D2 ruling (2026-08-26): `detector_params` values are scalars **or lists**.
+
+    ADR-025 §2.4.4 makes `numeric_claims`' `units` and `citation_markers` overridable per use
+    case, and both are lists of strings. The original `dict[str, float]` — shaped by the only
+    consumer that existed, `tier2_toxicity`'s cutoffs — could not hold them, so the documented
+    extension point did not exist. This is the validation test for the widened type.
+    """
+    ctx = DetectorContext(
+        stage=Stage.OUTPUT_SENTENCE,
+        detector_params={
+            "numeric_claims": {
+                "units": ["ms", "GB", "kg"],
+                "citation_markers": ["per our filing", "as disclosed in"],
+            }
+        },
+    )
+    assert ctx.params_for("numeric_claims") == {
+        "units": ["ms", "GB", "kg"],
+        "citation_markers": ["per our filing", "as disclosed in"],
+    }
+
+
+def test_detector_params_preserves_scalar_types() -> None:
+    """A union widens what is accepted, and could widen what is *stored* — it must not.
+
+    pydantic v2's smart mode prefers an exact type match over coercion, so `1` stays an int and
+    `True` stays a bool rather than being pulled to the leftmost union member. Asserted because
+    a schema that quietly turned `1` into `True` would be worse than one that refused it: a
+    detector reading a count would get a boolean and no error would ever be raised.
+    """
+    ctx = DetectorContext(
+        stage=Stage.INPUT,
+        detector_params={
+            "probe": {"count": 1, "flag": True, "ratio": 0.5, "name": "x", "many": ["a", "b"]}
+        },
+    )
+    values = ctx.params_for("probe")
+    assert [type(values[k]).__name__ for k in ("count", "flag", "ratio", "name", "many")] == [
+        "int",
+        "bool",
+        "float",
+        "str",
+        "list",
+    ]
+
+
+def test_detector_params_still_rejects_a_nested_mapping() -> None:
+    """Widened to scalars and lists, not to arbitrary JSON. A nested dict is still a
+    validation error, so the field cannot quietly become a config dumping ground."""
+    with pytest.raises(ValidationError):
+        DetectorContext(
+            stage=Stage.INPUT,
+            detector_params={"numeric_claims": {"units": {"time": "ms"}}},  # type: ignore[dict-item]
+        )
+
+
 def test_fr_pol_002_ctx_carries_no_policy_and_no_action_map() -> None:
     """The load-bearing property, pinned so a later convenience edit fails loudly.
 
