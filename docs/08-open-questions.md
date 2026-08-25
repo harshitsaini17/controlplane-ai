@@ -39,13 +39,7 @@ Options: (a) `ollama pull` a small genuinely-local model (~2 GB) and assert no `
 Assumption: **(a)**, gated on the assertion actually passing — the entry stays `STUB` until then. Until it passes, treat fallback as unavailable rather than as working, and never report a fallback latency or cost number from it (AGENTS.md §7).
 Deadline: before the consistency detector sprint (it needs the 2nd sample) — earlier if the cost plane is demoed. Status: **OPEN**
 
-**Q-18 — What counts as a "citation marker" for `numeric_claims`?**
-Why: 04 §2's `numeric_claims` row turns on the phrase "with no citation marker" and **nothing in the docs defines it.** No 04 section, no ADR; the only other "citation" hits are ADR-008 and the charter, which govern *our* citations in the proposal, not markers in model output. The clause is one of the detector's three, so it cannot run without a definition — a provisional one is therefore **already in use** and no work is blocked. What this gates is **publication**, not progress.
-In use now (`_CITATION_MARKER`, `detectors/numeric_claims.py`): numeric footnotes `[1]` · author-year `[Smith 2024]` / `(Smith, 2024)` · bare `(2024)` · URLs · attribution phrases ("according to", "as reported by", "per the") · `Source:`-style leaders · structural pointers (`section 4`, `§ 12`) · named regulatory documents (10-K, prospectus, filing). Deliberately **narrow**: each shape either names a source or points at one.
-Excluded on purpose: **hedges are not citations.** "Roughly $4M" is an epistemic qualifier and 04 §6 `soften` handles those; admitting hedges would let an unsourced figure pass as attributed.
-Options: (a) confirm the shipped set as-is; (b) amend it — one regex, nothing else depends on the membership; (c) write it into 04 §2 as normative so it stops being an implementation detail.
-Assumption: **(a)**, and until it is ruled every `numeric_claims` FP/FN figure is provisional.
-⚠ **Publication gate.** This definition directly shapes the `numeric_claims` false-positive rate, and its exact membership is a judgement call — so it is the thing to challenge in review, and **no `numeric_claims` FP/FN number may be published until it is confirmed** (AGENTS.md §7).
+
 ⚠ A marker is **not** a verification. It suppresses only this detector, whose question is "was this figure attributed?" — never "is the attribution true?", which is `rag_grounding`'s independent question. The two are *meant* to disagree on a plausible citation for a figure the context never states; 06 keeps that pair as a control and `test_a_citation_is_not_a_verification` pins it.
 Deadline: before any `numeric_claims` number reaches a report, the README, the proposal or the video. Status: **OPEN**
 
@@ -68,17 +62,45 @@ slugs lived scattered across doc prose, YAML comments, docstrings and test notes
 | `[D2-price-table-cannot-express-per-tier-cost]` | MAJOR | Step 2 | **CLOSED** — ADR-022 (prices keyed by concrete model id) |
 | `[D3-tier1-pii-recall-below-target]` | **MAJOR** | Step 4 | **OPEN** — measured micro recall **0.8361** vs NFR-EVAL-001 target 0.95. Precision 1.000 (zero FPs). 10 misses, all pattern-coverage gaps: 8 `pii.phone`, 2 `pii.api_key` |
 | `[D8-numeric-claims-treats-identifiers-as-statistics]` | **MAJOR** | Step 4 | **OPEN** — measured precision **0.267** (33 FPs, 30 of them `PII-*` cases). The documented "large-number" clause matches digit runs inside SSNs, cards and phone numbers |
+| `[D2-detector-params-cannot-hold-list-values]` | MINOR | ADR-025 | **OPEN** — ADR-025 makes `units`/`citation_markers` overridable via `detector_params`, but the schema types it `dict[str, dict[str, float]]`, which cannot hold a list of strings. No work blocked: 04 §2.4 lists are normative meanwhile |
 
-**Open: two**, both filed at the Step-4 STOP point and both **measured, not predicted** —
+**Open: three.** Two are the Step-4 measured findings, **both now ruled** (ADR-025/026) and awaiting the re-measurement that closes them per ADR-026 §5; the third is a schema-type mismatch found while applying ADR-025 and is filed below. They were **measured, not predicted** —
 they are the eval harness doing its job on its first real run. Full reports below.
 
 Also still gating, tracked as questions rather than deviations: **Q-10** (no genuinely local
-model installed — fallback and 2nd-sample duty unassigned), **Q-18** (the "citation marker"
-definition, which gates publication of any `numeric_claims` figure), and the Groq
-price-provenance caveat under Q-02, which constrains what the cost simulation may publish
-rather than blocking it.
+model installed — fallback and 2nd-sample duty unassigned) and the Groq price-provenance caveat
+under Q-02, which constrains what the cost simulation may publish rather than blocking it.
+**Q-18's publication gate is lifted** — ADR-025 made the citation-marker list normative in
+04 §2.4.2, so a `numeric_claims` figure may now be published if labelled v1 or v2 (06 §3.2).
 
 ---
+
+## DEVIATION REPORT [D2-detector-params-cannot-hold-list-values]
+Severity: MINOR
+Doc & section: 04 §2.4.4 (ADR-025's extension point); 04 §3 policy schema `detector_params`
+The doc says: ADR-025 makes `numeric_claims`' unit list and citation-marker list "extensible via
+`detector_params.units` / `detector_params.citation_markers`".
+Reality says: `Policy.detector_params` is typed `dict[str, dict[str, float]]` — a mapping of
+detector name to **float** parameters, which is what `tier2_toxicity`'s cutoffs needed. A list of
+strings cannot be stored in it, so the extension point ADR-025 describes does not exist yet.
+`DetectorContext.params_for()` returns `dict[str, float]` for the same reason.
+Impact if we ignore it: none immediately — 04 §2.4 carries the normative lists and the detector
+reads those, so both detectors are fully implementable and no number is affected. The cost is that
+a documented capability is not real, which is the kind of gap that gets discovered by whoever
+first tries to use it.
+Options:
+  A) Widen to `dict[str, dict[str, float | list[str]]]` and have `params_for` return the union.
+     Trade-off: every consumer must narrow the type; touches the detector contract in base.py.
+  B) Add a separate `detector_lists: dict[str, list[str]]` field. Trade-off: two override
+     mechanisms keyed by detector name, and a reader must know which one holds what.
+  C) Drop the extension-point sentence from ADR-025 and keep 04 §2.4 as the only source.
+     Trade-off: loses per-use-case tuning that a regulated UC might genuinely want (its own
+     filing vocabulary as citation markers).
+Recommendation: **A** — one mechanism, and the narrowing is local to the two detectors that read
+lists. Not applied, because widening a core schema type to satisfy a doc sentence is exactly the
+kind of change that should be ruled rather than assumed.
+Blocked work: none. Filed because 04 §2.4.4 now cites this slug, and a slug in doc prose that is
+absent from this ledger means the ledger is what is wrong (AGENTS.md §11).
 
 ## DEVIATION REPORT [D3-tier1-pii-recall-below-target]
 Severity: MAJOR
@@ -156,6 +178,13 @@ credibility.
 
 ## Resolved
 *(move items here with the ruling + date + ADR link)*
+
+**Q-18 — What counts as a "citation marker" for `numeric_claims`?** — RESOLVED 2026-08-26 by **ADR-025**.
+Ruling: **(c)** — written into 04 §2.4.2 as normative, so it is no longer an implementation detail. Lexical only, searched in the numeral's own sentence, case-insensitive: attribution phrases · bracketed numeric reference · parenthetical author-year · URL. Judging whether a citation *supports* the figure stays `rag_grounding`'s job.
+**The ruled list is not the provisional one, and the delta moves the FP rate in both directions** — recorded because it is the reason the v2 `numeric_claims` precision is not comparable to v1's on the citation clause alone:
+- **Dropped** (stop suppressing → can only raise FP): bracketed author-year `[Smith 2024]`; structural pointers (`section 4`, `clause 12`, `§ 4`, `table 3`); named regulatory documents (`10-K`, `prospectus`, `filing`); the `ref:` / `reference:` / `see:` leaders; `as stated/noted in`.
+- **Added** (start suppressing → can only lower FP): `as per`, `cited by`, `based on`, `study by`, `survey by`, `data from`, `figures from`.
+The publication gate this question carried is **lifted**: a `numeric_claims` FP/FN figure may now be published, provided it is labelled v1 or v2 per 06 §3.2.
 
 **Q-17 — 04 §2 names "Aho-Corasick keyword sets"; the implementation uses a compiled regex alternation.** — RESOLVED 2026-08-26 (MINOR gap, AGENTS.md §6; agent-resolved).
 Why: `pyahocorasick` is not a declared dependency, and the documented term source (`blocklist_extra`) ships **empty** in all three policies — so the structure would be carrying zero terms.

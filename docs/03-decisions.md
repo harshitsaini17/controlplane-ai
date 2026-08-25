@@ -251,6 +251,89 @@ bump is reviewed inside the Checkpoint 2 re-review.
 (`FROZEN_COMMIT`/`FROZEN_SHA256`), `eval/dataset/pii.jsonl` (7 cases),
 `eval/dataset/REVIEW_NEEDED.md` (item closed).
 
+## ADR-025 — `numeric_claims` fires on quantity-shaped numerals only (resolves D8, closes Q-18)
+
+**Context:** the v1 contract in 04 §2 read "currency/percent/**large-number** patterns with no
+citation marker". Implemented faithfully and measured blind against the frozen corpus, it
+returned **precision 0.267** — 33 false positives to 12 true positives, and **30 of the 33 were
+`PII-*` cases**. The cause is structural rather than a tuning miss: an SSN, a credit-card number
+and a phone number are all runs of digits, so a rule keyed on digit-run length classifies
+**identifiers as statistics**. The flaw is in the *specified behaviour*, which is why it needed a
+ruling and not a patch (D8).
+**Options:** (a) accept and report 0.267; (b) suppress large-number matches overlapping a Tier-1
+PII span; (c) delete the bare digit-run rule and require a *quantity* shape.
+**Decision:** **(c)**, with (b)'s intent preserved as an independent pre-filter. Three parts:
+
+1. **The bare large-digit-run rule is DELETED from 04 §2.** A numeral fires only if it carries
+   a quantity shape: adjacent currency symbol or ISO code · percent · magnitude word or `k/M/B`
+   suffix · comma-grouped thousands · attached measurement unit (04 §2.4.1).
+2. **Identifier exclusion is a pre-filter inside `numeric_claims`, absolute and first**
+   (04 §2.4.3). It excludes Luhn-valid 13–19 digit sequences, SSN shape, phone shapes, and digit
+   runs inside alphanumeric tokens. **Absolute** means an excluded candidate never reaches the
+   shape branches even when currency-adjacent — chosen over a scoring interaction so behaviour is
+   predictable instead of order-dependent.
+3. **Q-18 is closed with a lexical citation-marker list** (04 §2.4.2): attribution phrases,
+   bracketed numeric references, parenthetical author-year, URLs — searched in the numeral's own
+   sentence, case-insensitive.
+
+**Why (b) alone was rejected:** suppressing on overlap with a Tier-1 span would make
+`numeric_claims` depend on another detector's output, which §9.3 forbids and which the engine
+would have to mediate. The pre-filter is a deliberate **structural duplicate** of those regexes,
+never a call into them, so the detectors stay independent.
+**Trade-offs, accepted and documented rather than discovered later:** a currency-prefixed
+Luhn-valid amount will not fire — conservative silence is right for a detector whose subject is
+unsourced statistics. Bare integers in prose ("we processed 15000 requests") no longer fire
+either, so recall on that shape drops; the deleted rule was the only thing catching it, and it
+was catching identifiers at three times the rate. The lexical marker list also cannot tell a
+*real* citation from a decorative one — that is entailment, and it stays `rag_grounding`'s job.
+**The v1 precision 0.267 stands permanently** as the blind measurement against the v1 spec
+(ADR-026's dual-column rule).
+**Docs touched:** 04 §2 registry row + new §2.4/§2.4.1–4, 06 §3 (revision methodology),
+`docs/08` (Q-18 closed, D8 closed), `controlplane/detectors/numeric_claims.py`, its tests.
+
+## ADR-026 — Disclosed revision protocol for `tier1_pii` (resolves D3)
+
+**Context:** `tier1_pii` measured **recall 0.8361** against NFR-EVAL-001's 0.95, with precision
+1.000 — pure missed coverage across 8 phone shapes and 2 secret shapes (D3). Two obvious
+responses are both wrong. A silent fix destroys the measurement: the v1 number was taken *before*
+its failures were known, and a pattern written afterwards is indistinguishable from one fitted to
+the failing fixtures unless something makes the derivation auditable. Pure acceptance is equally
+wrong — the misses are genuine format coverage, and refusing to fix a real gap to protect a
+number is its own kind of dishonesty.
+**Options:** (a) silent fix; (b) accept 0.836 permanently; (c) narrow NFR-EVAL-001's scope to the
+categories v1 covers; (d) revise under disclosure.
+**Decision:** **(d)**. **(c) is rejected as target-gaming** — redefining a metric to match a
+result is precisely what AGENTS.md §7 forbids, and it is recorded here so the option is visibly
+considered and refused. The protocol:
+
+1. **v1 numbers are permanent.** The eval report gains two columns — *v1 (blind first contact)*
+   and *v2 (post-revision, disclosed)* — plus a revision-methodology section. Recall 0.8361 /
+   precision 1.000 never disappears from the record.
+2. **v2 patterns derive from named published specs only**, each cited in 04 §2.5: ITU-T E.164;
+   NANP conventions including the `N ∈ [2–9]` constraint; RFC 7519/7515 for JWT. The `eyJ` anchor
+   is **permitted and must be justified in writing as spec-derived** — it is the base64url
+   encoding of `{"`, the mandatory opening of every JOSE header — and *that written justification
+   is what makes the pattern auditable as non-fixture-shaped*. Hex secrets fire only with a
+   credential cue word in the same sentence.
+3. **Two scope exclusions**, documented as precision-grounded DLP trade-offs and not fixture
+   avoidance: bare 7-digit local numbers (indistinguishable from order/ticket ids — exactly
+   `clean.jsonl`'s FP pressure) and bare 32/64-hex without a credential cue (collides with git
+   SHAs, digests, dashless UUIDs, trace ids). Both **cost known recall**, and that cost is
+   reported.
+4. **New tests are authored from the specifications before the re-run**, with no strings copied
+   from `eval/dataset/`.
+5. **One re-measurement.** If v2 recall still lands under 0.95 the miss stands and is reported:
+   **the target does not move and the harness is not touched.** Precision may fall from 1.000 —
+   that is reported too, in the same table.
+
+**Trade-offs:** the report becomes harder to read than a single column, which is the intended
+cost — a reader can see both what the detector did before it knew its failures and after. The
+protocol also concedes that a v2 number is *weaker evidence* than a v1 number by construction,
+however carefully derived; the dual column exists so nobody has to take that on trust.
+**Docs touched:** 04 §2 registry row + new §2.5, 06 §3 (revision methodology + the report's
+dual-column requirement), `docs/08` (D3 closed after re-measurement),
+`controlplane/detectors/tier1_patterns.py`, its tests, `eval/run_all.py`, README claims rows.
+
 ## Minor resolutions log (review findings 6–8 — doc edits, no ADR needed)
 
 - **F6:** Cost plane gets a live enforcement moment — demo beat 7b added (budget-exhaustion BLOCK, SC-2 now covered live).

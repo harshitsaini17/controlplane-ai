@@ -53,13 +53,13 @@ Common contract: `async detect(ctx) -> list[Signal]`; must respect its latency b
 
 | Detector | Stage | Budget (NFR-P-002) | Emits | Notes |
 |---|---|---|---|---|
-| `tier1_pii` | input + output_sentence | <2 ms | `pii.*` | compiled regex + Aho-Corasick keyword sets; span-accurate for redaction |
+| `tier1_pii` | input + output_sentence | <2 ms | `pii.*` | compiled regex + Aho-Corasick keyword sets; span-accurate for redaction. **Pattern set is normative in §2.5 (ADR-026), including two documented scope exclusions** |
 | `tier1_blocklist` | input + output_sentence | <2 ms | `security.blocklist` | per-use-case extra terms via policy `blocklist_extra` |
 | `tier2_injection` | input | <25 ms | `security.prompt_injection` | small transformer, CPU/ONNX; score = model prob |
 | `tier2_toxicity` | output_sentence | <25 ms | `toxicity.*` | moderate vs high via detector-internal cutoffs (0.5/0.8 defaults; overridable in policy `detector_params`) |
 | `fast_consistency` | output_full* | <60 ms | `hallucination.low_confidence` | 2nd sample at temperature; embedding cosine; *runs on accumulated response so far at each sentence boundary using the parallel-sample stream (see §2.3) |
 | `rag_grounding` | output_sentence | <30 ms | `hallucination.ungrounded_claim` | only when request carries `context` docs; sentence-vs-context embedding entailment proxy |
-| `numeric_claims` | output_sentence | <5 ms | `hallucination.unsourced_numeric` | heuristic: currency/percent/large-number patterns with no citation marker and no match in provided context; high-stakes use cases map it to ESCALATE |
+| `numeric_claims` | output_sentence | <5 ms | `hallucination.unsourced_numeric` | **quantity-shaped** numerals only (§2.4, ADR-025 — the bare large-digit-run rule is DELETED) with no citation marker (§2.4.2) and no match in provided context; identifier structures are excluded by a pre-filter; high-stakes use cases map it to ESCALATE |
 | `cost_budget` | input | <1 ms | `cost.*` | ledger lookup; token estimate via tokenizer count × price table |
 | `loop_guard` | input | <1 ms | `cost.loop_detected` | sliding window per conversation |
 | `conv_tracker` | conversation | <1 ms | `conversation.cumulative_risk` | running totals of pii/hallucination signals per conversation id — **`stage` ∈ {output_sentence, output_full, conversation} only** (ADR-021) |
@@ -83,6 +83,99 @@ Runs after fast-path detection, before the policy engine. For each span-bearing 
 - `consistency: off`: `rag_grounding` covers the performance plane where context exists.
 
 Cost: ~2× tokens wherever sampling occurs — a policy knob (coverage vs cost), said openly in the demo.
+
+### 2.4 `numeric_claims` — quantity shapes, identifier exclusion, citation markers (ADR-025)
+
+The v1 contract read "currency/percent/**large-number** patterns". The bare large-digit-run
+clause is **DELETED**: measured against the labelled corpus it produced precision 0.267,
+because an SSN, a card number and a phone number are all runs of digits, so the clause
+classified **identifiers as statistics** (D8). A numeral is now a claim only if it is shaped
+like a *quantity*.
+
+#### 2.4.1 Firing shapes — a numeral fires iff it carries at least one
+
+| | shape | examples |
+|---|---|---|
+| (a) | adjacent currency symbol (`₹ $ € £ ¥`) or ISO code (`USD`, `EUR`, `INR`, `GBP`, …) | `$4,200`, `1200 USD` |
+| (b) | percent sign, or the word "percent" | `34%`, `34 percent` |
+| (c) | magnitude word or suffix in the same token group: `thousand`, `million`, `billion`, `trillion`, `lakh`, `crore`, or a `k`/`M`/`B` suffix on the numeral | `2.3 million`, `40k` |
+| (d) | comma-grouped thousands separators | `1,234,567` — **subject to §2.4.3** |
+| (e) | attached measurement unit from the starter list — time `ms/s/min/hr` · data `KB/MB/GB/TB` · distance `km/mi/m` · mass `kg/lb` · temperature `°C/°F` | `250 ms`, `1.5 GB` |
+
+The unit list in (e) is a *starter* list, extensible per use case (§2.4.4).
+
+#### 2.4.2 Citation marker — defined lexically (closes Q-18)
+
+Searched in the **same sentence** as the numeral, case-insensitive. A marker suppresses the
+signal. Lexical only by design: judging whether a citation actually *supports* the number is
+entailment, which is `rag_grounding`'s job, not this detector's.
+
+- attribution phrases: `according to`, `as per`, `per `, `reported by`, `as reported by`,
+  `cited by`, `cited in`, `source:`, `based on`, `study by`, `survey by`, `data from`,
+  `figures from`
+- a bracketed numeric reference — `[1]`-style
+- a parenthetical author-year reference containing a 4-digit year — `(Chen 2024)`
+- a URL — `http://`, `https://`, `www.`
+
+#### 2.4.3 Identifier exclusion — mechanism and precedence, normative
+
+A **pre-filter inside `numeric_claims`**. It shares no code path, ordering dependency, or
+output with `tier1_*` — §9.3's independent-detectors rule stays intact, and the phone/card
+structures below are a deliberate *structural duplicate* of those regexes, never a call into
+them. It runs **FIRST** and is **ABSOLUTE**: an excluded candidate never reaches the shape
+branches above, even when currency- or percent-adjacent.
+
+Excluded structures:
+
+1. Luhn-valid 13–19 digit sequences, with or without space / dash / comma grouping
+2. SSN shape `ddd-dd-dddd`
+3. phone shapes per the §2.5 v2 pattern set (E.164 and NANP forms)
+4. digit runs embedded inside alphanumeric tokens — order ids, hashes
+
+**Accepted consequence, documented rather than discovered:** a currency-prefixed Luhn-valid
+amount will not fire. Conservative silence is correct for a detector whose subject is unsourced
+statistics — a false ESCALATE on UC-3 costs a human review cycle, and the exclusion is absolute
+precisely so its behaviour is predictable rather than order-dependent.
+
+#### 2.4.4 Extension point
+
+`units` and `citation_markers` are extensible per use case via policy `detector_params`. The
+schema currently types `detector_params` as `dict[str, dict[str, float]]`, which cannot hold a
+list of strings — tracked as `D2-detector-params-cannot-hold-list-values` in `docs/08`. Until
+that is ruled, the §2.4.1(e) and §2.4.2 lists above are the **only** source, and they are
+normative here.
+
+### 2.5 `tier1_pii` v2 pattern set — spec-derived, with two scope exclusions (ADR-026)
+
+Every v2 pattern derives from a **named published specification**, cited so the derivation is
+auditable rather than asserted. This matters because the v1 measurement (recall 0.8361) was
+taken *before* its failures were known: a pattern written afterwards could have been shaped to
+the failing fixtures, and only a spec citation distinguishes a real format rule from a
+test-fitted one.
+
+| shape | specification | rule |
+|---|---|---|
+| phone, international | **ITU-T E.164** | leading `+`, country code, ≤ 15 digits total, optional space/dash grouping |
+| phone, NANP parenthesized | **NANP** conventions | `(NPA) NXX-XXXX`, with the spec's `N ∈ [2–9]` constraint on the first digit of both area code and exchange |
+| phone, NANP dot-separated | **NANP** conventions | `NPA.NXX.XXXX`, same `N ∈ [2–9]` constraint |
+| JWT / bearer token | **RFC 7519** (JWT) + **RFC 7515** (JOSE) | three dot-separated base64url segments at minimum plausible lengths. Anchoring on the `eyJ` prefix is **permitted and spec-derived**: base64url of `{"` — the mandatory opening of every JOSE header object — so the prefix is a property of the format, not of any sample |
+| hex secret, 32 / 64 chars | — | fires **only** with a credential cue word in the same sentence: `key`, `token`, `secret`, `api_key`, `apikey`, `bearer`, `credential`, `password` |
+
+The `N ∈ [2–9]` constraint is a **spec-justified narrowing that also protects precision** — it
+is in the NANP definition, and it happens to reject the digit runs that would otherwise
+false-positive.
+
+**Two scope exclusions, precision-grounded DLP trade-offs and not fixture avoidance:**
+
+1. **Bare 7-digit local numbers** (NANP local form, no area code) are out of scope.
+   Structurally indistinguishable from order numbers, ticket ids and record ids — exactly the
+   false-positive pressure `clean.jsonl` exists to apply.
+2. **Bare 32/64-hex without a credential cue** is out of scope. It collides with git SHAs,
+   MD5/SHA digests, dashless UUIDs and trace ids, all of which appear in legitimate support
+   and engineering text.
+
+Both exclusions **cost known recall** on the labelled set, and that cost is reported rather
+than hidden: see 06 §3's revision-methodology requirement.
 
 ## 3. Policy schema (per-use-case YAML)
 

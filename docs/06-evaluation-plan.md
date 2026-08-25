@@ -152,6 +152,45 @@ robust.
 
 **Overlap correctness:** all OVLP cases must produce exactly one multi-label signal and the most-severe-action resolution (04 §4.3) — pass/fail listed per case.
 
+### 3.1 Harness rules (normative — the report obeys these, not convenience)
+
+1. **`n/a` over a fake 1.0.** An empty denominator is *undefined*, never perfect. A detector with
+   no positives in the corpus reports `n/a`, because "recall 1.0 over zero cases" is the most
+   flattering way to say nothing was measured.
+2. **Skipped, never scored.** A detector that does not exist is reported as **skipped**, with its
+   unscored label occurrences counted. Treating its labels as misses would blame absent code for
+   a recall figure and make the number unreadable.
+3. **No fabricated 4×4.** The per-use-case matrix is **NOT COMPUTED** until the policy engine
+   exists. Deriving `action_taken` from `labels_expected` would compare ground truth against a
+   function of ground truth and yield a perfect diagonal that means nothing.
+
+### 3.2 Revision methodology — disclosed revision, dual columns (ADR-026)
+
+A detector revised **after** its failures were measured produces weaker evidence than one
+measured blind, however carefully the revision was derived. The report therefore never replaces a
+number; it adds a column:
+
+| column | meaning |
+|---|---|
+| **v1 (blind first contact)** | measured before the failing cases were known. Permanent — never overwritten, never deleted |
+| **v2 (post-revision, disclosed)** | measured after a spec-derived revision, with the derivation cited |
+
+Requirements on any v2 column:
+
+- Each pattern cites a **named published specification** (04 §2.5). A pattern without a citation
+  cannot appear in a v2 column.
+- **Scope exclusions are stated with their recall cost**, not omitted. An exclusion that quietly
+  removes hard cases is indistinguishable from tuning.
+- **One re-measurement.** Iterating until a target is met is target-gaming; if v2 misses, the
+  miss is reported and **the target does not move**.
+- Precision movement is reported in the same table as recall. A revision that buys recall with
+  precision must show both halves.
+
+**v1 metric validity across a freeze bump.** ADR-024 bumped the freeze after v1 was measured. Its
+seven changed cases altered `action_expected` only — **no `labels_expected`** — so per-detector
+precision/recall/F1, which are computed against labels, remain valid over an identical label set
+(freeze history in §1). A bump touching a label would invalidate them and force re-measurement.
+
 ## 4. Latency benchmark (`bench_latency`)
 
 - Method: 300 requests replayed from dataset traffic mix against the gateway with a **stub upstream** (canned SSE at realistic token cadence) so gateway overhead is isolated from provider variance; then 30 requests against the real provider for an end-to-end sanity row.
