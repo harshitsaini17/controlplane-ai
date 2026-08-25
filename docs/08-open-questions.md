@@ -63,8 +63,22 @@ slugs lived scattered across doc prose, YAML comments, docstrings and test notes
 | `[D3-tier1-pii-recall-below-target]` | **MAJOR** | Step 4 | **OPEN** — measured micro recall **0.8361** vs NFR-EVAL-001 target 0.95. Precision 1.000 (zero FPs). 10 misses, all pattern-coverage gaps: 8 `pii.phone`, 2 `pii.api_key` |
 | `[D8-numeric-claims-treats-identifiers-as-statistics]` | **MAJOR** | Step 4 | **OPEN** — measured precision **0.267** (33 FPs, 30 of them `PII-*` cases). The documented "large-number" clause matches digit runs inside SSNs, cards and phone numbers |
 | `[D2-detector-params-cannot-hold-list-values]` | MINOR | ADR-025 | **OPEN** — ADR-025 makes `units`/`citation_markers` overridable via `detector_params`, but the schema types it `dict[str, dict[str, float]]`, which cannot hold a list of strings. No work blocked: 04 §2.4 lists are normative meanwhile |
+| `[D1-citation-marker-per-matches-the-rate-preposition]` | **BLOCKER** | ADR-025 impl | **OPEN** — the ruled marker list contains the bare token `per `, which is the ordinary English *rate* preposition, so `$4 million per year` emits nothing. 2 corpus cases labelled `unsourced_numeric` are suppressed. **Gates the single permitted re-measurement** |
+| `[D2-nanp-n-constraint-rejects-nothing-as-composed]` | **MAJOR** | ADR-026 impl | **OPEN** — 04 §2.5 claims the NANP `N ∈ [2-9]` narrowing "rejects the digit runs that would otherwise false-positive"; v1's retained `_PHONE` runs first and claims the same extent, so the constraint rejects nothing in the composed detector |
+| `[D2-adr-026-eyj-derivation-is-arithmetically-wrong]` | MINOR | ADR-026 impl | **OPEN** — ADR-026 justifies the `eyJ` anchor as "the base64url encoding of `{\"`". It is not: that encodes to `eyI=`. The anchor is still spec-derived, by a different derivation. Conclusion survives; stated reason does not |
 
-**Open: three.** Two are the Step-4 measured findings, **both now ruled** (ADR-025/026) and awaiting the re-measurement that closes them per ADR-026 §5; the third is a schema-type mismatch found while applying ADR-025 and is filed below. They were **measured, not predicted** —
+**Open: six.** Two are the Step-4 measured findings (D3, D8), **both ruled** (ADR-025/026) and
+awaiting the re-measurement that closes them per ADR-026 §5. One is the `detector_params`
+schema-type mismatch found while applying ADR-025. The remaining **three were found by writing
+the ADR-026 spec-derived tests** — which is the outcome that discipline exists to produce: tests
+authored from the specifications rather than from the fixtures caught two defects in the ruled
+specs themselves and one in my own reading of them, before any number was computed.
+
+**One of the three, `[D1-citation-marker-per-matches-the-rate-preposition]`, gates the
+re-measurement and is why it has not been run.** ADR-026 §5 permits exactly one re-measurement
+and forbids touching the harness afterwards, so running it against a marker list with a known
+false-negative hole would bake two guaranteed misses into a permanent number. Halting is
+cheaper than a number nobody can revise. The Step-4 findings were **measured, not predicted** —
 they are the eval harness doing its job on its first real run. Full reports below.
 
 Also still gating, tracked as questions rather than deviations: **Q-10** (no genuinely local
@@ -175,6 +189,117 @@ Blocked work: any `numeric_claims` precision/F1 number, and the UC-3 escalation 
 credibility.
 
 ---
+
+## DEVIATION REPORT [D1-citation-marker-per-matches-the-rate-preposition]
+Severity: BLOCKER
+Doc & section: 04 §2.4.2 (citation-marker list, closing Q-18); ADR-025
+The doc says: the citation-marker list includes the attribution phrase `"per "` — quoted with a
+trailing space, alongside `"as per"`, `"according to"`, `"reported by"`.
+Reality says: `per` in English is overwhelmingly the **rate** preposition, not an attribution.
+Implemented literally, the marker suppresses every rate-shaped quantity:
+
+| sentence | v2 signal |
+|---|---|
+| `Cost is $4 million per year.` | **none** |
+| `Latency was 250 ms per request.` | **none** |
+| `Throughput hit 22% per node.` | **none** |
+| `We store 4 TB per tenant.` | **none** |
+
+Measured corpus exposure on the current freeze: 6 cases contain a rate `per`, of which **2 are
+labelled `unsourced_numeric` — HAL-049 (`per day`) and HAL-052 (`per employee`) — and both are
+suppressed**, i.e. two guaranteed false negatives.
+
+This is not an implementation choice I can narrow away. v1 scoped the same clause as
+`\bper\ (?:the|our|your|section|clause|§)\b` — attribution only — and ADR-025 replaced it with
+the bare token. There is no reading of a literal `"per "` that excludes `per year`.
+Impact if we ignore it: rate-expressed figures are the shape financial and performance claims
+most often take, and this is the detector whose UC-3 mapping is **ESCALATE** — so the miss lands
+on the highest-stakes path. Worse, ADR-026 §5 permits **one** re-measurement and forbids
+adjusting anything afterwards, so measuring now makes the two known misses permanent and
+unrevisable.
+Options:
+  A) Re-scope the marker to attribution contexts, e.g. `per (?:the|our|your|section|clause|§|
+     annex|exhibit|filing)` — v1's shape, which is the precedent. Trade-off: `per Smith 2024`
+     and other bare-noun attributions are missed, raising firing on genuinely-cited figures.
+     Direction is safe: it can only *raise* the firing rate, never hide an unsourced number.
+  B) Drop `per` from the list entirely and rely on `as per`, which is unambiguously
+     attributive. Trade-off: `per the filing` stops being a marker; strictly more firing than A.
+  C) Keep the list literally as ruled and accept the two misses. Trade-off: a documented,
+     spec-mandated false negative on the ESCALATE path, permanently baked into the v2 number.
+Recommendation: **A** — it restores the clause to the only sense in which it is an attribution,
+matches the v1 precedent so the two columns stay comparable in kind, and its error direction is
+the safe one. Not applied: the list is normative in a ruled ADR, and editing it is a ruling.
+Blocked work: the ADR-026 §5 re-measurement, and therefore the closure of **D3 and D8**, the
+dual-column report, and the README claims rows that cite it.
+
+## DEVIATION REPORT [D2-nanp-n-constraint-rejects-nothing-as-composed]
+Severity: MAJOR
+Doc & section: 04 §2.5 (`tier1_pii` v2 pattern set, ADR-026)
+The doc says: the NANP `N ∈ [2-9]` constraint on the first digit of the area code and exchange
+"is a **spec-justified narrowing that also protects precision** — … it happens to reject the
+digit runs that would otherwise false-positive."
+Reality says: it rejects nothing in the composed detector. v1's `_PHONE`
+(`(?:\(\d{3}\)|\b\d{3})[-.\s]?\d{3}[-.\s]?\d{4}`) is **retained** and runs **first** in
+`_PII_PATTERNS`, matching the same extent, so longest-match-wins hands it the span:
+
+    (115) 555-0123  -> fires (via _PHONE)      NPA starts with 1 — invalid NANP
+    (015) 555-0123  -> fires (via _PHONE)      NPA starts with 0 — invalid NANP
+    (415) 155-0123  -> fires (via _PHONE)      NXX starts with 1 — invalid NANP
+    415.055.0123    -> fires (via _PHONE)      NXX starts with 0 — invalid NANP
+
+A second measured consequence, worth stating because it changes what the v2 column will show:
+`_PHONE` already matched both the parenthesized and dot-separated 10-digit forms, so the two new
+NANP rows add **no recall at all**. The v2 phone gain comes from **E.164 alone**, plus the
+`( 415 ) 555-0123` spaced-parenthesis variant.
+Impact if we ignore it: a precision claim in a contract doc that the code cannot support. It does
+not block the re-measurement — recall can only rise — but it means the doc describes a
+discrimination the detector does not make.
+Options:
+  A) Narrow `_PHONE` to `[2-9]` on both groups, making v1's rule NANP-conformant. Trade-off:
+     changes v1-derived behaviour, so the v1 precision-1.000 baseline no longer describes the
+     shipped code — exactly what ADR-026's permanence rule exists to prevent.
+  B) Retire `_PHONE` in v2 in favour of the three spec-derived rows. Trade-off: same permanence
+     objection, larger; also drops the bare `\b\d{3}` 10-digit form, which is real coverage.
+  C) Amend 04 §2.5 to drop the precision sentence, keeping `[2-9]` as spec conformance only.
+     Trade-off: the constraint stays inert — honest, but it earns nothing.
+Recommendation: **C** — the constraint is genuinely in the NANP definition and belongs in a
+spec-derived pattern; the false part is the precision claim, not the pattern. A is defensible in
+a later freeze cycle but must not ride along with a measurement.
+Blocked work: none. `tests/test_tier1_detectors.py::test_nanp_n_constraint_rejects_leading_0_and_1`
+asserts the constraint at the **pattern** level, where it is real, and records the shadowing in
+its docstring rather than pre-judging this ruling.
+
+## DEVIATION REPORT [D2-adr-026-eyj-derivation-is-arithmetically-wrong]
+Severity: MINOR
+Doc & section: ADR-026 §2 (JWT pattern justification); 04 §2.5 JWT row
+The doc says: anchoring on `eyJ` is permitted and spec-derived because "it is the base64url
+encoding of `{\"`, the mandatory start of every JOSE header — that written justification is what
+makes it auditable as non-fixture-shaped."
+Reality says: `base64url({\") == "eyI="`, not `"eyJ"`. Base64 packs three input bytes into four
+output characters, so two bytes cannot determine the third character. The third character is
+
+    ((0x22 & 0x0F) << 2) | (next_byte >> 6)  =  8 | (next_byte >> 6)
+
+and base64 index 9 is `J`, so the anchor holds exactly when `next_byte >> 6 == 1` — i.e. the
+byte after `"` is in `0x40`–`0x7F`, which every ASCII letter is. RFC 7515 §4 makes the header a
+JSON object and every registered parameter name (`alg`, `typ`, `kid`, `crit`, …) begins with a
+letter, so the anchor does hold for every conforming header whose first member is a registered
+parameter. **The ADR's conclusion is correct; only its stated derivation is wrong.**
+It also exposes one real bound the ADR's version hides: JSON permits whitespace after `{`, and
+`base64url({ \"alg\") == "eyIg…"` — no anchor. A pretty-printed JOSE header is missed.
+Impact if we ignore it: the pattern is fine and no number moves. The cost is specific to
+ADR-026's own purpose — the written justification is what makes the anchor auditable rather than
+fixture-shaped, and an auditor who checks the arithmetic finds it false, which discredits a
+correct decision.
+Options:
+  A) Amend ADR-026's justification to the true derivation and record the whitespace bound.
+     Trade-off: none beyond editing a ruled ADR, which requires this ruling.
+  B) Leave it and rely on the test docstring, which already carries the correct derivation.
+     Trade-off: the ADR — the auditable artifact — stays wrong.
+Recommendation: **A**.
+Blocked work: none. `test_rfc_7515_eyj_anchor_is_a_property_of_the_format` asserts the ADR's
+literal claim **as false**, asserts the true condition across nine registered header parameters,
+and asserts the whitespace bound, so the correction is executable rather than only prose.
 
 ## Resolved
 *(move items here with the ruling + date + ADR link)*

@@ -124,6 +124,14 @@ def test_tier1_pii_zero_width_email_evasion_observation() -> None:
     assert _run(tier1_pii, _ctx(REVIEW_TEXTS[6]))
 
 
-@pytest.mark.xfail(strict=True, reason="v1 large-number heuristic confuses comma-grouped identifiers with quantities")
 def test_numeric_claims_comma_grouped_card_is_not_a_quantity_observation() -> None:
+    """C2-F3 — was `xfail(strict=True)` against v1; ADR-025 fixes it, so it is now a live
+    regression assertion rather than a removed one.
+
+    v2 suppresses this card *twice over*, and both mechanisms were confirmed by probe:
+      1. §2.4.3's identifier pre-filter excludes the span, and
+      2. no §2.4.1 shape matches it independently — `4111,1111,1111,1111` groups in FOURS,
+         so the comma-grouped-**thousands** shape (d) never claims it either.
+    The redundancy matters: the assertion does not rest on the pre-filter alone.
+    """
     assert _run(numeric_claims, _ctx(REVIEW_TEXTS[7])) == []

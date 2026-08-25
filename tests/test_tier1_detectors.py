@@ -349,3 +349,205 @@ def test_nfr_sec_001_blocklist_evidence_excludes_the_term() -> None:
 
 def test_blocklist_emits_one_signal_per_occurrence() -> None:
     assert len(block("Fizzbuzz then Fizzbuzz again", ["Fizzbuzz"])) == 2
+
+
+# --------------------------------------------------------------------------
+# ADR-026 v2 pattern set — derived FROM THE SPECS, authored before the re-run
+# --------------------------------------------------------------------------
+#
+# ADR-026 §4 requires these tests be written from the named specifications with no string
+# copied from `eval/dataset/`. Every value below is authored here from the spec text:
+#   ITU-T E.164   — country code + national number, 15 digits maximum
+#   NANP          — (NPA) NXX-XXXX, N in [2-9] on both the area code and the exchange
+#   RFC 7519/7515 — JWT as three dot-separated base64url segments, JOSE header a JSON object
+#
+# Safe by construction, same rules as 06 §2: the 555-01xx block is reserved for fiction, and
+# country code 99 is unassigned, so no authored number here can reach a real subscriber. The
+# JWT is not a sample at all — it is BUILT by base64url-encoding a JOSE header, so its
+# provenance is RFC 7515 itself rather than any token anyone ever issued.
+
+
+def _jose_jwt() -> str:
+    """A JWT constructed from the specs rather than copied from anywhere.
+
+    RFC 7515 §4 makes the JOSE header a JSON object and RFC 7519 §3 makes a JWS-form JWT
+    three dot-separated base64url segments. Encoding the header here is what demonstrates the
+    `eyJ` anchor is a property of the FORMAT: `{"` opens every JSON object, and base64url of
+    `{"` is `eyJ`. Nothing about this string is fixture-shaped — it is derived.
+    """
+    import base64
+    import json
+
+    def segment(payload: dict[str, object]) -> str:
+        raw = json.dumps(payload, separators=(",", ":")).encode()
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+    header = segment({"alg": "HS256", "typ": "JWT"})
+    claims = segment({"sub": "0", "iat": 0})
+    return f"{header}.{claims}.{'A' * 43}"
+
+
+def test_rfc_7515_eyj_anchor_is_a_property_of_the_format() -> None:
+    """ADR-026 permits the `eyJ` anchor on the grounds that it is spec-derived, and requires a
+    written justification because that is what makes it auditable as non-fixture-shaped.
+
+    The anchor IS spec-derived, but not by the arithmetic the ADR states. ADR-026 says `eyJ`
+    "is the base64url encoding of `{"`" — it is not: base64 packs three bytes into four
+    characters, so `{"` alone encodes to `eyI=`. The third output character straddles `"` and
+    the byte that follows it:
+
+        char 3 = ((0x22 & 0x0F) << 2) | (next_byte >> 6) = 8 | (next_byte >> 6)
+
+    and base64 index 9 is `J`, so the anchor holds exactly when `next_byte >> 6 == 1`, i.e.
+    the byte is in 0x40-0x7F — which every ASCII letter is. RFC 7515 §4 makes the header a
+    JSON object and every registered parameter name begins with a letter, so the anchor holds
+    for every conforming header whose first member is a registered parameter. The conclusion
+    the ADR draws survives; only its stated derivation is imprecise, and the imprecision is
+    filed rather than silently corrected in the ADR text.
+
+    The limit this exposes is narrow and real: JSON permits whitespace after `{`, and
+    `{ "alg"...` encodes to `eyIg` — no anchor. Asserted below so it is a known bound rather
+    than a surprise.
+    """
+    import base64
+
+    # The ADR's literal claim, recorded as false.
+    assert base64.urlsafe_b64encode(b'{"') == b"eyI="
+
+    # The true condition, and the reason it covers every conforming JOSE header.
+    for parameter in (b"alg", b"jku", b"jwk", b"kid", b"x5u", b"x5c", b"x5t", b"typ", b"cty"):
+        assert base64.urlsafe_b64encode(b'{"' + parameter).startswith(b"eyJ")
+
+    # The documented bound: whitespace after `{` is legal JSON and defeats the anchor.
+    assert not base64.urlsafe_b64encode(b'{ "alg"').startswith(b"eyJ")
+
+    assert _jose_jwt().startswith("eyJ")
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("Call +1 415 555 0123 for help.", "+1 415 555 0123"),
+        ("Dial +14155550123 now.", "+14155550123"),
+        ("Try +99-912-345-6789 please.", "+99-912-345-6789"),
+        ("Reach +999123456789012 today.", "+999123456789012"),  # 15 digits — E.164 maximum
+    ],
+)
+def test_e164_international_form_matches(text: str, expected: str) -> None:
+    """ITU-T E.164: leading `+`, country code, up to 15 digits, optional grouping.
+
+    This is the shape v1 genuinely missed — v1's phone rule anchored on an optional `+1`, so
+    every non-NANP international number was invisible to it.
+    """
+    assert (labels(text), matched(text)) == (["pii.phone"], [("pii.phone", expected)])
+
+
+def test_e164_stops_at_the_fifteen_digit_maximum() -> None:
+    """E.164 caps a number at 15 digits, so a 16-digit run is not an E.164 number.
+
+    Asserted because the bound is the spec's, not a tuning choice: without it the pattern
+    would drift toward matching any long `+`-prefixed digit run.
+    """
+    assert scan("Reach +9991234567890123 today.") == []
+
+
+def test_nanp_paren_form_allows_spaces_inside_the_parentheses() -> None:
+    """`( 415 ) 555-0123` — the variant v1's `\\(\\d{3}\\)` could not match."""
+    text = "Ring ( 415 ) 555-0123 at noon."
+    assert matched(text) == [("pii.phone", "( 415 ) 555-0123")]
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("Ring (415) 555-0123 at noon.", "(415) 555-0123"),
+        ("Ring (415)555-0123 at noon.", "(415)555-0123"),
+        ("Ring 415.555.0123 at noon.", "415.555.0123"),
+    ],
+)
+def test_nanp_paren_and_dot_forms_match(text: str, expected: str) -> None:
+    assert matched(text) == [("pii.phone", expected)]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["(115) 555-0123", "(015) 555-0123", "(415) 155-0123", "415.055.0123", "415.155.0123"],
+)
+def test_nanp_n_constraint_rejects_leading_0_and_1(bad: str) -> None:
+    """NANP reserves a leading 0 or 1 on the area code (NPA) and the exchange (NXX) for
+    operator and long-distance signalling, so `N ∈ [2-9]` is the spec's own constraint.
+
+    Asserted against the **v2 patterns**, which is the extent of what can honestly be claimed
+    today: the composed detector still fires on these values because v1's broader `_PHONE`
+    rule is retained (deliberately — narrowing it would move the precision-1.000 v1 baseline)
+    and shadows them at equal extent. That gap between 04 §2.5's precision claim and the
+    composed behaviour is filed as an open deviation; this test asserts the constraint where
+    it genuinely exists and does not pre-judge how the shadowing is resolved.
+    """
+    from controlplane.detectors.tier1_patterns import (
+        _PHONE_NANP_DOT,
+        _PHONE_NANP_PAREN,
+    )
+
+    assert not _PHONE_NANP_PAREN.search(bad)
+    assert not _PHONE_NANP_DOT.search(bad)
+
+
+def test_scope_exclusion_1_bare_seven_digit_local_number() -> None:
+    """ADR-026 exclusion #1, a precision-grounded DLP trade-off and not fixture avoidance.
+
+    A bare 7-digit local number is structurally identical to an order number, a ticket id or
+    a record id — the false-positive pressure `clean.jsonl` exists to apply. It costs known
+    recall, and the cost is reported rather than hidden (06 §3).
+    """
+    assert scan("Order 555-0123 shipped today.") == []
+
+
+def test_rfc_7519_jwt_matches_as_an_api_key() -> None:
+    text = f"Use {_jose_jwt()} as the bearer."
+    assert matched(text) == [("pii.api_key", _jose_jwt())]
+
+
+def test_three_base64url_segments_without_the_jose_anchor_do_not_match() -> None:
+    """The anchor is what separates a JWT from any dotted token triple — a version string, a
+    package coordinate, a dotted path. Without `eyJ` the shape is not a JOSE header."""
+    assert scan("Use abcdefghij.klmnopqrst.uvwxyz1234 as the bearer.") == []
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        (
+            "The api_key is 0123456789abcdef0123456789abcdef here.",
+            "0123456789abcdef0123456789abcdef",
+        ),
+        ("Secret: " + "ab" * 32 + " rotated.", "ab" * 32),
+    ],
+)
+def test_hex_secret_fires_only_with_a_credential_cue(text: str, expected: str) -> None:
+    assert matched(text) == [("pii.api_key", expected)]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The build id is 0123456789abcdef0123456789abcdef exactly.",
+        "Digest " + "ab" * 32 + " matched the archive.",
+    ],
+)
+def test_scope_exclusion_2_bare_hex_without_a_cue(text: str) -> None:
+    """ADR-026 exclusion #2. A bare 32/64-hex run collides with git SHAs, MD5/SHA digests,
+    dashless UUIDs and trace ids, all of which appear in legitimate engineering text."""
+    assert scan(text) == []
+
+
+def test_hex_secret_length_is_exactly_32_or_64() -> None:
+    """A range would readmit the collisions the cue requirement exists to exclude — a 40-char
+    hex run is the git SHA-1 length, which is why it is not a secret shape."""
+    assert scan("The token is " + "0123456789abcdef0123456789abcdef0123" + " here.") == []
+
+
+def test_credential_cue_must_be_in_the_same_sentence() -> None:
+    """Sentence scoping, for the same reason `numeric_claims` scopes its markers: a cue
+    anywhere in a buffered UC-3 response would otherwise credentialize every digest in it."""
+    assert scan("Rotate the api_key. Digest " + "ab" * 32 + " matched.") == []

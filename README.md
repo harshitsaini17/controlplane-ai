@@ -29,8 +29,8 @@ This is a **hackathon prototype**, and this README will not pretend otherwise wh
 | Detector eval harness (`eval/run_all.py`) | implemented, tested — **3 of 11 detectors scored** |
 | Latency / fault-injection / cost / leak-scan harnesses, dashboard, demo runner | **not yet implemented** |
 
-`python -m eval.validate_dataset` passes. `python -m pytest` passes (401 collected: 398
-pass, 3 `xfail`). Nothing in
+`python -m eval.validate_dataset` passes. `python -m pytest` passes (433 collected: 431
+pass, 2 `xfail`). Nothing in
 `docs/07-demo-script.md` runs end to end yet.
 
 **The three deterministic detectors have now been scored, and two of them missed.** They were
@@ -61,7 +61,7 @@ claim.
 ```sh
 python -m venv .venv
 .venv/bin/pip install -e ".[dev]"
-.venv/bin/python -m pytest -q                       # 401: 398 pass, 3 xfail
+.venv/bin/python -m pytest -q                       # 433: 431 pass, 2 xfail
 .venv/bin/python -m eval.validate_dataset           # consistency gate (06 §2.4)
 .venv/bin/python -m eval.validate_dataset --freeze  # + assert the dataset is the frozen one
 ```
@@ -124,9 +124,11 @@ controlplane/  gateway, detectors, policy engine, audit, telemetry
 policies/      one YAML per use case — the behaviour lives here, not in Python
 config/        upstream providers + price table (05 §6.1)
 eval/          labeled dataset + evaluation harness (06)
-tests/         401 tests, named against the requirement IDs they cover
-tests/review/  independent checkpoint-review tests; its 3 xfail cases are documented
-               limitations (Unicode email evasion), not pending fixes
+tests/         433 tests, named against the requirement IDs they cover
+tests/review/  independent checkpoint-review tests; its 2 xfail cases are documented
+               limitations (Unicode homoglyph + zero-width email evasion), not
+               pending fixes. The third was the comma-grouped-card false positive,
+               which ADR-025 fixed — it is now a live regression assertion
 reports/       committed measurement evidence — generated, never hand-edited (06 §8)
 AGENTS.md      binding operating manual for coding agents on this repo
 ```

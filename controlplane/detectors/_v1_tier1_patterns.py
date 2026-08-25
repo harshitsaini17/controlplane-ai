@@ -1,3 +1,22 @@
+# ==========================================================================
+# FROZEN v1 — DO NOT EDIT, DO NOT FIX, DO NOT IMPROVE.
+#
+# Verbatim copy of the tier1_patterns implementation as it stood at commit 082ac18,
+# which is the code that produced the **v1 (blind first contact)** column of
+# reports/eval_report.md: the measurement taken BEFORE its own failures were
+# known (recall 0.8361 / precision 1.000 for tier1_pii; precision 0.267 for
+# numeric_claims).
+#
+# ADR-026 makes those numbers permanent, and the only honest way to keep a
+# number permanent is to keep it REPRODUCIBLE. Transcribing the figures into
+# the report would make them unverifiable the moment anyone doubted them, which
+# is what AGENTS.md §7 forbids. So this module stays runnable and the report
+# computes both columns on every run.
+#
+# Imported ONLY by eval/run_all.py for the v1 column. Nothing in the gateway
+# hot path may import it. Editing anything below silently rewrites history.
+# ==========================================================================
+
 """Tier-1 deterministic detectors: `tier1_pii`, `tier1_blocklist`.
 
 Implements the 04 §2 registry rows (stage `input + output_sentence`, budget <2 ms,
@@ -115,96 +134,15 @@ _API_KEY = re.compile(
     """
 )
 
-# --------------------------------------------------------------------------
-# v2 pattern set (ADR-026). EVERY pattern below derives from a NAMED PUBLISHED
-# SPECIFICATION, cited inline, and that citation is not decoration.
-#
-# The v1 measurement (recall 0.8361) was taken BEFORE its failures were known. A pattern
-# written afterwards is indistinguishable from one fitted to the failing fixtures unless the
-# derivation is auditable — so a v2 pattern that cannot cite a spec does not belong here.
-# No string below was copied from `eval/dataset/`. The v1 code is frozen verbatim in
-# `_v1_tier1_patterns.py` and still runs, so the v1 column stays reproducible.
-#
-# v1's dash-separated NANP form is deliberately LEFT UNCHANGED rather than narrowed: the
-# ADR-026 table introduces the parenthesized and dot-separated forms, and retro-fitting the
-# N∈[2-9] constraint onto a pattern that already measured at precision 1.000 would alter a
-# baseline the dual column exists to preserve.
-# --------------------------------------------------------------------------
-
-#: **ITU-T E.164** — leading `+`, country code, 15 digits maximum, optional space/dash
-#: grouping. The 15-digit cap is the spec's, not a guess: E.164 fixes the maximum length of
-#: an international number at 15 digits including the country code.
-_PHONE_E164 = re.compile(r"\+\d(?:[-.\s]?\d){6,14}(?![\d])")
-
-#: **NANP**, parenthesized area code: `(NPA) NXX-XXXX`. The `[2-9]` first digit on both the
-#: area code (NPA) and the exchange (NXX) is the NANP definition — neither may begin with 0
-#: or 1, because those are reserved for operator and long-distance signalling. It is a
-#: spec-justified narrowing that ALSO protects precision: it rejects the leading-zero digit
-#: runs that an unconstrained `\d{3}` would accept.
-_PHONE_NANP_PAREN = re.compile(
-    r"\(\s?[2-9]\d{2}\s?\)\s?[-.\s]?[2-9]\d{2}[-.\s]?\d{4}\b"
-)
-
-#: **NANP**, dot-separated: `NPA.NXX.XXXX`, same `[2-9]` constraint from the same definition.
-_PHONE_NANP_DOT = re.compile(r"\b[2-9]\d{2}\.[2-9]\d{2}\.\d{4}\b")
-
-#: **RFC 7519** (JWT) + **RFC 7515** (JOSE) — three dot-separated base64url segments.
-#:
-#: The `eyJ` anchor is spec-derived, and the justification is what makes it auditable rather
-#: than fixture-shaped: RFC 7515 requires the JOSE header to be a JSON object, so every
-#: header begins with the two characters `{"`. base64url of `{"` is `eyJ`. The prefix is
-#: therefore a property of the FORMAT — every conforming JWT on earth starts with it — not a
-#: property of any sample. Minimum segment lengths are "plausible" rather than spec-fixed
-#: (RFC 7519 sets no minimum), so they are set low enough not to exclude a real token.
-_JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")
-
-#: Hex secret, 32 or 64 characters — fires ONLY with a credential cue word in the same
-#: sentence (checked in `detect`, not here: a cue is context, not part of the token).
-#:
-#: This is ADR-026 scope exclusion #2 expressed as code. A bare 32/64-hex run is
-#: indistinguishable from a git SHA, an MD5/SHA digest, a dashless UUID or a trace id, all of
-#: which appear in legitimate support and engineering text — so the cue is what separates a
-#: credential from a checksum. Exactly 32 or 64, not a range: those are the digest lengths
-#: secrets are conventionally minted at, and a range would readmit the collisions.
-_HEX_SECRET = re.compile(r"\b(?:[0-9a-fA-F]{64}|[0-9a-fA-F]{32})\b")
-
-#: Cue words, from ADR-026. Searched in the token's own sentence, case-insensitive.
-_CREDENTIAL_CUE = re.compile(
-    r"(?i)\b(?:api[_\-]?key|apikey|access[_\-]?key|secret|token|bearer|credential|password|passwd|key)\b"
-)
-
-_SENTENCE_END = re.compile(r"[.!?]\s")
-
-
-def _sentence_window(text: str, start: int, end: int) -> str:
-    """The sentence containing `[start, end)`.
-
-    A local helper rather than a shared one: the gateway's `sentence_buffer` (04 §2) owns
-    real segmentation, and `numeric_claims` carries its own copy for the same reason. Three
-    call sites agreeing by accident is a smaller risk than three modules coupled through one.
-    """
-    left = 0
-    for match in _SENTENCE_END.finditer(text, 0, start):
-        left = match.end()
-    right_match = _SENTENCE_END.search(text, end)
-    right = right_match.end() if right_match else len(text)
-    return text[left:right]
-
-
 #: Evaluation order. Longest-match-wins resolves most overlaps (a 16-digit card contains
 #: shapes that look like a phone), but where two patterns match the *same* extent this
 #: order decides, so it runs specific → general.
 _PII_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
     ("pii.api_key", _API_KEY, "vendor-prefix"),
-    ("pii.api_key", _JWT, "jwt-rfc7519"),
-    ("pii.api_key", _HEX_SECRET, "hex-secret+cue"),
     ("pii.credit_card", _CARD, "grouped-digits+luhn"),
     ("pii.email", _EMAIL, "rfc-shaped"),
     ("pii.ssn", _SSN, "nnn-nn-nnnn"),
     ("pii.phone", _PHONE, "nanp"),
-    ("pii.phone", _PHONE_E164, "e164"),
-    ("pii.phone", _PHONE_NANP_PAREN, "nanp-paren"),
-    ("pii.phone", _PHONE_NANP_DOT, "nanp-dot"),
 )
 
 
@@ -252,12 +190,6 @@ class Tier1PiiDetector:
                 if label == "pii.credit_card":
                     digits = re.sub(r"\D", "", match.group())
                     if not (13 <= len(digits) <= 19 and _luhn_ok(digits)):
-                        continue
-                # ADR-026 scope exclusion #2: a bare hex run is a digest until something
-                # in its own sentence says it is a credential.
-                if pattern_name == "hex-secret+cue":
-                    window = _sentence_window(text, match.start(), match.end())
-                    if not _CREDENTIAL_CUE.search(window):
                         continue
                 candidates.append((match.start(), match.end(), label, pattern_name))
 

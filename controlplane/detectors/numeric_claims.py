@@ -4,17 +4,26 @@ Implements the 04 §2 registry row: stage `output_sentence`, budget <5 ms, emits
 `hallucination.unsourced_numeric`, `score_kind="detection"` at 1.0 (ADR-012 — deterministic
 emitters report 1.0 and band logic never applies).
 
-The row specifies it in one sentence: *"currency/percent/large-number patterns with no
-citation marker and no match in provided context; high-stakes use cases map it to
-ESCALATE."* Three clauses, taken in order — a numeral shape, no marker, no context match.
-The final clause is policy, and lives in `policies/*.yaml`, not here.
+The contract is 04 §2.4 as amended by **ADR-025**: a numeral fires iff it is
+**quantity-shaped** (§2.4.1 — currency · percent · magnitude word or suffix · comma-grouped
+thousands · attached unit), carries no citation marker (§2.4.2), and finds no match in
+provided context. The final clause is policy and lives in `policies/*.yaml`, not here.
 
-DOC GAP (MINOR, logged in `08-open-questions.md` rather than improvised): **"citation
-marker" is not defined anywhere in the docs.** No 04 section, no ADR, and the only other
-"citation" hits are ADR-008 and the charter, which govern *our* citations in the proposal,
-not markers in model output. `_CITATION_MARKER` below is therefore a definition I am
-supplying, kept deliberately narrow — the shapes a model actually produces when it attributes
-a figure. Its exact membership is a judgement call and is the thing to challenge in review.
+**v1's "large-number" rule is deleted, and that deletion is the whole point of ADR-025.**
+The original row said "currency/percent/**large-number** patterns". Implemented faithfully
+and measured blind, it returned **precision 0.267**: an SSN, a card number and a phone number
+are all runs of digits, so a length-keyed rule classified **identifiers as statistics**
+(deviation D8). The flaw was in the specified behaviour rather than the implementation of it,
+which is why it needed a ruling. The v1 code is frozen in `_v1_numeric_claims.py` and still
+runs, so that number stays reproducible rather than transcribed.
+
+Two ordering facts worth knowing before editing anything below:
+
+* the **identifier pre-filter runs first and is absolute** (§2.4.3). Not a post-hoc filter —
+  an excluded span never reaches a shape branch, even when currency-adjacent, so behaviour
+  cannot depend on match order.
+* it is a **structural duplicate** of the `tier1_*` regexes, never a call into them. 04 §9.3
+  keeps detectors independent, and a detector reading another's output would break it.
 
 **A marker is not a verification.** It suppresses only this detector, whose question is
 "was this figure attributed?" — not "is the attribution true?" That second question belongs
@@ -43,96 +52,178 @@ __all__ = ["NumericClaimsDetector", "numeric_claims"]
 
 
 # --------------------------------------------------------------------------
-# The three numeral shapes named by 04 §2
+# v2 (ADR-025). Quantity shapes only — 04 §2.4.1.
+#
+# The v1 "large-number" rule (a bare run of 4+ digits) is DELETED. Measured blind it
+# returned precision 0.267, because an SSN, a card number and a phone number are all runs
+# of digits: the rule classified IDENTIFIERS AS STATISTICS. The frozen v1 implementation
+# lives in `_v1_numeric_claims.py` and still runs, so that number stays reproducible.
+#
+# Magnitude words and units are ordered LONGEST-FIRST throughout. Regex alternation is
+# leftmost-first, not longest-match: with `k|m|...|million` the bare `m` wins inside
+# "million" and `$1.2 million` spans only `$1.2 m`. Span accuracy is load-bearing — 04 §6
+# `soften` replaces exactly this extent — so the ordering is a correctness requirement.
 # --------------------------------------------------------------------------
 
-#: Currency. Symbol-prefixed or code-suffixed, with optional magnitude word. Any amount
-#: counts — "$5" is as much a claim as "$5.2 billion", and the row says "currency", unqualified.
-#:
-#: Magnitude words are ordered LONGEST-FIRST and closed with `\b`. Regex alternation is
-#: leftmost-first, not longest-match: with `k|m|…|million`, the bare `m` wins inside
-#: "million" and `$1.2 million` spans only `$1.2 m`. Span accuracy is load-bearing (04 §6
-#: `soften` replaces exactly this extent), so the ordering is a correctness requirement.
+_NUM = r"\d+(?:\.\d+)?"
+_GROUPED = r"\d{1,3}(?:,\d{3})+(?:\.\d+)?"
+_NUMBER = rf"(?:{_GROUPED}|{_NUM})"
+
+#: 04 §2.4.1(c). Longest-first; `bn`/`k`/`m`/`b` are the suffix forms.
+_MAGNITUDE = r"(?:trillion|thousand|billion|million|crore|lakh|bn|k|m|b)"
+
+#: 04 §2.4.1(a). Symbols and ISO codes.
+_CURRENCY_SYMBOL = r"[$£€¥₹]"
+_ISO_CODE = r"(?:USD|EUR|GBP|JPY|INR|CAD|AUD|CHF|CNY)"
+
+#: 04 §2.4.1(e) starter list — time · data · distance · mass · temperature. Longest-first
+#: again (`min` before `mi` before `m`). Extension via `detector_params` is documented in
+#: 04 §2.4.4 but NOT wired: the schema types that field `dict[str, dict[str, float]]`, which
+#: cannot hold a list — filed as D2-detector-params-cannot-hold-list-values. The list here
+#: is therefore the only source, and 04 §2.4.1(e) is normative for it.
+_UNIT = r"(?:ms|min|hrs?|hours?|KB|MB|GB|TB|km|kg|lbs?|mi|°C|°F|s|m)"
+
+#: (a) currency-adjacent.
 _CURRENCY = re.compile(
-    r"""(?xi)
-    (?:
-        [$£€¥]\s?\d[\d,]*(?:\.\d+)?(?:\s?(?:trillion|thousand|billion|million|bn|k|m)\b)?
-      | \b\d[\d,]*(?:\.\d+)?\s?(?:trillion|thousand|billion|million|bn|k|m)?\s?
-        (?:usd|eur|gbp|jpy|inr|dollars?|euros?|pounds?)\b
-    )
+    rf"""(?xi)
+    {_CURRENCY_SYMBOL}\s?{_NUMBER}(?:\s?{_MAGNITUDE}\b)?
+  | \b{_NUMBER}\s?(?:{_MAGNITUDE}\s)?{_ISO_CODE}\b
+  | \b{_NUMBER}\s?(?:{_MAGNITUDE}\s)?(?:dollars?|euros?|pounds?|rupees?|yen)\b
     """
 )
 
-#: Percent, symbol or spelled. Includes "percentage points" — a delta is still a figure.
-#:
-#: No trailing `\b` on the `%` branch: `%` is not a word character, so a boundary assertion
-#: after it can only succeed before a letter or digit and fails on "22%." or "22% of". That
-#: made the branch unmatchable in ordinary prose and left a fallback matching the bare `%` —
-#: a zero-digit span, which also skipped the context check below (an empty digit key matches
-#: nothing), so a percentage the context fully supported still fired.
+#: (b) percent. No trailing `\b` after `%`: `%` is not a word character, so a boundary
+#: assertion there can only succeed before a letter or digit and fails on "22%." or
+#: "22% of" — which in v1 left the branch unmatchable in ordinary prose.
 _PERCENT = re.compile(
-    r"""(?xi)
-    \b\d+(?:\.\d+)?\s?%                                  # 22%, 7.4 %
-  | \b\d+(?:\.\d+)?\s?percent(?:age)?(?:\s+points?)?\b   # 22 percent, 3 percentage points
+    rf"""(?xi)
+    \b{_NUMBER}\s?%
+  | \b{_NUMBER}\s?percent(?:age)?(?:\s+points?)?\b
     """
 )
 
-#: "Large number". The row does not define the threshold, so the boundary is drawn where a
-#: numeral stops being incidental prose and starts being a statistic:
-#:
-#:   * a magnitude word ("2.4 million") — unambiguous at any size;
-#:   * thousands separators ("1,200") — the writing convention *for* a quantity;
-#:   * a bare run of 4+ digits ("15000").
-#:
-#: 4+ digits excludes years (1999, 2026 are 4 digits — see `_YEAR_LIKE`), small counts and
-#: ordinary integers. It is a heuristic, and 06 §2.3 puts deliberate false-positive pressure
-#: against it in `clean.jsonl` (digit strings, grounded version numbers). Whatever it costs
-#: shows up in the measured FP rate rather than being tuned away (AGENTS.md §7).
-_LARGE_NUMBER = re.compile(
-    r"""(?xi)
-    \b(?:
-        \d[\d,]*(?:\.\d+)?\s?(?:k|m|bn|thousand|million|billion|trillion)\b
-      | \d{1,3}(?:,\d{3})+(?:\.\d+)?
-      | \d{4,}(?:\.\d+)?
-    )
-    """
-)
+#: (c) magnitude word or suffix.
+_MAGNITUDE_SHAPE = re.compile(rf"(?i)\b{_NUMBER}\s?{_MAGNITUDE}\b")
 
-#: A bare 4-digit run in a year's range, not adjacent to a separator or decimal. Excluded
-#: from `_LARGE_NUMBER`: "in 2024 we shipped" states a date, not a quantity, and 06 §2.3
-#: ships grounded version numbers and years as explicit negative controls.
-_YEAR_LIKE = re.compile(r"^(?:1[89]\d{2}|20\d{2}|21\d{2})$")
+#: (d) comma-grouped thousands — the writing convention *for* a quantity.
+_GROUPED_THOUSANDS = re.compile(rf"\b{_GROUPED}\b")
+
+#: (e) attached measurement unit. Lookahead rather than `\b` so `°C`/`°F` behave.
+_UNIT_SHAPE = re.compile(rf"\b{_NUMBER}\s?{_UNIT}(?![A-Za-z0-9])")
 
 _NUMERAL_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (_CURRENCY, "currency"),
     (_PERCENT, "percent"),
-    (_LARGE_NUMBER, "large-number"),
+    (_MAGNITUDE_SHAPE, "magnitude"),
+    (_GROUPED_THOUSANDS, "grouped-thousands"),
+    (_UNIT_SHAPE, "unit"),
 )
 
 
 # --------------------------------------------------------------------------
-# Citation marker — the undefined term (see module docstring)
+# Identifier exclusion — 04 §2.4.3. Pre-filter, FIRST and ABSOLUTE.
+#
+# Shares no code path, ordering dependency or output with `tier1_*`: the structures below
+# are a deliberate STRUCTURAL DUPLICATE of those regexes, never a call into them, so 04 §9.3
+# detector independence holds. An excluded candidate never reaches the shape branches above,
+# even when currency- or percent-adjacent.
 # --------------------------------------------------------------------------
 
-#: Shapes that constitute an attribution. Narrow by design: each either names a source or
-#: points at one. Hedges ("roughly", "about", "I think") are deliberately absent — a hedge
-#: is an epistemic qualifier, and 04 §6 `soften` is what handles those. Confusing the two
-#: would let "roughly $4M" pass as sourced.
-_CITATION_MARKER = re.compile(
-    r"""(?xi)
-    \[\d+\]                                   # [1] — numeric footnote
-  | \[[A-Za-z][A-Za-z\s.\-]{1,30}\d{4}\]      # [Smith 2024]
-  | \((?:[A-Z][A-Za-z.\-]+(?:\s+(?:et\s+al\.?|and|&)\s+[A-Za-z.\-]+)?[,\s]+)?
-        (?:19|20)\d{2}[a-z]?\)                # (Smith, 2024) / (2024)
-  | https?://\S+ | \bwww\.\S+\.\w{2,}         # a link is a source
-  | \baccording\ to\b | \bas\ reported\ (?:by|in)\b | \bas\ (?:stated|noted)\ in\b
-  | \bper\ (?:the|our|your|section|clause|§)\b
-  | \b(?:source|sources|ref|refs|reference|citation|cited\ in|see)\s*[:§]
-  | \b(?:section|clause|article|page|table|figure|exhibit|appendix)\s+\d+
-  | §\s?\d+                                   # § 4 / §4.3
-  | \b(?:filing|prospectus|10-K|10-Q|8-K)\b   # named regulatory documents
+_EXCL_SSN = re.compile(r"\b\d{3}[-.\s]\d{2}[-.\s]\d{4}\b")
+
+#: 13-19 digits in optional groups, Luhn-checked below. Comma grouping is included because
+#: 04 §2.4.3(1) names it, and because a comma-grouped card would otherwise be caught by
+#: shape (d) — which is exactly the misclassification this exclusion exists to prevent.
+_EXCL_CARD = re.compile(r"\b\d(?:[-.,\s]?\d){12,18}\b")
+
+#: Phone forms per 04 §2.5 (E.164 + NANP), duplicated structurally.
+_EXCL_PHONE = re.compile(
+    r"""(?x)
+    \+\d(?:[-.\s]?\d){6,14}\b                                  # E.164
+  | \(\s?[2-9]\d{2}\s?\)[-.\s]?[2-9]\d{2}[-.\s]?\d{4}\b       # (NPA) NXX-XXXX
+  | \b[2-9]\d{2}\.[2-9]\d{2}\.\d{4}\b                          # NPA.NXX.XXXX
+  | \b(?:1[-.\s])?[2-9]\d{2}[-.\s][2-9]\d{2}[-.\s]\d{4}\b       # NPA-NXX-XXXX
     """
 )
+
+#: 04 §2.4.3(4) — a digit run inside an alphanumeric token (order ids, hashes, dashless
+#: UUIDs, trace ids). Matched as any alnum token carrying both a digit and a letter.
+_ALNUM_TOKEN = re.compile(r"\b[A-Za-z0-9]*\d[A-Za-z0-9]*\b")
+
+#: A trailing magnitude suffix or unit does NOT make a numeral an identifier: `$5M` and
+#: `250ms` are quantities, and the exclusion is written for "order IDs, hashes". So a token
+#: is excluded only if letters survive stripping one recognised trailing suffix. This is an
+#: interpretation of §2.4.3(4)'s intent, recorded here rather than left implicit — without
+#: it the ABSOLUTE pre-filter would suppress shapes (c) and (e) entirely.
+_TRAILING_SUFFIX = re.compile(rf"(?i)(?:{_MAGNITUDE}|{_UNIT})$")
+
+
+def _luhn_ok(digits: str) -> bool:
+    """Luhn mod-10. A structural discriminator, not a validity claim — it is what separates
+    a card number from an arbitrary 16-digit run."""
+    total = 0
+    for index, char in enumerate(reversed(digits)):
+        value = ord(char) - 48
+        if index % 2:
+            value *= 2
+            if value > 9:
+                value -= 9
+        total += value
+    return total % 10 == 0
+
+
+def _identifier_spans(text: str) -> list[tuple[int, int]]:
+    """Spans that are identifiers, not quantities (04 §2.4.3). Computed before any shape."""
+    spans: list[tuple[int, int]] = []
+
+    for match in _EXCL_SSN.finditer(text):
+        spans.append(match.span())
+    for match in _EXCL_PHONE.finditer(text):
+        spans.append(match.span())
+    for match in _EXCL_CARD.finditer(text):
+        digits = re.sub(r"\D", "", match.group())
+        if 13 <= len(digits) <= 19 and _luhn_ok(digits):
+            spans.append(match.span())
+    for match in _ALNUM_TOKEN.finditer(text):
+        token = match.group()
+        if not any(char.isalpha() for char in token):
+            continue
+        stripped = _TRAILING_SUFFIX.sub("", token)
+        if any(char.isalpha() for char in stripped):
+            spans.append(match.span())
+
+    return spans
+
+
+# --------------------------------------------------------------------------
+# Citation marker — 04 §2.4.2 (ADR-025 closed Q-18).
+#
+# Lexical only, and deliberately so: judging whether a citation actually SUPPORTS the figure
+# is entailment, which is `rag_grounding`'s job. Hedges are absent — "roughly $4M" is an
+# epistemic qualifier that 04 §6 `soften` handles, and admitting hedges would let an
+# unsourced figure pass as attributed.
+#
+# This list is the RULED one, which is not the v1 provisional one. It drops structural
+# pointers (`section 4`, `§ 12`), named filings (10-K, prospectus), bracketed author-year and
+# the `ref:`/`see:` leaders; it adds `as per`, `cited by`, `based on`, `study by`,
+# `survey by`, `data from`, `figures from`. Both directions move the FP rate, which is why
+# the delta is recorded in docs/08 under Q-18 rather than left for someone to diff.
+# --------------------------------------------------------------------------
+
+_CITATION_MARKER = re.compile(
+    r"""(?xi)
+    \baccording\ to\b | \bas\ per\b | \bper\s
+  | \bas\ reported\ by\b | \breported\ by\b
+  | \bcited\ by\b | \bcited\ in\b
+  | \bsource:
+  | \bbased\ on\b | \bstudy\ by\b | \bsurvey\ by\b
+  | \bdata\ from\b | \bfigures\ from\b
+  | \[\d+\]                                    # bracketed numeric reference
+  | \([^)]*(?:19|20)\d{2}[^)]*\)               # parenthetical author-year
+  | https?://\S+ | \bwww\.\S+
+    """
+)
+
 
 #: Sentence-boundary scan. A local helper, not a general splitter: the gateway's
 #: `sentence_buffer` (04 §2) owns real segmentation, and a second implementation here would
@@ -197,13 +288,20 @@ class NumericClaimsDetector:
             if key
         }
 
+        # 04 §2.4.3: the identifier pre-filter runs FIRST and is ABSOLUTE. Computed once,
+        # before any shape is considered, so no shape branch can ever see an excluded span
+        # — not even a currency-adjacent one. Ordering is the whole point: making this a
+        # post-hoc filter would leave behaviour dependent on match order.
+        identifier_spans = _identifier_spans(text)
+
         candidates: list[tuple[int, int, str]] = []
         for pattern, shape in _NUMERAL_PATTERNS:
             for match in pattern.finditer(text):
                 fragment = match.group().strip()
-                if shape == "large-number" and _YEAR_LIKE.match(fragment):
+                start, end = match.start(), match.start() + len(fragment)
+                if any(start < id_end and id_start < end for id_start, id_end in identifier_spans):
                     continue
-                candidates.append((match.start(), match.start() + len(fragment), shape))
+                candidates.append((start, end, shape))
 
         signals: list[Signal] = []
         claimed: list[tuple[int, int]] = []

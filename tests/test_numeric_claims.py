@@ -4,9 +4,14 @@ Same discipline as `test_tier1_detectors.py`: **every value is authored here**, 
 from the frozen corpus. The detector was built from the 04 §2 sentence and must never be
 iterated against `eval/dataset/`, or Step 4's measurement stops being independent.
 
-The row reads: *"currency/percent/large-number patterns with no citation marker and no match
-in provided context; high-stakes use cases map it to ESCALATE."* Three clauses; the last is
-policy and is asserted in the policy tests, not here.
+The row reads (as amended by ADR-025): *"**quantity-shaped** numerals only (§2.4 — the bare
+large-digit-run rule is DELETED) with no citation marker (§2.4.2) and no match in provided
+context; identifier structures are excluded by a pre-filter; high-stakes use cases map it to
+ESCALATE."* The last clause is policy and is asserted in the policy tests, not here.
+
+**Deleted behaviour is asserted here as deleted.** ADR-025 removed the bare digit-run rule and
+narrowed the citation list; the tests that used to assert those now assert their absence, so a
+silent re-introduction fails the suite instead of passing it.
 """
 
 from __future__ import annotations
@@ -79,13 +84,51 @@ def test_percent_shape_fires_with_an_exact_span(text: str, expected: str) -> Non
     "text,expected",
     [
         ("Adoption reached 2.4 million users.", "2.4 million"),
-        ("We processed 15000 requests.", "15000"),
         ("The backlog is 1,200 items.", "1,200"),
         ("It handles 3 billion events.", "3 billion"),
+        ("We shipped 40k units.", "40k"),
     ],
 )
-def test_large_number_shape_fires_with_an_exact_span(text: str, expected: str) -> None:
+def test_magnitude_and_grouped_shapes_fire_with_an_exact_span(
+    text: str, expected: str
+) -> None:
+    """§2.4.1 shapes (c) magnitude word / k-M-B suffix and (d) comma-grouped thousands."""
     assert fired(text) == [expected]
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("Latency was 250 ms at peak.", "250 ms"),
+        ("Backup is 1.5 GB total.", "1.5 GB"),
+        ("The route is 12 km long.", "12 km"),
+        ("Payload weighs 3 kg net.", "3 kg"),
+        ("Chamber held 300 °C steady.", "300 °C"),
+    ],
+)
+def test_unit_shape_fires_with_an_exact_span(text: str, expected: str) -> None:
+    """§2.4.1 shape (e) — attached measurement unit from the starter list."""
+    assert fired(text) == [expected]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "We processed 15000 requests.",
+        "The queue held 482913 messages.",
+        "It returned 9000000 rows.",
+    ],
+)
+def test_a_bare_digit_run_does_not_fire(text: str) -> None:
+    """ADR-025 DELETED the bare large-digit-run rule, and this asserts the deletion.
+
+    Measured against the labelled corpus that rule scored precision 0.267 (D8): an SSN, a
+    card number and a phone number are all runs of digits, so it classified *identifiers as
+    statistics*. A numeral is a claim only if §2.4.1 gives it a quantity shape. Asserted
+    positively so re-introducing the rule fails the suite rather than quietly restoring the
+    false-positive rate the ADR was written to remove.
+    """
+    assert scan(text) == []
 
 
 def test_magnitude_word_is_inside_the_span() -> None:
@@ -161,17 +204,14 @@ def test_year_exclusion_is_a_known_heuristic_limit() -> None:
     "text",
     [
         "Revenue was $4 million [2].",
-        "Revenue was $4 million [Smith 2024].",
         "Revenue was $4 million (Smith, 2024).",
         "Revenue was $4 million (2024).",
         "According to the report, revenue was $4 million.",
         "Revenue was $4 million as reported by the auditor.",
         "Per the filing, revenue was $4 million.",
-        "See section 4: revenue was $4 million.",
         "Revenue was $4 million per § 12.",
         "Source: revenue was $4 million.",
         "Revenue was $4 million, see https://example.com/report.",
-        "The 10-K states revenue was $4 million.",
     ],
 )
 def test_a_citation_marker_suppresses_the_signal(text: str) -> None:
@@ -179,11 +219,33 @@ def test_a_citation_marker_suppresses_the_signal(text: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("Revenue was $4 million [Smith 2024].", "$4 million"),
+        ("See section 4: revenue was $4 million.", "$4 million"),
+        ("The 10-K states revenue was $4 million.", "$4 million"),
+    ],
+)
+def test_shapes_dropped_from_the_ruled_marker_list_still_fire(
+    text: str, expected: str
+) -> None:
+    """Q-18 closed with a *lexical* marker list (§2.4.2), and these three shapes are not on
+    it: a bracketed author-year, a structural pointer into the document, and a named filing.
+
+    v1 recognised all three. Their removal can only *raise* the firing rate, never lower it,
+    so it cannot flatter a recall number — which is why the direction is recorded rather than
+    just the change. Asserted positively so the narrowing is visible in the suite instead of
+    being inferable only from a report diff.
+    """
+    assert fired(text) == [expected]
+
+
+@pytest.mark.parametrize(
     "text",
     [
         "Roughly $4 million, I think.",
         "Approximately 22% of users.",
-        "About 15000 requests, give or take.",
+        "About 15,000 requests, give or take.",
         "Somewhere near $1.2 million.",
     ],
 )
@@ -292,9 +354,14 @@ def test_nfr_sec_001_evidence_excludes_the_figure() -> None:
     `audit_records.signals_json` (05 §3)."""
     for text, digits in [
         ("Your balance is $84,250 today.", "84250"),
-        ("Salary band tops out at 195000.", "195000"),
+        ("Salary band tops out at $195,000.", "195000"),
     ]:
-        for signal in scan(text):
+        signals = scan(text)
+        # Guard against a vacuous pass: under the v2 shapes a bare digit run no longer
+        # fires, so the original "195000" case ran this loop zero times and asserted
+        # nothing. A currency shape keeps the NFR-SEC-001 check live.
+        assert signals, f"no signal to inspect for {text!r}"
+        for signal in signals:
             assert digits not in signal.evidence
             assert digits[:4] not in signal.evidence
             assert "category:unsourced_numeric" in signal.evidence
