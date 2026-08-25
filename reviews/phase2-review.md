@@ -187,3 +187,72 @@ The amended 06 §2.3 composition recomputes directly from the files as follows:
 ### Checkpoint 1b gate
 
 **PASS — dataset freeze may proceed.** All prior blocking findings are resolved, structural and synthetic-safety sweeps pass, changed labels/actions are coherent under ADR-019/020/021/023, and the validator plus full test suite pass. The sole observation is non-semantic traceability debt and is not a freeze blocker. No production code, config, policy, or `docs/` file was modified by this review.
+
+## Checkpoint 2 — Full detector and integrity review
+
+**Implementation commit reviewed:** `9f4e5b701ce0d439c8c90a95579f546280a3d915`  
+**Reviewer-baseline commit:** `06b4099297b1af00caff8095e64a015cf2999551` (prior checkpoints only)  
+**Review date:** 2026-08-26  
+**Scope:** committed implementation state only. Reviewer additions are confined to `reviews/` and `tests/review/`.
+
+**Review-process finding:** the Checkpoint 1/1b report had been left untracked; it was dated, staged alone, and committed as `06b4099` before this checkpoint began.
+
+### Outcome
+
+**Checkpoint 2 is BLOCKED.** The named implementation commit is the first v1 measurement state. It does not contain ADR-025, ADR-026, the amended quantity/citation contract, a v2 detector revision, revision-independent v2 tests, a revision-methodology section, or a committed v1/v2 evaluation report. Its own reproducible v1 results still miss NFR-EVAL-001 and reproduce the open numeric-identifier design flaw.
+
+### C2-F1 — Required ADR-025/026 revision state is absent
+
+- **Severity:** BLOCKER
+- **File:line:** `docs/03-decisions.md:210` (file ends after ADR-023/minor log); `docs/08-open-questions.md:69`
+- **Doc section violated:** requested revision-independence audit; AGENTS.md §5.5; 04 §2 as described by the requested ADR-025/Q-18 amendments.
+- **Evidence:** Git history through the reviewed commit contains ADRs only through ADR-023. The deviation ledger keeps both Step-4 deviations OPEN, Q-18 remains OPEN at line 42, and no ADR-025/026 pattern rationale or amended quantity-shape/citation-marker contract exists. Therefore no ADR-026 regex can be derived from a cited published spec or audited for fixture-shaped specificity.
+- **Suggested disposition:** commit the approved ADR-025/026 docs, detector revision, independent tests, and closed-ledger entries, then rerun Checkpoint 2 against that new clean commit.
+
+### C2-F2 — Tier-1 PII still misses the documented recall target
+
+- **Severity:** MAJOR
+- **File:line:** `docs/08-open-questions.md:69`; `README.md:42`
+- **Doc section violated:** 01 §2 NFR-EVAL-001 (Tier-1 PII recall ≥ 0.95); 06 §3.
+- **Evidence:** an independent ephemeral `python -m eval.run_all --allow-dev` run against the verified frozen digest reproduced v1 recall **0.8361** (51/61 positive label occurrences), below 0.95. The ledger correctly keeps `D3-tier1-pii-recall-below-target` open. No ADR-026 remediation exists at the reviewed commit.
+- **Suggested disposition:** apply only format-spec-derived pattern changes under an approved ADR-026, preserve v1 beside v2, and remeasure without changing the frozen corpus.
+
+### C2-F3 — Numeric claims still classify identifiers as quantities
+
+- **Severity:** MAJOR
+- **File:line:** `controlplane/detectors/numeric_claims.py:89`; `docs/08-open-questions.md:70`
+- **Doc section violated:** 04 §2 `numeric_claims` intent and the requested ADR-025 quantity-shape definition.
+- **Evidence:** the v1 large-number regex accepts any comma-grouped digits. Independent review case `test_numeric_claims_comma_grouped_card_is_not_a_quantity_observation` reproduces a card identifier being emitted as `hallucination.unsourced_numeric`; the existing evaluator reproduces precision **0.267**. The ledger correctly keeps `D8-numeric-claims-treats-identifiers-as-statistics` open.
+- **Suggested disposition:** land the ADR-025 identifier-exclusion/quantity-shape rule and independent confusable tests, then remeasure v2.
+
+### C2-F4 — README metric claims point to a report absent from the repository
+
+- **Severity:** MAJOR
+- **File:line:** `README.md:85`; `reports/.gitkeep:1`
+- **Doc section violated:** AGENTS.md §7 measured-numbers policy; 06 §8 claim-to-report mapping; NFR-INT-001.
+- **Evidence:** README publishes v1 recall/precision and maps them to `reports/eval_report.md`, but the reviewed tree contains only `reports/.gitkeep`. A report generated to `/tmp` reproduced the values and stamped digest `3b3931365a3c2918…`, but it was dev-class and dirty diagnostic output, not a committed reproducibility artifact. No v1/v2 side-by-side report or revision-methodology section exists.
+- **Suggested disposition:** commit the measured report generated from a clean eligible state, with frozen digest, v1 and v2 numbers verbatim, and the revision methodology; then make README rows trace to its actual sections.
+
+### C2-F5 — Unicode email evasions are detectable limitations, not claimed coverage
+
+- **Severity:** OBSERVATION
+- **File:line:** `tests/review/test_checkpoint2_adversarial.py:117`
+- **Doc section implicated:** 04 §2 Tier-1 PII regex contract; documented Tier-1 trade-off.
+- **Evidence:** independent `xfail` probes confirm full-width-at-sign and zero-width-character email variants evade `tier1_pii`. The docs do not claim Unicode normalization, so these are not conformance bugs.
+- **Suggested disposition:** retain as executable limitations; add normalization only through a future documented scope/latency decision.
+
+### Conformance, performance, and security evidence
+
+- **Signal contract — PASS.** 125 emitted runtime signals were checked: detector name, responsibility/performance planes, closed labels, score 1.0, detection score kind, stage, exact non-empty spans, and non-empty evidence all conformed to 04 §1. No evidence contained its matched raw value.
+- **Tier-1/blocklist behavior — PASS within v1 contract.** Independent cases verified multi-match ordering, exact SSN/email/phone spans, spacing/dash variants, escaped configured terms, case-insensitive matching, and word boundaries. Empty base blocklist remains a documented Q-15 limitation.
+- **Numeric v1 behavior — PASS except C2-F3.** Currency/percent multi-match spans, context digit matching, sentence-local citation suppression, and phone-shaped price handling behaved as implemented. Q-18 remains open, so citation semantics are provisional rather than ADR-025-conformant.
+- **Measured budgets — PASS.** 5,000 samples each: `tier1_pii` P99 0.2821 ms, `tier1_blocklist` P99 0.2633 ms (both <2 ms), and `numeric_claims` P99 0.3182 ms (<5 ms). Maxima were 0.3814/0.3615/0.5114 ms respectively.
+- **Clean-venv suite — PASS.** A new `/tmp` virtual environment installed pinned project/dev dependencies and ran 401 tests: 398 passed, 3 expected review `xfail` observations, no unexpected failures or flaky reruns.
+- **Fixture independence — PASS for existing/reviewer tests.** Mechanical comparison found zero exact test strings copied from `eval/dataset/*.jsonl`. The absent ADR-026 test set itself remains unauditable (C2-F1).
+- **NFR-SEC-001 — PASS for inspected surfaces.** Runtime evidence, pytest output, committed report directory, and reviewer artifacts contained no raw synthetic PII values. Reviewer tests use independent synthetic placeholders and do not interpolate them into evidence.
+- **Frozen integrity — PASS.** `eval.validate_dataset --freeze` matched digest `3b3931365a3c29187d111266fffe45071717de48ba9b55688e60556c492b9996` at frozen dataset commit `b37d1909f5fb16db2b1fa38f5fbc64ceb70c3d02`.
+- **Dev-class integrity — PASS only as diagnostic.** The ephemeral evaluator explicitly stamped the dev-class active provider and was not accepted as publishable report evidence. No committed dev-tainted report exists.
+
+### Checkpoint 2 gate
+
+**BLOCKED — Phase 2 does not close at `9f4e5b701ce0d439c8c90a95579f546280a3d915`.** Required ADR-025/026 revision artifacts and v2 methodology/report are absent; the Tier-1 recall target remains missed; numeric identifiers remain misclassified; and README metric rows lack their committed report. Re-review a later clean commit after C2-F1 through C2-F4 are resolved.
