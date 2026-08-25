@@ -66,11 +66,91 @@ slugs lived scattered across doc prose, YAML comments, docstrings and test notes
 | `[D2-nonstreaming-token-counts-inflated]` | MAJOR | Step 1 | **CLOSED** — ADR-018 root-caused it as a provenance problem; the dev/measured split is the structural answer and FR-GW-006's canary catches recurrences at boot |
 | `[D2-upstream-price-table-absent]` | MINOR | Step 1 | **CLOSED** — ADR-022 makes `pricing: null` a legitimate, documented state meaning UNKNOWN (distinct from `unmetered`, which is an affirmative zero) |
 | `[D2-price-table-cannot-express-per-tier-cost]` | MAJOR | Step 2 | **CLOSED** — ADR-022 (prices keyed by concrete model id) |
+| `[D3-tier1-pii-recall-below-target]` | **MAJOR** | Step 4 | **OPEN** — measured micro recall **0.8361** vs NFR-EVAL-001 target 0.95. Precision 1.000 (zero FPs). 10 misses, all pattern-coverage gaps: 8 `pii.phone`, 2 `pii.api_key` |
+| `[D8-numeric-claims-treats-identifiers-as-statistics]` | **MAJOR** | Step 4 | **OPEN** — measured precision **0.267** (33 FPs, 30 of them `PII-*` cases). The documented "large-number" clause matches digit runs inside SSNs, cards and phone numbers |
 
-**Open: none.** Two non-deviation items still gate work and are tracked as questions, not
-deviations: **Q-10** (no genuinely local model installed — fallback and 2nd-sample duty
-unassigned) and the Groq price-provenance caveat under Q-02, which constrains what the cost
-simulation may publish rather than blocking it.
+**Open: two**, both filed at the Step-4 STOP point and both **measured, not predicted** —
+they are the eval harness doing its job on its first real run. Full reports below.
+
+Also still gating, tracked as questions rather than deviations: **Q-10** (no genuinely local
+model installed — fallback and 2nd-sample duty unassigned), **Q-18** (the "citation marker"
+definition, which gates publication of any `numeric_claims` figure), and the Groq
+price-provenance caveat under Q-02, which constrains what the cost simulation may publish
+rather than blocking it.
+
+---
+
+## DEVIATION REPORT [D3-tier1-pii-recall-below-target]
+Severity: MAJOR
+Doc & section: 01 §2 NFR-EVAL-001 ("Tier-1 PII recall ≥ 0.95"); detector contract 04 §2 row 1
+The doc says: Tier-1 PII recall ≥ 0.95 on the labeled set, measured by `eval/run_all.py`.
+Reality says: **0.8361** micro recall (51 TP / 61 positive label occurrences) on the frozen
+280-case corpus. Precision is **1.000** — zero false positives — so this is purely missed
+coverage, not over-firing. 10 misses in two clusters:
+  * **8 × `pii.phone`** — the NANP pattern requires a 10-digit form. Missed: 7-digit local
+    (`NNN-NNNN`), E.164 with country code, dot-separated, and a parenthesised 7-digit form.
+    5 of the 8 are multi-PII cases where the SSN/card/email span WAS caught, so the case is
+    partially detected — the verdict would still fire, but per-label recall is short.
+  * **2 × `pii.api_key`** — a JWT-shaped bearer token and a generic 32-char hex secret behind
+    an `api_key=` assignment. Both fall outside the vendor-prefix rule, which was a
+    documented deliberate choice (a generic high-entropy rule would fire on request ids).
+Measurement verified before filing: each miss was re-run individually and confirmed to be a
+real detector gap, not a harness artifact. `python -m eval.run_all` reproduces it.
+Impact if we ignore it: NFR-EVAL-001 is the one detector target with a number attached, and
+Tier-1 PII is the FR-DET-001 core. A 0.836 recall published against a 0.95 target is a missed
+target; publishing 0.836 while *claiming* 0.95 would be fabrication (AGENTS.md §7).
+Options:
+  A) **Extend the patterns from the spec, not from these cases** — add 7-digit local and
+     E.164 phone forms and a bounded generic-secret rule, derived from published format
+     definitions, then re-measure. Trade-off: 7-digit runs and high-entropy strings are
+     exactly `clean.jsonl`'s FP pressure, so precision (now a perfect 1.000) will drop. The
+     honest version of this option accepts a precision cost and reports both numbers.
+  B) **Accept 0.836 and report it as a missed target** with the cluster analysis above.
+     Trade-off: the headline detector misses the stated bar, which a skeptical judge will
+     read as the prototype's weakest claim — but it is defensible and true.
+  C) Narrow NFR-EVAL-001's scope to the categories the vendor-prefix/10-digit rules cover.
+     Trade-off: **rejected as target-gaming** — redefining the metric to match the result is
+     precisely what AGENTS.md §7 forbids. Listed only to record that it was considered.
+Recommendation: **A**, then re-measure and report whatever comes out, because the misses are
+genuine format coverage rather than a threshold to tune — but it MUST be done from format
+specifications with new tests authored independently, and I should not do it having now read
+these case notes. If you'd rather protect the independence of the measurement entirely, B is
+the honest fallback.
+Blocked work: any publication of a Tier-1 PII recall number (README row, proposal, video).
+
+## DEVIATION REPORT [D8-numeric-claims-treats-identifiers-as-statistics]
+Severity: MAJOR
+Doc & section: 04 §2 `numeric_claims` row — "currency/percent/large-number patterns with no
+citation marker and no match in provided context"
+The doc says: fire `hallucination.unsourced_numeric` on a large-number pattern that carries no
+citation and no context match.
+Reality says: implemented faithfully, that clause yields **precision 0.267** — 33 false
+positives against 12 true positives. **30 of the 33 are `PII-*` cases.** The cause is
+structural, not a tuning miss: an SSN, a credit-card number and a phone number are all runs of
+digits, so the "large-number" clause classifies **identifiers as statistics**. Recall is 0.750,
+so the clause works on real figures; it simply also fires on every identifier in the corpus.
+Impact if we ignore it: a 0.267-precision detector mapped to **ESCALATE on UC-3** (01 §3) would
+quarantine roughly three responses for every one that warranted it — the demo's escalation beat
+becomes noise, and the eval report carries a number that invites exactly the skepticism 06 was
+written to withstand. It also silently double-flags every PII case on the performance plane.
+Options:
+  A) **Exclude identifier-shaped runs in the detector** — suppress a large-number match whose
+     span is inside, or adjacent to, a Tier-1 PII match. Trade-off: couples two detectors that
+     04 §1 keeps independent, and detectors do not see each other's signals; it would need the
+     engine to mediate, which is a real design change.
+  B) **Narrow the "large-number" clause to quantity-shaped numerals** — require a magnitude
+     word, thousands separators, or a unit/currency/percent context, and drop the bare
+     "4+ consecutive digits" rule. Trade-off: loses bare statistics like "we processed 15000
+     requests"; recall on genuinely unsourced bare integers drops. This is a **spec amendment**
+     to the 04 §2 wording, not just a code change.
+  C) Accept and report 0.267 with the cause stated. Trade-off: honest, but ships a detector
+     whose ESCALATE mapping is not defensible on UC-3.
+Recommendation: **B** — the clause's *purpose* is unsourced statistics, and an identifier is
+not a statistic under any reading; the bare-digit-run rule is the part that overreaches. It
+needs a doc change to 04 §2 rather than a quiet code edit, which is why it is here and not
+already applied. Note this interacts with **Q-18**: both shape the same precision figure.
+Blocked work: any `numeric_claims` precision/F1 number, and the UC-3 escalation demo beat's
+credibility.
 
 ---
 

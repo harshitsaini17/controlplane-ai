@@ -26,27 +26,41 @@ This is a **hackathon prototype**, and this README will not pretend otherwise wh
 | Audit DB schema | implemented |
 | Model-backed detectors — injection, toxicity, consistency, grounding, NER enrichment | **not yet implemented** |
 | Gateway hot path, policy engine, cost detectors | **not yet implemented** |
-| Eval harness, dashboard, demo runner | **not yet implemented** |
+| Detector eval harness (`eval/run_all.py`) | implemented, tested — **3 of 11 detectors scored** |
+| Latency / fault-injection / cost / leak-scan harnesses, dashboard, demo runner | **not yet implemented** |
 
-`python -m eval.validate_dataset` passes. `python -m pytest` passes (364 tests). Nothing in
+`python -m eval.validate_dataset` passes. `python -m pytest` passes (391 tests). Nothing in
 `docs/07-demo-script.md` runs end to end yet.
 
-**The detectors that exist have not been scored yet.** They were built from the `docs/04` §2
-contracts and deliberately never iterated against the eval corpus, so their accuracy is
-genuinely unknown until `eval/run_all.py` runs — which is why every row in the table below
-still reads *not yet measured*. Two known gaps travel with them, stated here rather than
-discovered later: `tier1_blocklist` emits nothing on the shipped policies (they ship an empty
-`blocklist_extra`, its only documented term source), so its recall will be reported as
-**undefined, not 1.0**; and the definition of a "citation marker" that `numeric_claims` turns
-on is not in the spec — it is provisional, tracked as Q-18 in `docs/08`, and gates publication
-of that detector's FP/FN figures.
+**The three deterministic detectors have now been scored, and two of them missed.** They were
+built from the `docs/04` §2 contracts and deliberately never iterated against the eval corpus,
+so this was the first contact between them and the labelled cases — and the honest result is
+that it went badly in two places. Both are filed as open deviations in `docs/08` rather than
+quietly repaired, because repairing them *after* reading which cases failed would tune the
+detector to the test set and destroy the independence that makes the number worth anything:
+
+- **`tier1_pii` recall 0.8361 against the NFR-EVAL-001 target of 0.95 — MISSED**
+  (`D3-tier1-pii-recall-below-target`). Precision is 1.000, so nothing over-fires; the gap is
+  pure format coverage — 8 unmatched phone shapes and 2 unmatched secret shapes.
+- **`numeric_claims` precision 0.267** (`D8-numeric-claims-treats-identifiers-as-statistics`).
+  The 04 §2 "large-number" clause, implemented faithfully, matches the digit runs inside SSNs,
+  cards and phone numbers — it classifies **identifiers as statistics**. That is a flaw in the
+  specified behaviour, not in the implementation of it, which is why it needs a ruling.
+- **`tier1_blocklist` reports every figure as `n/a`**, correctly: the shipped policies ship an
+  empty `blocklist_extra` (its only documented term source, Q-15) and the corpus has no
+  positives, so its recall is **undefined, not 1.0**.
+
+The `numeric_claims` figures also sit behind Q-18: the "citation marker" the detector turns on
+is not defined anywhere in the spec, so the number measures a provisional rule. It is reported
+here because withholding a bad measurement is its own dishonesty, but it is not a settled
+claim.
 
 ## Setup
 
 ```sh
 python -m venv .venv
 .venv/bin/pip install -e ".[dev]"
-.venv/bin/python -m pytest -q                       # 364 tests
+.venv/bin/python -m pytest -q                       # 391 tests
 .venv/bin/python -m eval.validate_dataset           # consistency gate (06 §2.4)
 .venv/bin/python -m eval.validate_dataset --freeze  # + assert the dataset is the frozen one
 ```
@@ -68,19 +82,23 @@ the business proposal, or the demo video unless it has a row here.
 |---|---|---|---|
 | Gateway overhead P50/P95/P99 | `python -m eval.bench_latency` | `reports/latency_report.md` | not yet measured |
 | Per-detector latency vs budget | `python -m eval.bench_latency` | `reports/latency_report.md` | not yet measured |
-| Tier-1 PII recall | `python -m eval.run_all` | `reports/eval_report.md` §detectors | not yet measured |
-| Per-detector precision / recall / F1 | `python -m eval.run_all` | `reports/eval_report.md` §detectors | not yet measured |
-| Per-use-case confusion matrix (FP/FN) | `python -m eval.run_all` | `reports/eval_report.md` §policy | not yet measured |
+| Tier-1 PII recall | `python -m eval.run_all` | `reports/eval_report.md` §detectors | **0.8361** — target 0.95 **MISSED** (D3, `docs/08`) |
+| Per-detector precision / recall / F1 | `python -m eval.run_all` | `reports/eval_report.md` §detectors | **measured for 3 of 11 detectors**; 8 absent, reported as skipped |
+| Per-use-case confusion matrix (FP/FN) | `python -m eval.run_all` | `reports/eval_report.md` §policy | **not computed** — needs the policy engine; deriving it from labels alone would be circular |
 | Calibrated τ + achieved rate | `python -m eval.run_all` | `reports/eval_report.md` §calibration | not yet measured |
 | Fail-open / fail-closed behaviour | `python -m eval.fault_injection` | console + audit records | not yet measured |
 | Cost saving from cascade (simulated) | `python -m eval.cost_simulation` | `reports/cost_simulation.md` | not yet measured |
 | Feedback loop before/after | *(harness pending)* | `reports/feedback_loop_report.md` | not yet measured |
 | No raw PII in logs/DB/reports | `python -m eval.pii_leak_scan` | console | not yet measured |
 
-**There are no measured claims in this repo yet.** Every row above says so on purpose: the
-harness that produces these numbers is not written, and a placeholder number is worse than a
-blank. Rows flip to real figures as reports land, and each will carry its method, hardware,
-and sample size next to the number.
+**The first three measured numbers landed with this commit; the rest are still blank on
+purpose.** A placeholder number is worse than a blank, so a row flips only when a report
+actually produces it, carrying its method and sample size. The detector rows above were
+produced against the frozen 280-case dataset
+(`b37d1909f5fb16db2b1fa38f5fbc64ceb70c3d02`), whose hash `eval/run_all.py` verifies before it
+computes anything — so a number cannot be generated against a different corpus even by
+accident. **Two of the three missed**, and they are reported as missed: see the paragraph
+above and the two open deviations in `docs/08`.
 
 Two provenance rules already constrain what may ever appear here:
 
@@ -99,7 +117,7 @@ controlplane/  gateway, detectors, policy engine, audit, telemetry
 policies/      one YAML per use case — the behaviour lives here, not in Python
 config/        upstream providers + price table (05 §6.1)
 eval/          labeled dataset + evaluation harness (06)
-tests/         364 tests, named against the requirement IDs they cover
+tests/         391 tests, named against the requirement IDs they cover
 AGENTS.md      binding operating manual for coding agents on this repo
 ```
 
