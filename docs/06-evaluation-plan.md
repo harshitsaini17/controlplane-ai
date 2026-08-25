@@ -157,12 +157,36 @@ Scripted sequence: run borderline cases through UC-3 → generate escalations �
 
 ## 8. Report bundle → README mapping
 
+**Reports are committed evidence, not build output.** `reports/` is under version control, and
+a report is committed in the **same change** that adds or updates any README claim citing it. A
+claims-table row pointing at a file absent from the tree is an **NFR-INT-001 violation**: the
+number is then unverifiable by the one thing NFR-INT-001 promises, a reader with the repo. This
+is why the rule is structural rather than a habit — the failure mode is a README that looks
+fully sourced while sourcing nothing.
+
+Three consequences, stated so they are not rediscovered later:
+
+- **A report is still never hand-edited.** Committing it does not make it a document; it stays
+  the output of its entry point, and the way to change it is to re-run that command.
+- **`DEV-TAINTED` artifacts stay gitignored.** ADR-018 defines them as resting on accounting
+  that is not a measurement, so committing one would place a non-publishable number in the
+  evidence tree — the precise opposite of the intent.
+- **The `Code commit` stamp names the commit whose code produced the numbers, not the commit
+  that records the report** — necessarily one earlier, since the recording commit's hash cannot
+  exist while its own contents are being generated. This is the same convention §1 uses for the
+  frozen dataset hash, for the same reason. A report generated from a dirty tree stamps
+  `+ uncommitted changes` and is **not** citable evidence; regenerate from a clean tree first.
+
+Cited section names must match the report's actual headings, so a citation can be resolved by
+searching the file:
+
 | README claim | Source |
 |---|---|
 | Gateway overhead P50/P99 | `reports/latency_report.md` |
-| PII recall / per-detector F1 | `reports/eval_report.md` §detectors |
-| Per-use-case confusion matrix | `reports/eval_report.md` §policy |
-| Calibrated τ + achieved rate | `reports/eval_report.md` §calibration |
+| PII recall / per-detector F1 | `reports/eval_report.md` §Detectors |
+| Per-use-case confusion matrix | `reports/eval_report.md` §Policy-level confusion matrix |
+| Calibrated τ + achieved rate | `reports/eval_report.md` §Threshold calibration |
+| Tier-1 PII recall vs NFR-EVAL-001 | `reports/eval_report.md` §NFR-EVAL-001 |
 | Cost savings (simulated) | `reports/cost_simulation.md` |
 | Feedback loop before/after | `reports/feedback_loop_report.md` |
 No number appears in README/proposal/video without a row here.

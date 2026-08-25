@@ -22,9 +22,16 @@ dist/
 *.db-shm
 *.sqlite3
 
-# Generated reports (06 §8 — regenerate with the eval entry points, never hand-edit)
-reports/*
-!reports/.gitkeep
+# Generated reports (06 §8). Reports are COMMITTED EVIDENCE, not build output: a README
+# claim citing a report absent from the tree is an NFR-INT-001 violation, so the report
+# travels in the same commit as the claim. Still never hand-edited — regenerate via the
+# eval entry points.
+#
+# DEV-TAINTED artifacts are the one exception and stay ignored. ADR-018 defines them as
+# resting on accounting that is not a measurement, so committing one would put a
+# non-publishable number in the evidence tree, which is the opposite of the point.
+reports/*.DEV-TAINTED.*
+reports/**/*.DEV-TAINTED.*
 
 # Model caches (sentence-transformers / spaCy)
 .cache/

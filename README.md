@@ -29,7 +29,8 @@ This is a **hackathon prototype**, and this README will not pretend otherwise wh
 | Detector eval harness (`eval/run_all.py`) | implemented, tested — **3 of 11 detectors scored** |
 | Latency / fault-injection / cost / leak-scan harnesses, dashboard, demo runner | **not yet implemented** |
 
-`python -m eval.validate_dataset` passes. `python -m pytest` passes (391 tests). Nothing in
+`python -m eval.validate_dataset` passes. `python -m pytest` passes (401 collected: 398
+pass, 3 `xfail`). Nothing in
 `docs/07-demo-script.md` runs end to end yet.
 
 **The three deterministic detectors have now been scored, and two of them missed.** They were
@@ -60,7 +61,7 @@ claim.
 ```sh
 python -m venv .venv
 .venv/bin/pip install -e ".[dev]"
-.venv/bin/python -m pytest -q                       # 391 tests
+.venv/bin/python -m pytest -q                       # 401: 398 pass, 3 xfail
 .venv/bin/python -m eval.validate_dataset           # consistency gate (06 §2.4)
 .venv/bin/python -m eval.validate_dataset --freeze  # + assert the dataset is the frozen one
 ```
@@ -82,14 +83,20 @@ the business proposal, or the demo video unless it has a row here.
 |---|---|---|---|
 | Gateway overhead P50/P95/P99 | `python -m eval.bench_latency` | `reports/latency_report.md` | not yet measured |
 | Per-detector latency vs budget | `python -m eval.bench_latency` | `reports/latency_report.md` | not yet measured |
-| Tier-1 PII recall | `python -m eval.run_all` | `reports/eval_report.md` §detectors | **0.8361** — target 0.95 **MISSED** (D3, `docs/08`) |
-| Per-detector precision / recall / F1 | `python -m eval.run_all` | `reports/eval_report.md` §detectors | **measured for 3 of 11 detectors**; 8 absent, reported as skipped |
-| Per-use-case confusion matrix (FP/FN) | `python -m eval.run_all` | `reports/eval_report.md` §policy | **not computed** — needs the policy engine; deriving it from labels alone would be circular |
-| Calibrated τ + achieved rate | `python -m eval.run_all` | `reports/eval_report.md` §calibration | not yet measured |
+| Tier-1 PII recall | `python -m eval.run_all` | `reports/eval_report.md` §NFR-EVAL-001 | **0.8361** — target 0.95 **MISSED** (D3, `docs/08`) |
+| Per-detector precision / recall / F1 | `python -m eval.run_all` | `reports/eval_report.md` §Detectors | **measured for 3 of 11 detectors**; 8 absent, reported as skipped |
+| Per-use-case confusion matrix (FP/FN) | `python -m eval.run_all` | `reports/eval_report.md` §Policy-level confusion matrix | **not computed** — needs the policy engine; deriving it from labels alone would be circular |
+| Calibrated τ + achieved rate | `python -m eval.run_all` | `reports/eval_report.md` §Threshold calibration | **not computed** — needs the confidence-kind detectors; τ stays `# SEED`, and a seed is never judge-facing |
 | Fail-open / fail-closed behaviour | `python -m eval.fault_injection` | console + audit records | not yet measured |
 | Cost saving from cascade (simulated) | `python -m eval.cost_simulation` | `reports/cost_simulation.md` | not yet measured |
 | Feedback loop before/after | *(harness pending)* | `reports/feedback_loop_report.md` | not yet measured |
 | No raw PII in logs/DB/reports | `python -m eval.pii_leak_scan` | console | not yet measured |
+
+**The reports these rows cite are committed to this repository** (06 §8). A claims-table row
+pointing at a file you cannot open is unverifiable, which defeats the only thing NFR-INT-001
+promises — so a report travels in the same commit as the claim citing it. Reports are still
+never hand-edited: re-run the command. `reports/eval_report.md` stamps the dataset digest, the
+frozen-hash match, and the code commit that produced its numbers.
 
 **The first three measured numbers landed with this commit; the rest are still blank on
 purpose.** A placeholder number is worse than a blank, so a row flips only when a report
@@ -117,7 +124,10 @@ controlplane/  gateway, detectors, policy engine, audit, telemetry
 policies/      one YAML per use case — the behaviour lives here, not in Python
 config/        upstream providers + price table (05 §6.1)
 eval/          labeled dataset + evaluation harness (06)
-tests/         391 tests, named against the requirement IDs they cover
+tests/         401 tests, named against the requirement IDs they cover
+tests/review/  independent checkpoint-review tests; its 3 xfail cases are documented
+               limitations (Unicode email evasion), not pending fixes
+reports/       committed measurement evidence — generated, never hand-edited (06 §8)
 AGENTS.md      binding operating manual for coding agents on this repo
 ```
 
