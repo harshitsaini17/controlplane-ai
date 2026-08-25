@@ -33,6 +33,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from controlplane.detectors._v1_numeric_claims import numeric_claims as v1_numeric_claims
+from controlplane.detectors._v1_tier1_patterns import tier1_pii as v1_tier1_pii
 from controlplane.detectors.base import DetectorContext, Signal, Stage
 from controlplane.detectors.numeric_claims import numeric_claims
 from controlplane.detectors.tier1_patterns import tier1_blocklist, tier1_pii
@@ -73,6 +75,9 @@ class DetectorUnderTest:
     scope: frozenset[str]
     stages: frozenset[Stage]
     note: str = ""
+    #: `v1` = the blind first-contact implementation, frozen; `v2` = post-revision
+    #: (ADR-026 §1). Both are scored by the same loop so the columns are comparable.
+    variant: str = "v2"
 
 
 @dataclass
@@ -120,6 +125,36 @@ IMPLEMENTED: tuple[DetectorUnderTest, ...] = (
         ),
     ),
 )
+
+#: The frozen v1 detectors, re-scored every run so the permanent v1 numbers stay
+#: **reproducible** rather than transcribed (ADR-026 §1).
+#:
+#: This is the whole reason `_v1_*.py` exists as runnable code. A v1 figure quoted from a
+#: previous report would be unverifiable, and AGENTS.md §7 requires every judge-facing number
+#: to be reproducible by a command in this repo — so the baseline is *computed*, not copied.
+#: The modules are byte-identical to their source commit and carry a DO-NOT-EDIT banner.
+#:
+#: Only the two revised detectors appear here. `tier1_blocklist` was never revised, so a v1
+#: column for it would restate the v2 column and imply a comparison that was never made.
+V1_BASELINE: tuple[DetectorUnderTest, ...] = (
+    DetectorUnderTest(
+        name="tier1_pii",
+        detector=v1_tier1_pii,
+        scope=frozenset(
+            {"pii.ssn", "pii.credit_card", "pii.email", "pii.phone", "pii.api_key"}
+        ),
+        stages=frozenset({Stage.INPUT, Stage.OUTPUT_SENTENCE}),
+        variant="v1",
+    ),
+    DetectorUnderTest(
+        name="numeric_claims",
+        detector=v1_numeric_claims,
+        scope=frozenset({"hallucination.unsourced_numeric"}),
+        stages=frozenset({Stage.OUTPUT_SENTENCE}),
+        variant="v1",
+    ),
+)
+
 
 SKIPPED: tuple[SkippedDetector, ...] = (
     SkippedDetector("tier2_injection", ("security.prompt_injection",),
@@ -183,6 +218,7 @@ class LabelScore:
 class DetectorResult:
     name: str
     note: str
+    variant: str = "v2"
     cases_scored: int = 0
     cases_out_of_stage: int = 0
     labels: dict[str, LabelScore] = field(default_factory=dict)
@@ -245,10 +281,13 @@ def evaluate(cases: Sequence[dict[str, Any]]) -> tuple[list[DetectorResult], int
     excluded them by design. Which turn breached is not a field, so it cannot be recovered
     mechanically; the honest handling is to exclude and say so with the count.
     """
-    results = [DetectorResult(name=d.name, note=d.note) for d in IMPLEMENTED]
+    scored = (*IMPLEMENTED, *V1_BASELINE)
+    results = [
+        DetectorResult(name=d.name, note=d.note, variant=d.variant) for d in scored
+    ]
     excluded = sum(1 for c in cases if c["kind"] == "conversation")
 
-    for dut, result in zip(IMPLEMENTED, results):
+    for dut, result in zip(scored, results):
         for case in cases:
             if case["kind"] == "conversation":
                 continue
@@ -313,8 +352,14 @@ def _provenance(cases: Sequence[dict[str, Any]], dataset_dir: Path) -> list[str]
 
 
 def _detector_section(results: Sequence[DetectorResult], excluded: int) -> list[str]:
+    """The live detectors. Frozen v1 baselines are rendered by `_revision_section` instead, so
+    a reader is never handed two same-named tables and left to work out which one ships."""
     out = [
         "## Detectors (06 §3)",
+        "",
+        "These are the **shipping** implementations. The two detectors revised under ADR-026 "
+        "also carry a frozen v1 baseline, re-measured every run and tabulated against these "
+        "figures in *Disclosed revision* below.",
         "",
         "Precision / recall / F1 per label, case-level, scored **only against each "
         "detector's own slice of the 04 §1.1 taxonomy** — a toxicity case is not a miss for "
@@ -327,6 +372,8 @@ def _detector_section(results: Sequence[DetectorResult], excluded: int) -> list[
         "",
     ]
     for result in results:
+        if result.variant != "v2":
+            continue
         micro = result.micro
         out += [
             f"### `{result.name}`",
@@ -366,6 +413,94 @@ def _detector_section(results: Sequence[DetectorResult], excluded: int) -> list[
                 else f" … +{len(result.false_positives) - 25} more"
             )
             out += [f"**False positives ({len(result.false_positives)}):** {listed}{more}", ""]
+    return out
+
+
+def _revision_section(results: Sequence[DetectorResult]) -> list[str]:
+    """ADR-026 §1 / 06 §3.2 — the report adds a column, it never replaces a number."""
+    pairs = [
+        (v1, next((r for r in results if r.name == v1.name and r.variant == "v2"), None))
+        for v1 in results
+        if v1.variant == "v1"
+    ]
+    if not pairs:
+        return []
+
+    out = [
+        "## Disclosed revision — v1 vs v2 (ADR-026, 06 §3.2)",
+        "",
+        "A detector revised **after** its failures were measured produces weaker evidence than "
+        "one measured blind, however carefully the revision was derived. So the v1 figures are "
+        "not overwritten and not deleted — they are re-measured here alongside v2, every run.",
+        "",
+        "**The v1 columns are computed, not transcribed.** `controlplane/detectors/_v1_*.py` "
+        "hold the original implementations, byte-identical to the commit that produced the "
+        "blind measurement and carrying a DO-NOT-EDIT banner. A v1 number quoted from an older "
+        "report would be unverifiable, and AGENTS.md §7 requires every judge-facing number to "
+        "be reproducible by a command in this repo — so the baseline is re-derived on every "
+        "run instead.",
+        "",
+        "| Detector | Metric | v1 (blind first contact) | v2 (post-revision, disclosed) | Δ |",
+        "|---|---|---:|---:|---:|",
+    ]
+
+    def delta(before: float | None, after: float | None) -> str:
+        if before is None or after is None:
+            return "n/a"
+        diff = after - before
+        return f"{diff:+.3f}" if abs(diff) >= 0.0005 else "±0.000"
+
+    for v1, v2 in pairs:
+        if v2 is None:
+            continue
+        a, b = v1.micro, v2.micro
+        rows = (
+            ("precision", _fmt(a.precision), _fmt(b.precision), delta(a.precision, b.precision)),
+            ("recall", _fmt(a.recall), _fmt(b.recall), delta(a.recall, b.recall)),
+            ("F1", _fmt(a.f1), _fmt(b.f1), delta(a.f1, b.f1)),
+            ("TP", str(a.tp), str(b.tp), f"{b.tp - a.tp:+d}"),
+            ("FP", str(a.fp), str(b.fp), f"{b.fp - a.fp:+d}"),
+            ("FN", str(a.fn), str(b.fn), f"{b.fn - a.fn:+d}"),
+        )
+        for i, (metric, before, after, d) in enumerate(rows):
+            name = f"`{v1.name}`" if i == 0 else ""
+            out.append(f"| {name} | {metric} | {before} | {after} | {d} |")
+
+    out += [
+        "",
+        "**Precision movement is shown next to recall on purpose** (06 §3.2): a revision that "
+        "buys recall with precision has to show both halves, or the table flatters it.",
+        "",
+        "### Derivation and scope exclusions, restated with their cost",
+        "",
+        "- **`tier1_pii` v2** derives every pattern from a named published specification, cited "
+        "  in 04 §2.5: ITU-T E.164, NANP conventions, RFC 7519/7515. Two scope exclusions are "
+        "  deliberate precision-grounded DLP trade-offs, and **both cost recall**: bare 7-digit "
+        "  local numbers (indistinguishable from order and ticket ids) and bare 32/64-hex "
+        "  without a credential cue (collides with git SHAs, digests, dashless UUIDs). An "
+        "  exclusion that quietly removed hard cases would be indistinguishable from tuning, "
+        "  which is why they are named here rather than only in the ADR.",
+        "- **The NANP `N ∈ [2–9]` constraint adds no recall on this corpus** (ADR-026 "
+        "  Amendment 1). v1's broader phone pattern is deliberately retained and evaluated "
+        "  first, so it shadows both NANP rows at equal extent. The entire v2 phone gain is "
+        "  **E.164 plus the spaced-parenthesis variant**. v2 is kept a strict *superset* of v1 "
+        "  because that is what makes the permanent v1 baseline describe code that still ships.",
+        "- **`numeric_claims` v2** deletes the bare large-digit-run rule (ADR-025): measured "
+        "  blind it scored precision 0.267, with 30 of 33 false positives on `PII-*` cases, "
+        "  because an SSN, a card and a phone number are all runs of digits. A numeral now "
+        "  fires only on a quantity shape, and an identifier pre-filter runs first and absolute.",
+        "- **One re-measurement.** ADR-026 §5 permits exactly one, and forbids touching the "
+        "  harness afterwards. If v2 misses a target the miss stands and **the target does not "
+        "  move**.",
+        "",
+        "### v1 metric validity across the freeze bump",
+        "",
+        "ADR-024 bumped the freeze after v1 was first measured. Its seven changed cases altered "
+        "`action_expected` only — **no `labels_expected`** — so per-detector precision, recall "
+        "and F1, which are computed against labels, remain valid over an identical label set "
+        "(freeze history in 06 §1). A bump touching a label would have invalidated them.",
+        "",
+    ]
     return out
 
 
@@ -436,6 +571,7 @@ def build_report(
         "",
         *_provenance(cases, dataset_dir),
         *_detector_section(results, excluded),
+        *_revision_section(results),
     ]
 
     lines += _skipped_section()
@@ -459,7 +595,11 @@ def build_report(
 
     # NFR-EVAL-001 verdict last: it is the one row with a documented target, so it must be
     # impossible to skim past.
-    pii = next((r for r in results if r.name == "tier1_pii"), None)
+    # Variant is explicit, never positional: two results now share the name `tier1_pii`, and
+    # the target applies to the one that ships. Selecting by name alone would let list order
+    # decide which number is graded against NFR-EVAL-001.
+    pii = next((r for r in results if r.name == "tier1_pii" and r.variant == "v2"), None)
+    pii_v1 = next((r for r in results if r.name == "tier1_pii" and r.variant == "v1"), None)
     lines += ["## NFR-EVAL-001 — Tier-1 PII recall ≥ 0.95", ""]
     if pii is None:
         lines.append("Not evaluated.")
@@ -474,11 +614,19 @@ def build_report(
                 f"positive label occurrences. Target 0.95 → {verdict}.",
                 "",
             ]
+            if pii_v1 is not None and pii_v1.micro.recall is not None:
+                lines += [
+                    f"The permanent v1 baseline is **{pii_v1.micro.recall:.4f}** "
+                    f"(blind first contact, ADR-026 §1), re-measured on this run rather than "
+                    f"quoted. Both numbers stand in the record.",
+                    "",
+                ]
             if recall < 0.95:
                 lines.append(
                     "A missed target is reported as missed and raised as a **D3 deviation** "
                     "(AGENTS.md §5.1, 06 §1) — never tuned away by editing the detector "
-                    "against these cases."
+                    "against these cases. Under ADR-026 §5 this is the single permitted "
+                    "re-measurement: the target does not move and the harness is not touched."
                 )
     lines += [
         "",
@@ -563,12 +711,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(report)
 
-    pii = next((r for r in results if r.name == "tier1_pii"), None)
-    recall = pii.micro.recall if pii else None
+    def _micro(name: str, variant: str) -> LabelScore | None:
+        found = next(
+            (r for r in results if r.name == name and r.variant == variant), None
+        )
+        return found.micro if found else None
+
+    pii_v2, pii_v1 = _micro("tier1_pii", "v2"), _micro("tier1_pii", "v1")
+    num_v2, num_v1 = _micro("numeric_claims", "v2"), _micro("numeric_claims", "v1")
+    recall = pii_v2.recall if pii_v2 else None
     print(f"wrote {out_path}")
     print(f"  cases loaded      : {len(cases)}")
-    print(f"  detectors scored  : {len(IMPLEMENTED)} of {len(IMPLEMENTED) + len(SKIPPED)}")
-    print(f"  tier1_pii recall  : {_fmt(recall, digits=4)} (NFR-EVAL-001 target 0.95)")
+    print(f"  detectors scored  : {len(IMPLEMENTED)} of {len(IMPLEMENTED) + len(SKIPPED)}"
+          f" (+{len(V1_BASELINE)} frozen v1 baselines)")
+    print(f"  tier1_pii recall  : v1 {_fmt(pii_v1.recall if pii_v1 else None, digits=4)}"
+          f" -> v2 {_fmt(recall, digits=4)} (NFR-EVAL-001 target 0.95)")
+    print(f"  tier1_pii prec.   : v1 {_fmt(pii_v1.precision if pii_v1 else None, digits=4)}"
+          f" -> v2 {_fmt(pii_v2.precision if pii_v2 else None, digits=4)}")
+    print(f"  numeric precision : v1 {_fmt(num_v1.precision if num_v1 else None, digits=4)}"
+          f" -> v2 {_fmt(num_v2.precision if num_v2 else None, digits=4)}")
     if recall is not None and recall < 0.95:
         print("  NFR-EVAL-001      : MISSED — file a D3 deviation (never tune the detector)")
     return 0

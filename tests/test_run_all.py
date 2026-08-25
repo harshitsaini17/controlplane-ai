@@ -16,6 +16,7 @@ what belongs here is that the arithmetic producing it is right.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -23,8 +24,10 @@ import pytest
 from eval.run_all import (
     IMPLEMENTED,
     SKIPPED,
+    V1_BASELINE,
     DetectorResult,
     LabelScore,
+    _revision_section,
     build_report,
     evaluate,
     load_cases,
@@ -339,3 +342,168 @@ def test_run_writes_a_report_on_the_frozen_dataset(tmp_path: Path) -> None:
     text = out.read_text()
     assert "# Evaluation report" in text
     assert "tier1_pii" in text
+
+
+# --------------------------------------------------------------------------
+# Disclosed revision — dual v1/v2 columns (ADR-026 §1, 06 §3.2)
+# --------------------------------------------------------------------------
+#
+# Still nothing here pins an accuracy figure, per this module's opening note. These tests
+# assert the *mechanism* that keeps the v1 baseline honest: that it is re-measured rather
+# than transcribed, that it is reported beside v2 rather than instead of it, and that the
+# NFR target is graded against the detector that actually ships.
+
+
+def _scored(name: str, variant: str, *, tp: int, fp: int, fn: int) -> DetectorResult:
+    result = DetectorResult(name=name, note="", variant=variant)
+    score = result.score("pii.ssn")
+    score.tp, score.fp, score.fn = tp, fp, fn
+    return result
+
+
+def test_v1_baseline_covers_exactly_the_revised_detectors() -> None:
+    """`tier1_blocklist` was never revised, so a v1 column for it would restate the v2 column
+    and imply a comparison nobody made."""
+    assert {d.name for d in V1_BASELINE} == {"tier1_pii", "numeric_claims"}
+    assert all(d.variant == "v1" for d in V1_BASELINE)
+    assert all(d.variant == "v2" for d in IMPLEMENTED)
+
+
+def test_v1_baseline_scores_a_distinct_detector_object() -> None:
+    """The frozen modules must be separate implementations, not aliases of the live ones —
+    otherwise the 'v1' column would silently report v2 twice."""
+    live = {d.name: d.detector for d in IMPLEMENTED}
+    for frozen in V1_BASELINE:
+        assert frozen.detector is not live[frozen.name]
+
+
+def test_evaluate_returns_both_variants_and_they_are_distinguishable() -> None:
+    cases = load_cases()
+    results, _ = evaluate(cases)
+    pairs = {(r.name, r.variant) for r in results}
+    assert ("tier1_pii", "v1") in pairs
+    assert ("tier1_pii", "v2") in pairs
+    assert ("numeric_claims", "v1") in pairs
+    assert ("numeric_claims", "v2") in pairs
+
+
+def test_v1_and_v2_are_scored_over_the_same_denominator() -> None:
+    """A comparison across different denominators is not a comparison. Support is fixed by
+    the corpus and the scope, so it must be identical in both columns."""
+    results, _ = evaluate(load_cases())
+    for name in ("tier1_pii", "numeric_claims"):
+        v1 = next(r for r in results if r.name == name and r.variant == "v1")
+        v2 = next(r for r in results if r.name == name and r.variant == "v2")
+        assert v1.micro.support == v2.micro.support
+        assert v1.cases_scored == v2.cases_scored
+
+
+def test_revision_section_reports_precision_beside_recall() -> None:
+    """06 §3.2: a revision that buys recall with precision must show both halves."""
+    section = "\n".join(
+        _revision_section(
+            [
+                _scored("tier1_pii", "v1", tp=5, fp=0, fn=5),
+                _scored("tier1_pii", "v2", tp=9, fp=3, fn=1),
+            ]
+        )
+    )
+    assert "v1 (blind first contact)" in section
+    assert "v2 (post-revision, disclosed)" in section
+    assert "precision" in section and "recall" in section
+    # recall 0.500 -> 0.900, precision 1.000 -> 0.750: both movements shown, signed.
+    assert "+0.400" in section
+    assert "-0.250" in section
+
+
+def test_revision_section_states_the_exclusions_and_their_cost() -> None:
+    """An exclusion that quietly removes hard cases is indistinguishable from tuning, so the
+    report names them rather than leaving them in the ADR only."""
+    section = "\n".join(
+        _revision_section(
+            [
+                _scored("tier1_pii", "v1", tp=1, fp=0, fn=1),
+                _scored("tier1_pii", "v2", tp=1, fp=0, fn=1),
+            ]
+        )
+    )
+    assert "7-digit" in section
+    assert "credential cue" in section
+    assert "cost recall" in section
+    assert "One re-measurement" in section
+
+
+def test_revision_section_is_empty_without_a_v1_baseline() -> None:
+    assert _revision_section([_scored("tier1_pii", "v2", tp=1, fp=0, fn=0)]) == []
+
+
+def test_report_grades_nfr_eval_001_against_the_shipping_variant() -> None:
+    """The load-bearing selector. Two results now share the name `tier1_pii`, and the target
+    applies to the one that ships — so selection must be by variant, never by list position.
+
+    The v1 result is placed FIRST here deliberately: a positional or name-only lookup would
+    grade the frozen baseline against NFR-EVAL-001 and report the wrong verdict.
+    """
+    cases = load_cases()
+    results = [
+        _scored("tier1_pii", "v1", tp=5, fp=0, fn=5),    # recall 0.50 — would read MISSED
+        _scored("tier1_pii", "v2", tp=10, fp=0, fn=0),   # recall 1.00 — the shipping figure
+    ]
+    report = build_report(results, cases, 0, DATASET_DIR, "note")
+    assert "**MET**" in report
+    assert "**MISSED**" not in report
+    assert "1.0000" in report
+    # and the baseline is still in the record, not discarded
+    assert "0.5000" in report
+
+
+def test_report_renders_one_table_per_shipping_detector_only() -> None:
+    """Two same-named `### `tier1_pii`` tables would leave a reader guessing which ships."""
+    cases = load_cases()
+    results, excluded = evaluate(cases)
+    report = build_report(results, cases, excluded, DATASET_DIR, "note")
+    assert report.count("### `tier1_pii`") == 1
+    assert report.count("### `numeric_claims`") == 1
+
+
+def test_report_says_the_v1_column_is_computed_not_transcribed() -> None:
+    """ADR-026 §1's permanence claim only holds if the number is reproducible (AGENTS.md §7).
+    A reader has to be able to tell a re-measurement from a quotation."""
+    cases = load_cases()
+    results, excluded = evaluate(cases)
+    report = build_report(results, cases, excluded, DATASET_DIR, "note")
+    assert "computed, not transcribed" in report
+    assert "_v1_" in report
+
+
+def test_frozen_v1_modules_are_byte_identical_to_their_source_commit() -> None:
+    """The mechanical guard on ADR-026 §1: `_v1_*.py` must never drift.
+
+    They exist so the permanent v1 figures stay re-derivable. An edit — even a well-meant
+    lint fix — would silently change what "v1" means in every future report, so the property
+    is asserted rather than trusted to the DO-NOT-EDIT banner.
+    """
+    source = "4b056e869ce4892bbd848d259336f166dfcd5795"
+    root = Path(__file__).resolve().parents[1]
+    try:
+        subprocess.run(
+            ["git", "cat-file", "-e", f"{source}^{{commit}}"],
+            cwd=root, check=True, capture_output=True, timeout=10,
+        )
+    except Exception:  # pragma: no cover - shallow clone or no git
+        pytest.skip(f"commit {source[:7]} not available in this checkout")
+
+    for original, frozen in (
+        ("numeric_claims", "_v1_numeric_claims"),
+        ("tier1_patterns", "_v1_tier1_patterns"),
+    ):
+        was = subprocess.run(
+            ["git", "show", f"{source}:controlplane/detectors/{original}.py"],
+            cwd=root, check=True, capture_output=True, text=True, timeout=10,
+        ).stdout
+        now = (root / "controlplane" / "detectors" / f"{frozen}.py").read_text()
+        assert "DO NOT EDIT" in now
+        assert now.endswith(was), (
+            f"{frozen}.py no longer contains {original}.py from {source[:7]} verbatim — "
+            "the v1 baseline has drifted and every v1 figure is now unreproducible"
+        )
