@@ -193,6 +193,11 @@ Setup (full — adds the 02 §8 model stack; do the torch step FIRST):
 
 Unit tests:   .venv/bin/python -m pytest -q
 Audit DB:     bootstrapped via controlplane.audit.db.init_db() (idempotent; 05 §3)
+Freeze gate:  .venv/bin/python -m eval.validate_dataset            # consistency (06 §2.4)
+              .venv/bin/python -m eval.validate_dataset --freeze   # + Checkpoint 1b digest
+              The dataset is FROZEN (06 §1). --freeze asserts it is byte-identical to the
+              approved state and is what eval/run_all.py calls before computing anything.
+              A frozen case is not editable as a fix — that is a new freeze cycle.
 
 Run gateway:  [Phase 2+] .venv/bin/uvicorn controlplane.gateway.app:app --reload
 Eval suite:   [Phase 2+] .venv/bin/python -m eval.run_all         → reports/eval_report.md

@@ -17,6 +17,24 @@ python -m eval.cost_simulation  # cascade savings simulation (ADR-009 framing)
 
 - All data synthetic (charter NG3). PII values are generated fakes (valid-format SSNs from the invalid-range pool, test credit card numbers passing Luhn from test BINs, example.com emails).
 - Labels are assigned at authoring time and reviewed by a second teammate; label disputes → `08-open-questions`.
+- **The dataset is FROZEN at `b37d1909f5fb16db2b1fa38f5fbc64ceb70c3d02`** — Checkpoint 1b, approved
+  2026-08-26, 280 cases. From this point **no eval number in this repo is computed against any
+  other state**, and a change under `eval/dataset/` requires a new freeze cycle through the
+  second-teammate review above. Editing a frozen case is not a fix; it is a new freeze.
+
+  **Convention (stated so it is unambiguous):** the hash names the commit whose tree holds the
+  frozen cases — **not** the commit that recorded the hash, which is necessarily later and
+  touches only docs. So the freeze is machine-checkable rather than a claim, and two different
+  things are checked because they can fail independently:
+
+  | check | what it catches | command |
+  |---|---|---|
+  | git provenance | the dataset was changed and committed | `git log -1 --format=%H -- eval/dataset/` equals the hash |
+  | content digest | the dataset was changed and **not** committed | `python -m eval.validate_dataset --freeze` |
+
+  A dirty working tree passes the first check and fails the second, which is the failure mode a
+  git hash alone would miss. `--freeze` is what `eval/run_all.py` calls before it computes
+  anything, so a number cannot be produced against an unfrozen dataset even by accident.
 - Reports state method + hardware + sample size next to every number. A missed target is reported as missed + a D3 deviation — never tuned away silently.
 
 ## 2. Labeled dataset (`eval/dataset/*.jsonl`)

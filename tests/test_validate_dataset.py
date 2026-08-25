@@ -21,7 +21,10 @@ import pytest
 from controlplane.policy.schema import Action, Policy
 from eval.validate_dataset import (
     DATASET_DIR,
+    FROZEN_SHA256,
     check_case,
+    check_freeze,
+    dataset_digest,
     derive_action,
     is_confidence_driven,
     load_policies,
@@ -449,3 +452,106 @@ def test_phone_label_with_no_phone_shaped_literal_rejected(
         },
     )
     assert any("phone-shaped" in p for p in check_case(case, "pii", policies))
+
+
+# --------------------------------------------------------------------------
+# Checkpoint 1b freeze (06 §1). Two independent failure modes are covered here,
+# because a git hash alone catches only one of them: a committed change moves the
+# hash, but an UNCOMMITTED edit leaves it untouched. The digest is what closes that
+# gap, so these tests exist to prove the digest actually fires.
+# --------------------------------------------------------------------------
+
+
+def _frozen_copy(dest: Path) -> Path:
+    """Byte-faithful copy of the shipped dataset, verified faithful before use.
+
+    The assert is the point: a test that mutates a copy and observes a digest change
+    proves nothing unless the copy started out matching.
+    """
+    dest.mkdir(exist_ok=True)
+    for path in DATASET_DIR.glob("*.jsonl"):
+        (dest / path.name).write_bytes(path.read_bytes())
+    assert dataset_digest(dest) == FROZEN_SHA256
+    return dest
+
+
+def test_shipped_dataset_matches_the_checkpoint_1b_freeze() -> None:
+    """The freeze holds. If this fails, someone edited a frozen case (06 §1)."""
+    assert dataset_digest(DATASET_DIR) == FROZEN_SHA256
+    assert check_freeze(DATASET_DIR) == []
+
+
+def test_shipped_dataset_passes_the_freeze_flag() -> None:
+    assert main(["--freeze"]) == 0
+
+
+def test_digest_is_deterministic() -> None:
+    assert dataset_digest(DATASET_DIR) == dataset_digest(DATASET_DIR)
+
+
+def test_edited_case_breaks_the_freeze(tmp_path: Path) -> None:
+    """The uncommitted-edit case — the one a git hash cannot see."""
+    d = _frozen_copy(tmp_path / "ds")
+    target = d / "pii.jsonl"
+    target.write_text(target.read_text().replace("PII-001", "PII-001x", 1))
+
+    violations = check_freeze(d)
+    assert len(violations) == 1
+    assert "does not match the frozen" in violations[0]
+    assert "new freeze cycle" in violations[0]
+    assert main(["--freeze", "--dataset-dir", str(d)]) == 1
+
+
+def test_added_file_breaks_the_freeze(tmp_path: Path) -> None:
+    """Why the digest globs instead of walking a fixed file list."""
+    d = _frozen_copy(tmp_path / "ds")
+    (d / "extra.jsonl").write_text('{"case_id":"X-001"}\n')
+    assert check_freeze(d) != []
+
+
+def test_deleted_file_breaks_the_freeze(tmp_path: Path) -> None:
+    d = _frozen_copy(tmp_path / "ds")
+    (d / "toxicity.jsonl").unlink()
+    assert check_freeze(d) != []
+
+
+def test_filename_is_part_of_the_digest(tmp_path: Path) -> None:
+    """Identical bytes under a different name must not collide.
+
+    Without the name in the digest, swapping two filenames would leave the hashed
+    byte stream unchanged — the digest would attest to the wrong arrangement.
+    """
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    payload = b'{"case_id":"PII-001"}\n'
+    (a / "pii.jsonl").write_bytes(payload)
+    (b / "clean.jsonl").write_bytes(payload)
+    assert dataset_digest(a) != dataset_digest(b)
+
+
+def test_digest_ignores_non_case_files(tmp_path: Path) -> None:
+    """It covers `*.jsonl` only, so editing the validator cannot move the number
+    the validator is checked against."""
+    d = _frozen_copy(tmp_path / "ds")
+    (d / "REVIEW_NEEDED.md").write_text("scratch")
+    (d / "notes.py").write_text("# scratch")
+    assert dataset_digest(d) == FROZEN_SHA256
+
+
+def test_freeze_check_is_opt_in(tmp_path: Path) -> None:
+    """Without --freeze the gate still validates consistency and says nothing about
+    the freeze — so authoring a NEW dataset for a future cycle stays possible."""
+    d = _frozen_copy(tmp_path / "ds")
+    target = d / "pii.jsonl"
+    target.write_text(target.read_text().replace("PII-001", "PII-001x", 1))
+    assert main(["--dataset-dir", str(d)]) == 0
+
+
+def test_freeze_violation_precedes_consistency_violations(tmp_path: Path) -> None:
+    """A stale-dataset message is the useful one to read first when both fire."""
+    d = _frozen_copy(tmp_path / "ds")
+    (d / "pii.jsonl").write_text("{not json\n")
+    _, consistency = validate(d)
+    assert consistency
+    assert "does not match the frozen" in check_freeze(d)[0]

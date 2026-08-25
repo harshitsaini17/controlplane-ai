@@ -25,6 +25,7 @@ Exit status: 0 = consistent, 1 = at least one violation. Prints counts it actual
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -42,6 +43,18 @@ from controlplane.policy.schema import TAXONOMY, Action, Policy
 
 DATASET_DIR = Path(__file__).resolve().parent / "dataset"
 POLICY_DIR = Path(__file__).resolve().parents[1] / "policies"
+
+#: Checkpoint 1b freeze, approved 2026-08-26 (06 §1). `FROZEN_COMMIT` names the commit whose
+#: TREE HOLDS the frozen cases — not the later commit that recorded these constants, which
+#: touches only docs and this module.
+#:
+#: `FROZEN_SHA256` is the half that catches an **uncommitted** edit: a dirty working tree still
+#: satisfies the git-provenance check and fails this one. The digest covers the case files
+#: ONLY — never this module — so editing the validator cannot move the number the validator is
+#: checked against. It is taken over a `glob`, so ADDING a file breaks the freeze too; a fixed
+#: file list would let a new `extra.jsonl` in unnoticed.
+FROZEN_COMMIT = "b37d1909f5fb16db2b1fa38f5fbc64ceb70c3d02"
+FROZEN_SHA256 = "3b3931365a3c29187d111266fffe45071717de48ba9b55688e60556c492b9996"
 
 #: The three UC pipelines (01 §3). `action_expected` must carry exactly these keys — a
 #: missing one is an unstated expectation and a fourth is a use case that does not exist.
@@ -355,6 +368,36 @@ def check_case(case: dict[str, Any], stem: str, policies: dict[str, Policy]) -> 
 # --------------------------------------------------------------------------
 
 
+def dataset_digest(dataset_dir: Path = DATASET_DIR) -> str:
+    """sha256 over every `*.jsonl` in `dataset_dir` — name, then bytes, in sorted order.
+
+    Filenames are hashed alongside their contents (NUL-separated) so a **rename is a change**:
+    swapping two filenames leaves the concatenated bytes identical, and a digest that accepted
+    that would be attesting to the wrong thing.
+    """
+    h = hashlib.sha256()
+    for path in sorted(dataset_dir.glob("*.jsonl"), key=lambda p: p.name):
+        h.update(path.name.encode() + b"\0")
+        h.update(path.read_bytes())
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def check_freeze(dataset_dir: Path = DATASET_DIR) -> list[str]:
+    """Empty list iff the dataset on disk is byte-identical to the Checkpoint 1b freeze."""
+    actual = dataset_digest(dataset_dir)
+    if actual == FROZEN_SHA256:
+        return []
+    return [
+        f"dataset digest {actual} does not match the frozen "
+        f"{FROZEN_SHA256} (commit {FROZEN_COMMIT[:7]}, 280 cases). "
+        "No eval number may be computed against this state (06 §1). "
+        "Editing a frozen case is not a fix — it is a new freeze cycle: take the change "
+        "through the second-teammate label review, then update FROZEN_COMMIT/FROZEN_SHA256 "
+        "and the 06 §1 record together."
+    ]
+
+
 def load_policies() -> dict[str, Policy]:
     return {
         uc: Policy(**yaml.safe_load((POLICY_DIR / f"{uc}.yaml").read_text()))
@@ -417,9 +460,17 @@ def validate(dataset_dir: Path = DATASET_DIR) -> tuple[int, list[str]]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--dataset-dir", type=Path, default=DATASET_DIR)
+    parser.add_argument(
+        "--freeze",
+        action="store_true",
+        help="additionally assert the dataset is byte-identical to the Checkpoint 1b "
+             "freeze (06 §1). eval/run_all.py passes this before computing anything.",
+    )
     args = parser.parse_args(argv)
 
     total, violations = validate(args.dataset_dir)
+    if args.freeze:
+        violations = check_freeze(args.dataset_dir) + violations
     if violations:
         print(f"\n{len(violations)} violation(s):", file=sys.stderr)
         for v in violations:
@@ -432,6 +483,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(f"\nFREEZE GATE: PASSED for {total} cases (consistency only; label correctness "
           "is the second-teammate review, 06 §1).")
+    if args.freeze:
+        print(f"FROZEN: digest matches {FROZEN_SHA256[:16]}… "
+              f"(commit {FROZEN_COMMIT[:7]}) — safe to compute eval numbers.")
     return 0
 
 
