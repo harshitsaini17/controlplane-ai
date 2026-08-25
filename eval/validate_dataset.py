@@ -58,7 +58,7 @@ POLICY_DIR = Path(__file__).resolve().parents[1] / "policies"
 #: ONLY — never this module — so editing the validator cannot move the number the validator is
 #: checked against. It is taken over a `glob`, so ADDING a file breaks the freeze too; a fixed
 #: file list would let a new `extra.jsonl` in unnoticed.
-FROZEN_COMMIT = "b37d1909f5fb16db2b1fa38f5fbc64ceb70c3d02"
+FROZEN_COMMIT = "f162959f7d29ead32342fd8744bd10ed244369af"
 FROZEN_SHA256 = "6a3ecbbe75fd020bf806bf647d572c85ee187198fb9828eaac5e1c6e00737fbd"
 
 #: The three UC pipelines (01 §3). `action_expected` must carry exactly these keys — a

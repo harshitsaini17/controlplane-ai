@@ -17,10 +17,26 @@ python -m eval.cost_simulation  # cascade savings simulation (ADR-009 framing)
 
 - All data synthetic (charter NG3). PII values are generated fakes (valid-format SSNs from the invalid-range pool, test credit card numbers passing Luhn from test BINs, example.com emails).
 - Labels are assigned at authoring time and reviewed by a second teammate; label disputes → `08-open-questions`.
-- **The dataset is FROZEN at `b37d1909f5fb16db2b1fa38f5fbc64ceb70c3d02`** — Checkpoint 1b, approved
-  2026-08-26, 280 cases. From this point **no eval number in this repo is computed against any
-  other state**, and a change under `eval/dataset/` requires a new freeze cycle through the
-  second-teammate review above. Editing a frozen case is not a fix; it is a new freeze.
+- **The dataset is FROZEN at `f162959f7d29ead32342fd8744bd10ed244369af`** — freeze 2, approved
+  2026-08-26 with ADR-024, 280 cases, digest `6a3ecbbe75fd020b…`. From this point **no eval
+  number in this repo is computed against any other state**, and a change under
+  `eval/dataset/` requires a new freeze cycle through the second-teammate review above.
+  Editing a frozen case is not a fix; it is a new freeze.
+
+  **Freeze history, and why an old freeze still matters.** Freeze 1 (Checkpoint 1b,
+  `b37d1909f5fb…`, digest `3b3931365a3c2918…`) is superseded but not irrelevant: it is the
+  state the **v1 detector metrics were measured against**, and those numbers are permanent
+  under ADR-026. ADR-024's bump changed seven `action_expected` entries and **no
+  `labels_expected`**, so the v1 per-detector precision/recall/F1 remain valid over an
+  *identical label set* — the quantity those metrics are computed from did not move. Only
+  policy-level expectations did, and no policy-level number has been computed yet. A future
+  bump touching a label would **not** inherit this reasoning: it would invalidate the v1
+  metrics and require re-measurement.
+
+  | freeze | commit | digest | cases | what it is |
+  |---|---|---|---|---|
+  | 1 | `b37d1909f5fb…` | `3b3931365a3c2918…` | 280 | Checkpoint 1b. The v1 detector-metric baseline |
+  | 2 | `f162959f7d29…` | `6a3ecbbe75fd020b…` | 280 | ADR-024. Identical labels; 7 `action_expected` entries changed |
 
   **Convention (stated so it is unambiguous):** the hash names the commit whose tree holds the
   frozen cases — **not** the commit that recorded the hash, which is necessarily later and
