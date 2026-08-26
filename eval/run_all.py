@@ -119,9 +119,15 @@ IMPLEMENTED: tuple[DetectorUnderTest, ...] = (
         scope=frozenset({"hallucination.unsourced_numeric"}),
         stages=frozenset({Stage.OUTPUT_SENTENCE}),
         note=(
-            "The definition of a 'citation marker' this detector turns on is **not in the "
-            "spec** — it is provisional and tracked as **Q-18**, which gates publication of "
-            "the figures below (AGENTS.md §7)."
+            # PROSE ONLY (ADR-026 Amendment 2). This string is rendered into the report and
+            # read by nothing that scores; correcting it cannot move a figure. It previously
+            # claimed a Q-18 publication gate that ADR-025 had already lifted.
+            "The 'citation marker' list this detector suppresses on is **normative** in "
+            "04 §2.4.2 — ADR-025 closed **Q-18**, and its Amendment 1 restricts `per` to "
+            "attribution forms. It is lexical only, searched in the numeral's own sentence: "
+            "judging whether a citation *supports* a figure is `rag_grounding`'s job, not "
+            "this detector's. The figures below are publishable provided they are labelled "
+            "v1 or v2 (06 §3.2) — see *Disclosed revision* below."
         ),
     ),
 )

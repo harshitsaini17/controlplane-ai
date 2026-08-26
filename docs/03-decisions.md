@@ -355,7 +355,9 @@ considered and refused. The protocol:
    from `eval/dataset/`.
 5. **One re-measurement.** If v2 recall still lands under 0.95 the miss stands and is reported:
    **the target does not move and the harness is not touched.** Precision may fall from 1.000 —
-   that is reported too, in the same table.
+   that is reported too, in the same table. *(The scope of "the harness is not touched" is
+   clarified by **Amendment 2** below: it binds measurement-affecting code, not presentation
+   prose, and never on the executor's own judgment.)*
 
 **Trade-offs:** the report becomes harder to read than a single column, which is the intended
 cost — a reader can see both what the detector did before it knew its failures and after. The
@@ -418,6 +420,46 @@ Corrected statement of what the constraint earns:
 
 **`(115) 555-0123` firing is documented v1-superset behaviour, not a bug.** Precision hardening
 of `_PHONE` is future work for a later freeze cycle, and must not ride along with a measurement.
+
+### Amendment 2 — 2026-08-26: the §5 no-touch rule binds measurement, not presentation prose (resolves D2-q18-note)
+
+**Context.** The single permitted re-measurement under §5 ran clean, and then the report it
+produced turned out to state, in prose directly above the `numeric_claims` figures, that those
+figures were gated from publication by **Q-18** — a gate **ADR-025 had already lifted** when it
+made the citation-marker list normative in 04 §2.4.2. The note lived in `eval/run_all.py` and
+predated ADR-025; nothing updated it when the gate lifted. §5 as written admitted no way to
+correct a false sentence sitting on top of a correct number: the same clause that stops a number
+being re-rolled also froze the prose wrapped around it.
+
+**Ruling — the scope of §5's no-touch rule is clarified.** It binds **measurement-affecting
+code**: scoring paths, matching logic, dataset handling, metric computation. It does **not** bind
+**presentation prose** — notes, labels, rendering strings — provided that any post-measurement
+prose correction:
+
+- **(a)** is committed **separately** from any measurement-affecting change;
+- **(b)** ships with a **figure-identity proof**: a committed diff between the pre-fix and
+  post-fix reports showing every measured number byte-identical;
+- **(c)** is **independently verified by the reviewer**; and
+- **(d)** is **logged in the ledger each time it is used**.
+
+**Rationale, for the record.** §5 exists to stop numbers being re-rolled until they look better.
+A change that provably cannot move a number is outside that harm — but *the judgment that it
+"provably cannot" is never the executor's alone*, which is exactly what (b) and (c) exist to
+enforce. The proof is committed so a reader can check it, and a second pair of eyes checks it
+before the artifact is cited. Without (b) and (c) this clarification would collapse into a
+self-granted exception, which is the failure mode §5 was written against.
+
+**Trade-off accepted.** Every use costs an extra commit, an artifact, and a reviewer pass — a
+deliberately non-trivial price, so that the cheap path stays "get the prose right before
+measuring" rather than "fix it afterwards under the amendment." Uses accumulate visibly in the
+ledger under (d) for exactly that reason: a register with several entries is itself evidence that
+the prose is being written carelessly.
+
+**First use:** this one — the stale Q-18 note, corrected in `eval/run_all.py`, with the
+figure-identity proof committed as `reports/eval_report_prose_fix.diff`.
+
+**Docs touched:** this ADR, `eval/run_all.py` (note text only), `docs/08` (ledger entry + prose-fix
+log), README claims rows citing the corrected report.
 
 ## Minor resolutions log (review findings 6–8 — doc edits, no ADR needed)
 
