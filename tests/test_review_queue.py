@@ -380,15 +380,16 @@ def test_the_vocabularies_match_the_05_3_check_constraint(conn) -> None:
     assert set(DECISIONS.values()) <= STATUSES
 
 
-def test_the_escalation_cause_enrichment_is_absent_by_construction(conn) -> None:
-    """Documents the open BLOCKER rather than papering over it.
+def test_the_escalation_cause_enrichment_is_not_implemented_yet(conn) -> None:
+    """A tripwire on unfinished work, no longer a statement about what is possible.
 
-    05 §2 requires `escalation_cause` / `failure_summary` on every listed item, both
-    derived from the §4.3 step-5 stamp. `[D5-adr-027-stamp-has-no-column-in-the-05-3-ddl]`
-    establishes the stamp never reaches the database, so synthesizing the field here
-    would misreport — a fail_open record is present without having contributed. This test
-    fails once the deviation is ruled and the field lands, which is the intended prompt to
-    update it.
+    The premise this test was written under is gone: ADR-027 Amendment 1 stores the §4.3
+    step-5 stamp, so the 05 §2 derivation is implementable and the BLOCKER that prevented
+    it is closed. What is missing is the join from `review_items` to the referenced audit
+    record, so the fields are still absent — and this test fails the moment either appears,
+    which is the intended prompt to check that the derivation reads the stored stamp rather
+    than filtering `detector_failures_json` (fail_open records are present there without
+    having contributed).
     """
     audit_row(conn)
     quarantine(conn, "Unverified claim.")

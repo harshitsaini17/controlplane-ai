@@ -65,12 +65,18 @@ class ReviewError(RuntimeError):
 class ReviewItem:
     """One row of 05 §3 `review_items`, as read back for the admin listing.
 
-    `escalation_cause` and `failure_summary` (05 §2) are **absent by construction**:
-    both derive from the §4.3 step-5 stamp, and the open BLOCKER
-    `[D5-adr-027-stamp-has-no-column-in-the-05-3-ddl]` establishes that neither id list
-    reaches the database. Synthesizing them from what *is* stored would misreport — a
-    fail_open record is present without having contributed — so this type carries what
-    can be known and the enrichment waits on the ruling.
+    `escalation_cause` and `failure_summary` (05 §2) are **not on this type yet**, and the
+    reason has changed. They were previously impossible: neither id list reached the
+    database. ADR-027 Amendment 1 stores the §4.3 step-5 stamp as
+    `audit_records.contributing_signal_ids` / `failure_record_ids`, so the derivation 05 §2
+    specifies is now implementable, and the deviation that blocked it is closed.
+
+    What remains is the derivation. 05 §2 computes both fields from those two columns plus
+    `detector_failures_json` on the *referenced audit record* — a join this type's
+    single-table reads do not perform. Deriving them from `detector_failures_json` alone
+    would still misreport, because that column carries fail_open records, which are present
+    without having contributed. So the fields stay absent until the join is written rather
+    than being approximated from what one table happens to hold.
     """
 
     review_id: str
