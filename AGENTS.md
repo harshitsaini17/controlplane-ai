@@ -232,6 +232,26 @@ real boolean and stays unquoted.
 - **STOP-point reports must enumerate EVERY open deviation, including ones filed in earlier sessions — not only the ones this task raised.** State the count explicitly, and state it even when it is zero. A report listing three new deviations while two older ones sit unruled reads as "three decisions needed" when it is five, and the human cannot approve work whose blockers they cannot see. The ledger in `docs/08-open-questions.md` is the source to enumerate from; if a slug appears in code or doc prose but not in that table, the table is the thing that is wrong.
 - If you notice something wrong outside your current task (doc rot, a latent bug, a risk to the demo), flag it in one line — don't fix it unprompted.
 
+### 11.1 Lightened protocol — in effect from Phase 3 (contracts settled)
+
+The contract backlog is burned down: every schema, ADR and detector contract the build needs is
+ruled. The Deviation Protocol was calibrated for a phase where the *specs themselves* were still
+moving, and running it unchanged now spends a human decision on questions the docs already answer.
+So, from Phase 3 onward:
+
+- **Deviations are for genuine contradictions only** — a doc that contradicts another doc, or code
+  that cannot satisfy a doc as written. A *resolvable ambiguity* is no longer a D4: resolve it
+  MINOR-style with the obvious low-risk answer and log it in `docs/08-open-questions.md`.
+- **ADRs only for decisions that change a contract.** An implementation choice inside a settled
+  contract does not earn one; a docstring is the right place for it.
+- **Review at phase end**, not per commit.
+
+Two things this does **not** relax, because they are what the lightening rests on. §5.4 is
+untouched: no weakened tests, no mocked measurements, no self-approved deviations. And the §11
+enumeration rule still applies in full — every MINOR resolution is *logged*, so the open-deviation
+count stays honest rather than merely low. A gap resolved in place and never written down is
+indistinguishable from a gap that was missed.
+
 ---
 
-*Last updated: [date]. When this file changes, note it in the session summary so the human knows the agent contract shifted.*
+*Last updated: 2026-08-26 (§11.1 lightened protocol added at the start of Phase 3). When this file changes, note it in the session summary so the human knows the agent contract shifted.*

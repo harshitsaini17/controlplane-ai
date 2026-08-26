@@ -160,9 +160,17 @@ robust.
 2. **Skipped, never scored.** A detector that does not exist is reported as **skipped**, with its
    unscored label occurrences counted. Treating its labels as misses would blame absent code for
    a recall figure and make the number unreadable.
-3. **No fabricated 4×4.** The per-use-case matrix is **NOT COMPUTED** until the policy engine
-   exists. Deriving `action_taken` from `labels_expected` would compare ground truth against a
-   function of ground truth and yield a perfect diagonal that means nothing.
+3. **No fabricated 4×4.** Deriving `action_taken` from `labels_expected` would compare ground
+   truth against a function of ground truth and yield a perfect diagonal that means nothing.
+
+   **Trigger fired (2026-08-26).** This rule read "**NOT COMPUTED** until the policy engine
+   exists", and that condition is now satisfied: `controlplane/policy/engine.py` produces an
+   `action_taken` independently of the ground truth, so the matrix is computed per §3.3. The
+   prohibition itself is unchanged and still binding — it barred *deriving the verdict from the
+   labels*, not the artifact. What replaces the absence is not merely a table but a table that
+   **carries its own falsification** (§3.3), because a perfect diagonal is exactly what this
+   rule warns about and an assurance of independence is not evidence of it. `derive_action`
+   remains barred as an `action_taken` source, permanently.
 
 ### 3.2 Revision methodology — disclosed revision, dual columns (ADR-026)
 
@@ -190,6 +198,49 @@ Requirements on any v2 column:
 seven changed cases altered `action_expected` only — **no `labels_expected`** — so per-detector
 precision/recall/F1, which are computed against labels, remain valid over an identical label set
 (freeze history in §1). A bump touching a label would invalidate them and force re-measurement.
+
+### 3.3 The two policy matrices are different claims (normative)
+
+`run_all` emits **two** 4×4 `action_expected` × `action_taken` matrices, and **quoting one as
+the other is a reporting error**, not a simplification. Both take `action_taken` from
+`controlplane/policy/engine.py`; they differ in where the *signals* come from.
+
+| | A. Engine conformance | B. End-to-end (partial) |
+|---|---|---|
+| Signals | **synthesized** from `labels_expected` | **real** emissions from implemented detectors |
+| Assumes | perfect detection, deliberately | nothing |
+| Measures | the engine + policy layer in isolation | the shipping slice of the whole pipeline |
+| Scope | every case | only cases whose every expected label is emittable today |
+| Is **not** | a detection-quality or end-to-end claim | a claim about absent detectors |
+| Grows when | the policy layer changes | a detector lands |
+
+Requirements on the section, all enforced by tests:
+
+- **A must justify its diagonal.** Conformance currently agrees on every case × policy.
+  Agreement is a real finding *only* because `action_expected` is pinned to
+  `validate_dataset.derive_action` by the freeze gate while the engine is an independent
+  implementation of 04 §4.3 — a **differential test of two implementations of one spec**. That
+  argument is not self-evident, so the matrix is **falsified**: `tests/test_policy_matrix.py`
+  injects the defects the ADRs exist to prevent (ADR-012 band scoping, ADR-019 enriched
+  handling, ADR-015 span-less promotion, 04 §4.2 severity order, 04 §4.3 step-1 resolution) and
+  requires disagreement from each. **A mutation the matrix cannot see forfeits the diagonal's
+  publishability** — rule 3 would then apply after all.
+- **Synthesis may not reason about actions.** It reads the 04 §2 emitter registry and the 04
+  §1.2 polarity only; no policy lookup, no τ comparison, no severity ordering, no
+  `borderline_action`. Otherwise both sides of A collapse into one function of ground truth.
+  Pinned structurally by `test_synthesis_never_consults_a_policy`.
+- **No matrix figure may derive from a seed τ.** The shipped τ are `# SEED(pre-calibration)`
+  and §3 bars a seed value from any judge-facing number. Synthesis places scores *relative* to
+  the band, so every verdict is invariant under rescaling it — pinned across four bands.
+- **B reports its own coverage and its own flattery.** The unscored counts are stated, split by
+  reason. B's agreement rate is **higher** than the detector figures imply, because a detection
+  failure whose case carries another label mapping to the same action changes no verdict. Those
+  masked failures are counted and listed, split into masked misses and masked false positives,
+  which hide by different mechanisms. Reporting B's rate without them would present blindness
+  as accuracy (AGENTS.md §7).
+
+NFR-EVAL-002 asks that the per-use-case matrix exist and sets no target; §3.3 is what satisfies
+it, with the coverage limit stated rather than implied.
 
 ## 4. Latency benchmark (`bench_latency`)
 
@@ -239,7 +290,9 @@ searching the file:
 |---|---|
 | Gateway overhead P50/P99 | `reports/latency_report.md` |
 | PII recall / per-detector F1 | `reports/eval_report.md` §Detectors |
-| Per-use-case confusion matrix | `reports/eval_report.md` §Policy-level confusion matrix |
+| Engine conformance matrix (perfect detection assumed) | `reports/eval_report.md` §Policy-level confusion matrices → A |
+| End-to-end matrix (partial coverage) + masked-failure reconciliation | `reports/eval_report.md` §Policy-level confusion matrices → B |
+| Conformance-matrix discriminating power (mutation set) | `tests/test_policy_matrix.py` |
 | Calibrated τ + achieved rate | `reports/eval_report.md` §Threshold calibration |
 | Tier-1 PII recall vs NFR-EVAL-001 | `reports/eval_report.md` §NFR-EVAL-001 |
 | Cost savings (simulated) | `reports/cost_simulation.md` |

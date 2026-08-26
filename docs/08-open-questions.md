@@ -64,13 +64,16 @@ slugs lived scattered across doc prose, YAML comments, docstrings and test notes
 | `[D2-nanp-n-constraint-rejects-nothing-as-composed]` | **MAJOR** | ADR-026 impl | **CLOSED** — ruled: keep the composition, correct the description (ADR-026 Amendment 1). v1's `_PHONE` is deliberately retained and shadows both NANP rows, which therefore add **zero recall**; the whole v2 phone gain is E.164 + the spaced-parenthesis variant. Narrowing `_PHONE` would break v2's superset property and orphan the permanent v1 baseline. Precision hardening → **SL-2** |
 | `[D2-adr-026-eyj-derivation-is-arithmetically-wrong]` | MINOR | ADR-026 impl | **CLOSED** — correction ratified (the error was the adjudicator's). ADR-026 carries a dated Correction block **preserving the original false claim verbatim** before refuting it with the arithmetic. The test pair asserting the false literal *as false* is retained as the artifact |
 | `[D2-report-emits-a-q18-publication-gate-adr-025-lifted]` | **MAJOR** | ADR-026 §5 run | **CLOSED** — ruled by **ADR-026 Amendment 2**: the §5 no-touch rule binds measurement-affecting code, not presentation prose, subject to four conditions. Note corrected; figure identity **PROVEN** and committed as `reports/eval_report_prose_fix.diff`. Logged under *Prose-fix log* below (clause (d)) |
+| `[D5-detector-failure-signal-is-unconstructible]` | **MAJOR** | Phase 3 | **OPEN** — 04 §5 prescribes synthesizing a signal whose label the closed 04 §1.1 taxonomy rejects, so `Signal` refuses to construct it. Implemented around (`DetectorFailureRecord`) without deciding; the audit-record consequence is undecided |
 
-**Open: zero.** All seven deviations ever filed against this workstream are ruled and closed —
-the four Step-4/ADR-impl findings, the `detector_params` schema mismatch, and the report-prose
-gate found after the re-measurement. **Three of the seven were found by writing the ADR-026
-spec-derived tests**, which is the outcome that discipline exists to produce: tests authored from
-the specifications rather than from the fixtures caught two defects in the ruled specs themselves
-and one in the implementer's reading of them, *before* any number was computed.
+**Open: one** — `[D5-detector-failure-signal-is-unconstructible]`, filed in Phase 3 and awaiting
+a ruling. The other seven are ruled and closed: the four Step-4/ADR-impl findings, the
+`detector_params` schema mismatch, and the report-prose gate found after the re-measurement.
+**Three of those seven were found by writing the ADR-026 spec-derived tests**, which is the
+outcome that discipline exists to produce: tests authored from the specifications rather than
+from the fixtures caught two defects in the ruled specs themselves and one in the implementer's
+reading of them, *before* any number was computed. The eighth was found the same way — by
+implementing 04 §5 literally and discovering the object it describes cannot exist.
 
 **"Open: zero" means zero undecided, not nothing missing.** Two of those closures leave real gaps
 behind — a decided gap is still a gap. Every such item is carried permanently in the **Standing
@@ -82,6 +85,22 @@ fallback and 2nd-sample duty unassigned, **SL-4**) and the Groq price-provenance
 **Q-02**, which constrains what the cost simulation may publish rather than blocking it (**SL-3**).
 **Q-18's publication gate is lifted** — ADR-025 made the citation-marker list normative in
 04 §2.4.2, so a `numeric_claims` figure may now be published if labelled v1 or v2 (06 §3.2).
+
+### MINOR resolutions — Phase 3 (logged, not escalated)
+
+Per the lightened Phase-3 protocol (AGENTS.md §11): a gap with one obvious low-risk answer is
+resolved in place and logged here, so "Open: one" stays an honest count rather than a low one.
+
+| # | Gap | Resolution | Why it is not a deviation |
+|---|---|---|---|
+| M-1 | 04 §3 defines `fail_mode` per detector **class** (`tier1`/`tier2`/`performance`/`cost`), but no doc maps each 04 §2 detector *to* its class, so `resolve_failure` had nothing to look up | `DETECTOR_FAIL_CLASS` in `controlplane/policy/engine.py`, transcribed from the 04 §2 registry rows. `entity_enricher` is deliberately **absent** (04 §2.2 makes enrichment failure skip-and-log, never blocking) and `fail_class_for()` **raises** on an unmapped detector rather than defaulting | The mapping is mechanical from the registry — every detector's class is unambiguous from its own §2 row. Refusing to invent a mode for an unmapped name is what keeps a future detector from silently inheriting `fail_open`. Pinned by `test_fail_class_covers_every_registry_detector_except_the_enricher` |
+| M-2 | 04 §6 renders redactions as `[REDACTED:<category>]` (bare category, e.g. `email`) while 05 §4 records `category: "pii.ssn"` (full label) in `actions_json` | `AppliedEdit` carries **both**: `category` (bare, for the 04 §6 marker and the 07 beat-4 rendering) and `label` (full, for the 05 §4 audit field). Neither doc bends | Two consumers legitimately want different granularity; the only wrong answer was picking one and making the other doc inaccurate. Neither field ever holds the removed value (NFR-SEC-001), pinned by `test_applied_edit_records_category_and_span_but_never_the_value` |
+
+**Flagged, not fixed** (AGENTS.md §11, one line): `SPAN_LESS_LABELS` in `eval/validate_dataset.py`
+contains `cost.runaway_loop`, which is **not in the taxonomy** — the real label is
+`cost.loop_detected`. The member is dead (no corpus cases, so it changes no number today) and the
+file is freeze-adjacent, so it is reported rather than edited. `eval/policy_matrix._SPAN_LESS`
+uses the correct label, so the two lists now differ by that one dead entry.
 
 ## Standing Limitations
 
@@ -328,6 +347,19 @@ Recommendation: **A**.
 Blocked work: none. `test_rfc_7515_eyj_anchor_is_a_property_of_the_format` asserts the ADR's
 literal claim **as false**, asserts the true condition across nine registered header parameters,
 and asserts the whitespace bound, so the correction is executable rather than only prose.
+
+## DEVIATION REPORT [D5-detector-failure-signal-is-unconstructible]
+Severity: MAJOR
+Doc & section: 04 §5 "Failure semantics (fail-open / fail-closed) — FR-POL-006", against 04 §1.1 (label taxonomy) and 05 §3/§4 (`signals_json`)
+The doc says: on `DetectorTimeout`/`DetectorError` "the gateway **synthesizes**: `labels: ["_meta.detector_failure"], meta: {detector, error_class}`", and fail_closed means "**synthesized signal** maps to ESCALATE". `controlplane/detectors/base.py` calls it "a synthesized `_meta.detector_failure` signal" in the same terms.
+Reality says: that object cannot be constructed. `_meta.detector_failure` is not in `TAXONOMY`, and `Signal._check_labels_in_taxonomy` rejects it — verified: `Signal(...labels=["_meta.detector_failure"]...)` raises `1 validation error for Signal`. The two rules are individually correct and jointly unsatisfiable: 04 §1.1 is a **closed** taxonomy of *content risks*, and a detector fault is not a content risk, so the label has nowhere legitimate to live in it.
+Impact if we ignore it: three concrete consequences, not one aesthetic one. (1) 05 §3 `signals_json` is documented as `list[Signal]`, so a failure that is not a `Signal` has no defined place in the audit record — yet 04 §5 requires the fault to be visible to a human. (2) Anything reading `signals_json` to count risks would have to special-case a pseudo-label, or a `_meta.*` entry would be counted as a detected risk and inflate `cp_pii_intercepts_total`-style aggregates. (3) The fail_closed path is FR-POL-006 and SC-3 — a demo beat — so leaving the representation undecided leaves a demo artifact undecided.
+Options:
+  A) Add `_meta.detector_failure` to the taxonomy as an explicitly non-content namespace — trade-off: makes the doc literally true and `signals_json` uniform, but punctures the "taxonomy = content risks" invariant, and every consumer must now exclude `_meta.*` or over-count. The invariant is load-bearing in 04 §1.1 and in the detector tests.
+  B) Keep faults off the `Signal` type (what ships today: `DetectorFailureRecord`, a frozen dataclass resolved by `resolve_failure`) and amend 04 §5 to describe a **failure record** rather than a synthesized signal, with its own audit field — trade-off: one more field in the audit schema (05 §3/§4), and 04 §5's wording plus the `base.py` docstring must change. Keeps the taxonomy clean and makes miscounting structurally impossible rather than merely discouraged.
+  C) Represent the fault as a `Signal` carrying a real label from the affected detector's own scope — trade-off: rejected on sight; it would be indistinguishable from a genuine detection and is the one option that could produce a fabricated risk figure.
+Recommendation: **B** — the taxonomy's closure is what makes label-derived counts trustworthy, and a fault is a different kind of fact from a finding; the cost is a schema field and two sentences of doc, which is cheaper than teaching every consumer to filter a pseudo-label.
+Blocked work: nothing is blocked *today* — `evaluate()`/`resolve_failure()` implement 04 §5's **semantics** correctly (fail_open proceeds and is recorded; fail_closed escalates and never silently blocks; both unit-tested, including the never-BLOCK guarantee swept across every policy × detector × error class). What waits on the ruling is the **audit representation**: the gateway's `signals_json`/`actions_json` write path for detector faults, and the 06 §5 fault-injection harness that will read it back.
 
 ## Resolved
 *(move items here with the ruling + date + ADR link)*

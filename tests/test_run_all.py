@@ -21,19 +21,62 @@ from pathlib import Path
 
 import pytest
 
+from eval.policy_matrix import (
+    conformance_matrices,
+    covered_cases,
+    end_to_end_matrices,
+    reconcile,
+)
 from eval.run_all import (
     IMPLEMENTED,
+    IMPLEMENTED_LABELS,
     SKIPPED,
     V1_BASELINE,
     DetectorResult,
     LabelScore,
     _revision_section,
     build_report,
+    collect_emissions,
+    detection_failure_case_ids,
     evaluate,
     load_cases,
     main,
 )
-from eval.validate_dataset import DATASET_DIR
+from eval.validate_dataset import DATASET_DIR, load_policies
+
+#: The 06 §3.3 matrices are identical for every test in this module, and computing them runs
+#: three detectors over the corpus. Cached so the suite pays for that once.
+_MATRICES: dict[str, object] = {}
+
+
+def _matrix_args(results, cases):
+    if not _MATRICES:
+        policies = load_policies()
+        scorable, uncovered, conversation = covered_cases(cases, IMPLEMENTED_LABELS)
+        _MATRICES.update(
+            conformance=conformance_matrices(cases, policies),
+            end_to_end=end_to_end_matrices(
+                scorable, policies, collect_emissions(scorable)
+            ),
+            coverage=(len(scorable), uncovered, conversation),
+            scorable_ids={case["case_id"] for case in scorable},
+        )
+    missed, false_positives = detection_failure_case_ids(results)
+    ids = _MATRICES["scorable_ids"]
+    recon = reconcile(missed & ids, false_positives & ids, _MATRICES["end_to_end"])
+    return (
+        _MATRICES["conformance"],
+        _MATRICES["end_to_end"],
+        recon,
+        _MATRICES["coverage"],
+    )
+
+
+def _report(results, cases, excluded, note: str = "note") -> str:
+    """`build_report` with the 06 §3.3 matrix arguments supplied."""
+    return build_report(
+        results, cases, excluded, DATASET_DIR, note, *_matrix_args(results, cases)
+    )
 
 
 # --------------------------------------------------------------------------
@@ -264,24 +307,53 @@ def test_the_frozen_corpus_loads_and_is_counted_not_asserted() -> None:
     assert all("case_id" in c and "kind" in c for c in cases)
 
 
-def test_report_states_the_policy_matrix_is_not_computed() -> None:
-    """06 §3's headline artifact must be reported absent, not approximated.
+def test_report_computes_both_policy_matrices_and_keeps_them_separate() -> None:
+    """06 §3.3. **Supersedes** this module's former `..._is_not_computed` assertion.
 
-    Deriving it from `labels_expected` would compare ground truth against a function of
-    ground truth and yield a meaningless perfect diagonal — a fabricated result.
+    That test required the matrix to be absent, which was correct while
+    `policy/engine.py` was a stub: the only available `action_taken` was
+    `derive_action`, and tabulating it against `action_expected` would have compared
+    ground truth with a function of ground truth (06 §3.1 rule 3). The engine now
+    exists, so an independent `action_taken` exists and the artifact is computable.
+
+    The assertions are replaced rather than dropped, and the substantive half of rule 3
+    is kept live below: the report must still *justify* that its diagonal is not the
+    fabricated one, and must still separate the two matrices — a reader who merged them
+    would credit the system with detection it does not have.
     """
     cases = load_cases()
     results, excluded = evaluate(cases)
-    report = build_report(results, cases, excluded, DATASET_DIR, "note")
-    assert "NOT COMPUTED" in report
-    assert "circular" in report
+    report = _report(results, cases, excluded)
+
+    # The artifact exists, and NFR-EVAL-002 is claimed against it.
     assert "NFR-EVAL-002" in report
+    assert "## Policy-level confusion matrices" in report
+
+    # Both matrices are present and labelled as different claims (06 §3.3, normative).
+    assert "### A. Engine conformance" in report
+    assert "### B. End-to-end (partial)" in report
+    assert "the distinction is normative" in report
+    assert "detection-quality metric" in report
+
+    # Rule 3 is answered, not ignored: the diagonal's independence is argued.
+    assert "differential test of two independent implementations" in report
+
+    # End-to-end coverage is stated as a limit rather than implied.
+    assert "not scored" in report
+    assert "grows as detectors land" in report
+
+    # The flattering reading is pre-empted with its mechanism.
+    assert "Reconciliation" in report
+    assert "masked" in report
+
+    # Calibration remains genuinely absent — the rule still binds where it applies.
+    assert "## Threshold calibration (06 §3) — NOT COMPUTED" in report
 
 
 def test_report_names_every_unscored_detector_and_its_lost_positives() -> None:
     cases = load_cases()
     results, excluded = evaluate(cases)
-    report = build_report(results, cases, excluded, DATASET_DIR, "note")
+    report = _report(results, cases, excluded)
     for skipped in SKIPPED:
         assert f"`{skipped.name}`" in report
     assert "unscored" in report
@@ -290,7 +362,7 @@ def test_report_names_every_unscored_detector_and_its_lost_positives() -> None:
 def test_report_stamps_provenance() -> None:
     cases = load_cases()
     results, excluded = evaluate(cases)
-    report = build_report(results, cases, excluded, DATASET_DIR, "note")
+    report = _report(results, cases, excluded)
     assert "Dataset digest" in report
     assert "Python" in report
     assert "Platform" in report
@@ -302,7 +374,7 @@ def test_report_declares_the_nfr_eval_001_verdict_explicitly() -> None:
     reader to infer from a table (06 §1, AGENTS.md §7)."""
     cases = load_cases()
     results, excluded = evaluate(cases)
-    report = build_report(results, cases, excluded, DATASET_DIR, "note")
+    report = _report(results, cases, excluded)
     assert "NFR-EVAL-001" in report
     assert ("**MET**" in report) or ("**MISSED**" in report)
     if "**MISSED**" in report:
@@ -312,7 +384,7 @@ def test_report_declares_the_nfr_eval_001_verdict_explicitly() -> None:
 def test_report_marks_results_as_synthetic_and_not_a_production_claim() -> None:
     cases = load_cases()
     results, excluded = evaluate(cases)
-    report = build_report(results, cases, excluded, DATASET_DIR, "note")
+    report = _report(results, cases, excluded)
     assert "not a production claim" in report
 
 
@@ -449,7 +521,7 @@ def test_report_grades_nfr_eval_001_against_the_shipping_variant() -> None:
         _scored("tier1_pii", "v1", tp=5, fp=0, fn=5),    # recall 0.50 — would read MISSED
         _scored("tier1_pii", "v2", tp=10, fp=0, fn=0),   # recall 1.00 — the shipping figure
     ]
-    report = build_report(results, cases, 0, DATASET_DIR, "note")
+    report = _report(results, cases, 0)
     assert "**MET**" in report
     assert "**MISSED**" not in report
     assert "1.0000" in report
@@ -461,7 +533,7 @@ def test_report_renders_one_table_per_shipping_detector_only() -> None:
     """Two same-named `### `tier1_pii`` tables would leave a reader guessing which ships."""
     cases = load_cases()
     results, excluded = evaluate(cases)
-    report = build_report(results, cases, excluded, DATASET_DIR, "note")
+    report = _report(results, cases, excluded)
     assert report.count("### `tier1_pii`") == 1
     assert report.count("### `numeric_claims`") == 1
 
@@ -471,7 +543,7 @@ def test_report_says_the_v1_column_is_computed_not_transcribed() -> None:
     A reader has to be able to tell a re-measurement from a quotation."""
     cases = load_cases()
     results, excluded = evaluate(cases)
-    report = build_report(results, cases, excluded, DATASET_DIR, "note")
+    report = _report(results, cases, excluded)
     assert "computed, not transcribed" in report
     assert "_v1_" in report
 

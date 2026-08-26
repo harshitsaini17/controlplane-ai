@@ -58,6 +58,32 @@ from frozen `_v1_*.py` modules rather than transcribed from an older report:
   (a bare `NNN-NNNN` is indistinguishable from an order or ticket id) and it **costs known
   recall**, which is why it is named here and not only in the ADR. Tracked permanently under
   *Standing Limitations* in `docs/08`.
+
+**The policy engine now produces verdicts, so the artifact judges actually ask for exists — as
+two matrices, not one.** They answer different questions and 06 §3.3 makes keeping them apart
+normative:
+
+| Matrix | Signals | Agreement | What it does **not** say |
+|---|---|---:|---|
+| **A. Engine conformance** | synthesized from ground truth | **1.000** over 280 × 3 | nothing about detection quality — it *assumes* perfect detection |
+| **B. End-to-end (partial)** | real detector emissions | **0.981** over 159 of 280 | nothing about the 8 absent detectors |
+
+Two things about those numbers are stated here rather than left for a reader to discover.
+
+**A's perfect diagonal is exactly the result our own evaluation plan warns about**, so it is
+falsified instead of asserted: `tests/test_policy_matrix.py` injects the defects the ADRs exist
+to prevent — ADR-012 band scoping, ADR-019 enriched-label handling, the ADR-015 span-less
+promotion, the 04 §4.2 severity order, 04 §4.3 step-1 resolution — and **requires** the matrix
+to disagree with each. All five are caught, and the two narrow ones land where the ADRs predict
+(ADR-019 only on `hr_copilot`, ADR-015 only on `support_bot`). Agreement is meaningful only
+because disagreement was reachable; a mutation the matrix could not see would forfeit the claim.
+
+**B's 0.981 flatters the system, and the report says so with the mechanism.** Of 8 scored cases
+carrying a detection failure only 3 produce a wrong verdict; the other 5 reach the right action
+anyway — 4 because another label on the same case maps to an equally severe action, 1 because
+most-severe convergence absorbed a false positive. Those failures are real and counted in the
+detector section. B measures the **policy layer** honestly and would **overstate detection** if
+read as a system score.
 - **`numeric_claims` precision rose because a rule was deleted, not tuned.** ADR-025 removed the
   04 §2 "large-number" clause, which matched the digit runs inside SSNs, cards and phone numbers
   — 30 of its 33 false positives were `PII-*` cases. It classified **identifiers as statistics**:
@@ -102,7 +128,9 @@ the business proposal, or the demo video unless it has a row here.
 | Tier-1 PII recall | `python -m eval.run_all` | `reports/eval_report.md` §NFR-EVAL-001 | v1 **0.8361** → v2 **0.8852** — target 0.95 **MISSED**, target unmoved (ADR-026 §5). Residual misses: 7/7 are the documented bare-7-digit scope exclusion (ADR-026 §3), verified programmatically — no unexplained failure. Standing Limitation, `docs/08` |
 | Per-detector precision / recall / F1 | `python -m eval.run_all` | `reports/eval_report.md` §Detectors | **measured for 3 of 11 detectors**; 8 absent, reported as skipped. 136 of 218 labelled positives are unscored because their detector does not exist yet |
 | Disclosed revision v1 → v2 (`tier1_pii`, `numeric_claims`) | `python -m eval.run_all` | `reports/eval_report.md` §Disclosed revision | `numeric_claims` precision **0.2667 → 0.8571** (recall flat at 0.750); `tier1_pii` recall **0.8361 → 0.8852** at precision 1.000 both. v1 columns are **re-computed every run** from frozen `_v1_*.py`, never transcribed |
-| Per-use-case confusion matrix (FP/FN) | `python -m eval.run_all` | `reports/eval_report.md` §Policy-level confusion matrix | **not computed** — needs the policy engine; deriving it from labels alone would be circular |
+| Engine conformance matrix (**perfect detection assumed**) | `python -m eval.run_all` | `reports/eval_report.md` §Policy-level confusion matrices → A | **1.000** agreement on **280 cases × 3 use cases**. Measures the engine + policy layer *in isolation* — **not** a detection or end-to-end claim |
+| That matrix's discriminating power | `python -m pytest tests/test_policy_matrix.py` | console | 5 injected ADR violations (ADR-012/019/015, 04 §4.2, 04 §4.3) — **all 5 detected**. A perfect diagonal is only evidence if disagreement was reachable |
+| End-to-end matrix (**partial coverage**) | `python -m eval.run_all` | `reports/eval_report.md` §Policy-level confusion matrices → B | **0.981** (156/159) per use case, over the **159 of 280** cases whose every label a shipped detector can emit. **5 of 8 detection failures are masked** — invisible to the verdict, real in the detector section. NFR-EVAL-002 **met**, coverage limit stated |
 | Calibrated τ + achieved rate | `python -m eval.run_all` | `reports/eval_report.md` §Threshold calibration | **not computed** — needs the confidence-kind detectors; τ stays `# SEED`, and a seed is never judge-facing |
 | Fail-open / fail-closed behaviour | `python -m eval.fault_injection` | console + audit records | not yet measured |
 | Cost saving from cascade (simulated) | `python -m eval.cost_simulation` | `reports/cost_simulation.md` | not yet measured |

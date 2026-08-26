@@ -44,11 +44,22 @@ from controlplane.gateway.config import (
     require_measured_upstream,
     taint_output_path,
 )
+from controlplane.policy.schema import Policy
+from eval.policy_matrix import (
+    ConfusionMatrix,
+    conformance_matrices,
+    covered_cases,
+    end_to_end_matrices,
+    reconcile,
+    render_matrix,
+)
 from eval.validate_dataset import (
     DATASET_DIR,
     FROZEN_COMMIT,
+    USE_CASES,
     check_freeze,
     dataset_digest,
+    load_policies,
 )
 
 REPORTS_DIR = Path(__file__).resolve().parents[1] / "reports"
@@ -274,6 +285,52 @@ async def _run(dut: DetectorUnderTest, case: dict[str, Any]) -> list[Signal]:
         context_docs=list(case.get("context") or []),
     )
     return await dut.detector.detect(ctx)
+
+
+#: Every label an implemented detector can emit — the coverage test for the end-to-end
+#: matrix. Derived from the `IMPLEMENTED` scopes rather than restated, so landing a detector
+#: widens the matrix automatically and cannot drift from what is actually scored.
+IMPLEMENTED_LABELS: frozenset[str] = frozenset(
+    label for dut in IMPLEMENTED for label in dut.scope
+)
+
+
+def collect_emissions(cases: Sequence[dict[str, Any]]) -> dict[str, list[Signal]]:
+    """case_id -> the signals the SHIPPING detectors actually emitted (06 §3.3, end-to-end).
+
+    v1 baselines are excluded deliberately: the end-to-end matrix describes the system as it
+    ships, and mixing a frozen baseline into it would report a verdict no deployment can
+    produce.
+    """
+    emissions: dict[str, list[Signal]] = {}
+    for case in cases:
+        stage = _KIND_STAGE[case["kind"]]
+        signals: list[Signal] = []
+        for dut in IMPLEMENTED:
+            if stage not in dut.stages:
+                continue
+            signals.extend(asyncio.run(_run(dut, case)))
+        emissions[case["case_id"]] = signals
+    return emissions
+
+
+def detection_failure_case_ids(
+    results: Sequence[DetectorResult],
+) -> tuple[set[str], set[str]]:
+    """Cases where a SHIPPING detector missed a label, or emitted one it should not have.
+
+    Returned as `(missed, false_positive)` rather than a union: a masked miss and a masked
+    false positive are hidden from the verdict by different mechanisms, and the
+    reconciliation reports them separately instead of blurring both into one count.
+    """
+    missed: set[str] = set()
+    false_positive: set[str] = set()
+    for result in results:
+        if result.variant != "v2":
+            continue
+        missed.update(case_id for case_id, _ in result.misses)
+        false_positive.update(case_id for case_id, _ in result.false_positives)
+    return missed, false_positive
 
 
 def evaluate(cases: Sequence[dict[str, Any]]) -> tuple[list[DetectorResult], int]:
@@ -524,37 +581,160 @@ def _skipped_section() -> list[str]:
     return out
 
 
-def _policy_section() -> list[str]:
-    return [
-        "## Policy-level confusion matrix (06 §3) — NOT COMPUTED",
+def _ordered(matrices: dict[str, ConfusionMatrix]) -> list[ConfusionMatrix]:
+    """UC-1, UC-2, UC-3 — the 01 §3 order, not alphabetical.
+
+    A reader meets these use cases in a fixed sequence across 01 §3, the policy files and the
+    demo script; sorting by name would present them back as UC-3, UC-2, UC-1. Any policy not
+    in `USE_CASES` still renders, appended in sorted order, so an added use case cannot vanish
+    from the report.
+    """
+    known = [matrices[name] for name in USE_CASES if name in matrices]
+    extra = [matrices[name] for name in sorted(set(matrices) - set(USE_CASES))]
+    return known + extra
+
+
+def _policy_section(
+    conformance: dict[str, ConfusionMatrix],
+    end_to_end: dict[str, ConfusionMatrix],
+    recon: Any,
+    *,
+    scored: int,
+    uncovered: int,
+    conversation: int,
+    total: int,
+) -> list[str]:
+    """The NFR-EVAL-002 artifact: two matrices, and the distinction between them.
+
+    06 §3.3 makes the separation normative. They are different claims and a reader who
+    merged them would conclude the system detects far better than it does.
+    """
+    out = [
+        "## Policy-level confusion matrices (06 §3, §3.3) — NFR-EVAL-002",
         "",
-        "06 §3 calls the per-use-case 4x4 `action_taken` vs `action_expected` matrix *the "
-        "skeptical-stakeholder artifact*, and it is the one number a reader most wants here. "
-        "It is absent because computing it today would be **circular, not merely premature**:",
+        "Two matrices, and **the distinction is normative** (06 §3.3): they answer different "
+        "questions and neither may be quoted as the other. Both tabulate `action_expected` "
+        "(rows) against the `action_taken` this repo's policy engine actually returned "
+        "(columns) — a verdict per case per use case, from `controlplane/policy/engine.py`.",
         "",
-        "- `controlplane/policy/engine.py` is a stub, so there is no `action_taken` to "
-        "  tabulate. A verdict has never been produced by this repo.",
-        "- The nearest available substitute is `eval/validate_dataset.derive_action`, and it "
-        "  must not be used here. It derives the action from `labels_expected` — the ground "
-        "  truth itself — so tabulating it against `action_expected` would compare ground "
-        "  truth with a function of ground truth and produce a **perfect diagonal that means "
-        "  nothing**. Publishing that as a confusion matrix would be a fabricated result "
-        "  (AGENTS.md §5.4, §7).",
-        "- Feeding real detector output into the derivation would not rescue it either: 8 of "
-        "  11 detectors are absent, so the matrix would measure *which detectors are missing* "
-        "  rather than whether the policy layer is correct.",
+        "### A. Engine conformance — perfect detection assumed",
         "",
-        "This section becomes computable when the policy engine lands. Until then "
-        "NFR-EVAL-002 is **unmet and reported as unmet** rather than approximated.",
+        "Signals **synthesized from `labels_expected`** and fed to the engine. This measures "
+        "the **engine + policy layer alone**: it assumes every detector fired correctly, "
+        "which is exactly why it is *not* a detection-quality metric and *not* an end-to-end "
+        "claim. Its value is that it isolates one layer — a disagreement here is a policy or "
+        "engine defect, with detection held constant.",
+        "",
+    ]
+    for matrix in _ordered(conformance):
+        out += render_matrix(matrix)
+
+    agreements = {m.agreements for m in conformance.values()}
+    totals = {m.total for m in conformance.values()}
+    perfect = agreements == totals
+
+    out += [
+        "**Why this is not the fabricated matrix 06 §3.1 rule 3 forbids.** Rule 3 bars "
+        "deriving `action_taken` from `labels_expected` and comparing it against a function "
+        "of that same ground truth — a diagonal guaranteed by construction. What runs here "
+        "is structurally different: `policy/engine.py` is an **independent implementation** "
+        "of 04 §4.3, while `action_expected` is pinned to `validate_dataset.derive_action` "
+        "for every case × policy by the freeze gate. The table is therefore a "
+        "**differential test of two independent implementations of one spec**, and a "
+        "disagreement would be a real finding about one of them.",
+        "",
+    ]
+    if perfect:
+        out += [
+            "**The diagonal is perfect, so the burden of proof is on this section, not the "
+            "reader.** An agreement rate of 1.000 is precisely the result rule 3 warns "
+            "about, and \"the two sides are independent\" is an assertion. So the matrix is "
+            "**falsified rather than trusted**: `tests/test_policy_matrix.py` injects, one "
+            "at a time, the defects the ADRs exist to prevent — ADR-012 band scoping, "
+            "ADR-019 enriched-label handling, the ADR-015 span-less promotion, the 04 §4.2 "
+            "severity order, and 04 §4.3 step-1 resolution — and **requires** the matrix to "
+            "disagree. Every one is detected, and the two narrow ones land where the ADRs "
+            "predict: ADR-019 only on `hr_copilot` (the sole policy where "
+            "`privacy.person: block` meets `borderline_action: pass`) and ADR-015 only on "
+            "`support_bot`. A mutation the matrix could not see would mean the diagonal "
+            "measured nothing; none is invisible, which is what makes the 1.000 "
+            "publishable.",
+            "",
+            "**No figure here derives from a seed τ.** The shipped τ are "
+            "`# SEED(pre-calibration)` (ADR-016) and 06 §3 rules that a seed value is never "
+            "judge-facing. Synthesis places each score *relative* to the band, so rescaling "
+            "the band moves the scores with it and every verdict is unchanged — pinned "
+            "across four bands from (0.10, 0.90) to (0.45, 0.80) by "
+            "`test_matrix_is_invariant_to_the_seed_tau_values`.",
+            "",
+        ]
+
+    out += [
+        "### B. End-to-end (partial) — real detector emissions",
+        "",
+        f"The same engine, fed the signals the **shipping detectors actually emitted**. "
+        f"Scored over **{scored} of {total}** cases: a case qualifies only when *every* "
+        f"label it expects is emittable by a detector that exists, because a case with one "
+        f"covered and one absent label would measure the missing detector rather than the "
+        f"policy layer.",
+        "",
+        f"| Disposition | Cases |",
+        f"|---|---:|",
+        f"| scored end-to-end | {scored} |",
+        f"| not scored — expects a label no implemented detector emits | {uncovered} |",
+        f"| not scored — conversation-kind (ADR-021, as in the detector section) | {conversation} |",
+        f"| **total** | **{scored + uncovered + conversation}** |",
+        "",
+        "This is the artifact that **grows as detectors land**. Today it covers the "
+        "deterministic slice only, so read it as a floor on the whole system rather than a "
+        "measurement of it.",
+        "",
+    ]
+    for matrix in _ordered(end_to_end):
+        out += render_matrix(matrix)
+
+    out += [
+        "**Reconciliation — this rate flatters the system, and here is the mechanism.** "
+        "The end-to-end agreement rate is *higher* than the detector section's figures would "
+        f"imply, and the reason is not favourable. Of the **{recon.failing_cases}** scored "
+        f"cases carrying a detection failure, only **{recon.exposed}** produce a wrong "
+        f"verdict. The other **{recon.masked}** reach their expected action anyway, by two "
+        "distinct mechanisms that are counted separately because they are not the same fact:",
+        "",
+        f"- **{len(recon.masked_misses)} masked miss(es)** — the case carries another label "
+        "mapping to an action at least as severe, so a missed phone number in a sentence "
+        "that also holds a detected SSN moves no verdict"
+        + (f": {', '.join(recon.masked_misses)}" if recon.masked_misses else ""),
+        f"- **{len(recon.masked_false_positives)} masked false positive(s)** — the spurious "
+        "label's action was never more severe than one a genuine label already drove, so "
+        "most-severe convergence (04 §4.2) absorbed it"
+        + (
+            f": {', '.join(recon.masked_false_positives)}"
+            if recon.masked_false_positives
+            else ""
+        ),
+        "",
+        "Every one of those failures is real and is counted in the detector section above. "
+        "The matrix cannot see them, and reporting the agreement rate alone would present "
+        "that blindness as accuracy.",
+        "",
+        "Stated plainly: matrix B measures the **policy layer** honestly and would "
+        "**overstate detection** if read as a system score. That is why both counts appear "
+        "here instead of the flattering one alone (AGENTS.md §7).",
+        "",
+        "**NFR-EVAL-002** asks for the per-use-case matrix to exist and sets no target — "
+        "**met** by this section, with the coverage limit above stated rather than implied.",
         "",
         "## Threshold calibration (06 §3) — NOT COMPUTED",
         "",
         "Calibration quantiles need non-conformity scores from the confidence-kind detectors "
         "(`fast_consistency`, `rag_grounding` — ADR-012), both stubs. The tau values in "
         "`policies/*.yaml` therefore remain `# SEED(pre-calibration)` (ADR-016), and per 06 "
-        "§3 **a seed value is never judge-facing**: no number in this report derives from one.",
+        "§3 **a seed value is never judge-facing**: no number in this report derives from one "
+        "— including the matrices above, whose τ-invariance is pinned by a test.",
         "",
     ]
+    return out
 
 
 def build_report(
@@ -563,6 +743,10 @@ def build_report(
     excluded: int,
     dataset_dir: Path,
     provenance_note: str,
+    conformance: dict[str, ConfusionMatrix],
+    end_to_end: dict[str, ConfusionMatrix],
+    recon: Any,
+    coverage: tuple[int, int, int],
 ) -> str:
     label_counts = Counter(
         label for case in cases for label in case["labels_expected"]
@@ -597,7 +781,16 @@ def build_report(
         "",
     ]
 
-    lines += _policy_section()
+    scored_n, uncovered_n, conversation_n = coverage
+    lines += _policy_section(
+        conformance,
+        end_to_end,
+        recon,
+        scored=scored_n,
+        uncovered=uncovered_n,
+        conversation=conversation_n,
+        total=len(cases),
+    )
 
     # NFR-EVAL-001 verdict last: it is the one row with a documented target, so it must be
     # impossible to skim past.
@@ -711,7 +904,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     results, excluded = evaluate(cases)
-    report = build_report(results, cases, excluded, args.dataset_dir, provenance_note)
+
+    # -- the two 06 §3.3 matrices ------------------------------------------
+    # Conformance runs over EVERY case: it assumes perfect detection, so no case is out of
+    # its reach. End-to-end runs only over the covered slice, and the excluded counts are
+    # reported rather than dropped.
+    policies = load_policies()
+    conformance = conformance_matrices(cases, policies)
+    scorable, uncovered_n, conversation_n = covered_cases(cases, IMPLEMENTED_LABELS)
+    emissions = collect_emissions(scorable)
+    end_to_end = end_to_end_matrices(scorable, policies, emissions)
+    scorable_ids = {c["case_id"] for c in scorable}
+    missed_ids, fp_ids = detection_failure_case_ids(results)
+    recon = reconcile(missed_ids & scorable_ids, fp_ids & scorable_ids, end_to_end)
+
+    report = build_report(
+        results,
+        cases,
+        excluded,
+        args.dataset_dir,
+        provenance_note,
+        conformance,
+        end_to_end,
+        recon,
+        (len(scorable), uncovered_n, conversation_n),
+    )
 
     out_path = taint_output_path(args.out, tainted=tainted)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -736,6 +953,13 @@ def main(argv: Sequence[str] | None = None) -> int:
           f" -> v2 {_fmt(pii_v2.precision if pii_v2 else None, digits=4)}")
     print(f"  numeric precision : v1 {_fmt(num_v1.precision if num_v1 else None, digits=4)}"
           f" -> v2 {_fmt(num_v2.precision if num_v2 else None, digits=4)}")
+    conf_rates = sorted({m.agreement_rate for m in conformance.values() if m.agreement_rate})
+    e2e_rates = sorted({m.agreement_rate for m in end_to_end.values() if m.agreement_rate})
+    print(f"  conformance matrix: {'/'.join(f'{r:.4f}' for r in conf_rates)}"
+          f" over {len(cases)} cases x {len(conformance)} policies (perfect detection assumed)")
+    print(f"  end-to-end matrix : {'/'.join(f'{r:.4f}' for r in e2e_rates)}"
+          f" over {len(scorable)} covered cases"
+          f" ({recon.masked} detection failures masked by co-occurring labels)")
     if recall is not None and recall < 0.95:
         print("  NFR-EVAL-001      : MISSED — file a D3 deviation (never tune the detector)")
     return 0

@@ -14,11 +14,11 @@ Every number below is reproducible from this state (NFR-INT-001).
 
 | Field | Value |
 |---|---|
-| Generated (UTC) | 2026-08-26T05:02:27+00:00 |
+| Generated (UTC) | 2026-08-26T09:55:12+00:00 |
 | Dataset digest | `6a3ecbbe75fd020bf806bf647d572c85ee187198fb9828eaac5e1c6e00737fbd` |
 | Frozen at | `f162959f7d29` — MATCHES |
 | Cases loaded | 280 (derived from the files, never asserted) |
-| Code commit | `fbcfcf593552` |
+| Code commit | `554e0d040688` + uncommitted changes |
 | Python | 3.14.6 |
 | Platform | Linux 7.1.2-arch3-1 · x86_64 |
 | Command | `python -m eval.run_all` |
@@ -123,19 +123,119 @@ These 04 §2 rows have no implementation. They are listed rather than scored: a 
 
 **136 labelled positives in the frozen corpus are unscored** because the detector that would emit them does not exist yet. That is 136 of 218 label occurrences — read every number above as covering the deterministic slice only.
 
-## Policy-level confusion matrix (06 §3) — NOT COMPUTED
+## Policy-level confusion matrices (06 §3, §3.3) — NFR-EVAL-002
 
-06 §3 calls the per-use-case 4x4 `action_taken` vs `action_expected` matrix *the skeptical-stakeholder artifact*, and it is the one number a reader most wants here. It is absent because computing it today would be **circular, not merely premature**:
+Two matrices, and **the distinction is normative** (06 §3.3): they answer different questions and neither may be quoted as the other. Both tabulate `action_expected` (rows) against the `action_taken` this repo's policy engine actually returned (columns) — a verdict per case per use case, from `controlplane/policy/engine.py`.
 
-- `controlplane/policy/engine.py` is a stub, so there is no `action_taken` to   tabulate. A verdict has never been produced by this repo.
-- The nearest available substitute is `eval/validate_dataset.derive_action`, and it   must not be used here. It derives the action from `labels_expected` — the ground   truth itself — so tabulating it against `action_expected` would compare ground   truth with a function of ground truth and produce a **perfect diagonal that means   nothing**. Publishing that as a confusion matrix would be a fabricated result   (AGENTS.md §5.4, §7).
-- Feeding real detector output into the derivation would not rescue it either: 8 of   11 detectors are absent, so the matrix would measure *which detectors are missing*   rather than whether the policy layer is correct.
+### A. Engine conformance — perfect detection assumed
 
-This section becomes computable when the policy engine lands. Until then NFR-EVAL-002 is **unmet and reported as unmet** rather than approximated.
+Signals **synthesized from `labels_expected`** and fed to the engine. This measures the **engine + policy layer alone**: it assumes every detector fired correctly, which is exactly why it is *not* a detection-quality metric and *not* an end-to-end claim. Its value is that it isolates one layer — a disagreement here is a policy or engine defect, with detection held constant.
+
+**`support_bot`** — 280/280 agree (1.000)
+
+| expected ↓ / taken → | pass | edit | escalate | block | row total |
+|---|---:|---:|---:|---:|---:|
+| `pass` | **118** | 0 | 0 | 0 | 118 |
+| `edit` | 0 | **116** | 0 | 0 | 116 |
+| `escalate` | 0 | 0 | **11** | 0 | 11 |
+| `block` | 0 | 0 | 0 | **35** | 35 |
+| **col total** | 118 | 116 | 11 | 35 | 280 |
+
+Over-flagging: **0/118** expected-`pass` cases were acted on (0.000) · under-flagging: **0/162** expected-action cases passed (0.000)
+
+**`hr_copilot`** — 280/280 agree (1.000)
+
+| expected ↓ / taken → | pass | edit | escalate | block | row total |
+|---|---:|---:|---:|---:|---:|
+| `pass` | **179** | 0 | 0 | 0 | 179 |
+| `edit` | 0 | 0 | 0 | 0 | 0 |
+| `escalate` | 0 | 0 | **2** | 0 | 2 |
+| `block` | 0 | 0 | 0 | **99** | 99 |
+| **col total** | 179 | 0 | 2 | 99 | 280 |
+
+Over-flagging: **0/179** expected-`pass` cases were acted on (0.000) · under-flagging: **0/101** expected-action cases passed (0.000)
+
+**`finance_advisor`** — 280/280 agree (1.000)
+
+| expected ↓ / taken → | pass | edit | escalate | block | row total |
+|---|---:|---:|---:|---:|---:|
+| `pass` | **111** | 0 | 0 | 0 | 111 |
+| `edit` | 0 | 0 | 0 | 0 | 0 |
+| `escalate` | 0 | 0 | **141** | 0 | 141 |
+| `block` | 0 | 0 | 0 | **28** | 28 |
+| **col total** | 111 | 0 | 141 | 28 | 280 |
+
+Over-flagging: **0/111** expected-`pass` cases were acted on (0.000) · under-flagging: **0/169** expected-action cases passed (0.000)
+
+**Why this is not the fabricated matrix 06 §3.1 rule 3 forbids.** Rule 3 bars deriving `action_taken` from `labels_expected` and comparing it against a function of that same ground truth — a diagonal guaranteed by construction. What runs here is structurally different: `policy/engine.py` is an **independent implementation** of 04 §4.3, while `action_expected` is pinned to `validate_dataset.derive_action` for every case × policy by the freeze gate. The table is therefore a **differential test of two independent implementations of one spec**, and a disagreement would be a real finding about one of them.
+
+**The diagonal is perfect, so the burden of proof is on this section, not the reader.** An agreement rate of 1.000 is precisely the result rule 3 warns about, and "the two sides are independent" is an assertion. So the matrix is **falsified rather than trusted**: `tests/test_policy_matrix.py` injects, one at a time, the defects the ADRs exist to prevent — ADR-012 band scoping, ADR-019 enriched-label handling, the ADR-015 span-less promotion, the 04 §4.2 severity order, and 04 §4.3 step-1 resolution — and **requires** the matrix to disagree. Every one is detected, and the two narrow ones land where the ADRs predict: ADR-019 only on `hr_copilot` (the sole policy where `privacy.person: block` meets `borderline_action: pass`) and ADR-015 only on `support_bot`. A mutation the matrix could not see would mean the diagonal measured nothing; none is invisible, which is what makes the 1.000 publishable.
+
+**No figure here derives from a seed τ.** The shipped τ are `# SEED(pre-calibration)` (ADR-016) and 06 §3 rules that a seed value is never judge-facing. Synthesis places each score *relative* to the band, so rescaling the band moves the scores with it and every verdict is unchanged — pinned across four bands from (0.10, 0.90) to (0.45, 0.80) by `test_matrix_is_invariant_to_the_seed_tau_values`.
+
+### B. End-to-end (partial) — real detector emissions
+
+The same engine, fed the signals the **shipping detectors actually emitted**. Scored over **159 of 280** cases: a case qualifies only when *every* label it expects is emittable by a detector that exists, because a case with one covered and one absent label would measure the missing detector rather than the policy layer.
+
+| Disposition | Cases |
+|---|---:|
+| scored end-to-end | 159 |
+| not scored — expects a label no implemented detector emits | 111 |
+| not scored — conversation-kind (ADR-021, as in the detector section) | 10 |
+| **total** | **280** |
+
+This is the artifact that **grows as detectors land**. Today it covers the deterministic slice only, so read it as a floor on the whole system rather than a measurement of it.
+
+**`support_bot`** — 156/159 agree (0.981)
+
+| expected ↓ / taken → | pass | edit | escalate | block | row total |
+|---|---:|---:|---:|---:|---:|
+| `pass` | **108** | 0 | 0 | 0 | 108 |
+| `edit` | 3 | **41** | 0 | 0 | 44 |
+| `escalate` | 0 | 0 | 0 | 0 | 0 |
+| `block` | 0 | 0 | 0 | **7** | 7 |
+| **col total** | 111 | 41 | 0 | 7 | 159 |
+
+Over-flagging: **0/108** expected-`pass` cases were acted on (0.000) · under-flagging: **3/51** expected-action cases passed (0.059)
+
+**`hr_copilot`** — 156/159 agree (0.981)
+
+| expected ↓ / taken → | pass | edit | escalate | block | row total |
+|---|---:|---:|---:|---:|---:|
+| `pass` | **108** | 0 | 0 | 0 | 108 |
+| `edit` | 0 | 0 | 0 | 0 | 0 |
+| `escalate` | 0 | 0 | 0 | 0 | 0 |
+| `block` | 3 | 0 | 0 | **48** | 51 |
+| **col total** | 111 | 0 | 0 | 48 | 159 |
+
+Over-flagging: **0/108** expected-`pass` cases were acted on (0.000) · under-flagging: **3/51** expected-action cases passed (0.059)
+
+**`finance_advisor`** — 156/159 agree (0.981)
+
+| expected ↓ / taken → | pass | edit | escalate | block | row total |
+|---|---:|---:|---:|---:|---:|
+| `pass` | **108** | 0 | 0 | 0 | 108 |
+| `edit` | 0 | 0 | 0 | 0 | 0 |
+| `escalate` | 3 | 0 | **48** | 0 | 51 |
+| `block` | 0 | 0 | 0 | 0 | 0 |
+| **col total** | 111 | 0 | 48 | 0 | 159 |
+
+Over-flagging: **0/108** expected-`pass` cases were acted on (0.000) · under-flagging: **3/51** expected-action cases passed (0.059)
+
+**Reconciliation — this rate flatters the system, and here is the mechanism.** The end-to-end agreement rate is *higher* than the detector section's figures would imply, and the reason is not favourable. Of the **8** scored cases carrying a detection failure, only **3** produce a wrong verdict. The other **5** reach their expected action anyway, by two distinct mechanisms that are counted separately because they are not the same fact:
+
+- **4 masked miss(es)** — the case carries another label mapping to an action at least as severe, so a missed phone number in a sentence that also holds a detected SSN moves no verdict: PII-042, PII-044, PII-051, PII-053
+- **1 masked false positive(s)** — the spurious label's action was never more severe than one a genuine label already drove, so most-severe convergence (04 §4.2) absorbed it: PII-014
+
+Every one of those failures is real and is counted in the detector section above. The matrix cannot see them, and reporting the agreement rate alone would present that blindness as accuracy.
+
+Stated plainly: matrix B measures the **policy layer** honestly and would **overstate detection** if read as a system score. That is why both counts appear here instead of the flattering one alone (AGENTS.md §7).
+
+**NFR-EVAL-002** asks for the per-use-case matrix to exist and sets no target — **met** by this section, with the coverage limit above stated rather than implied.
 
 ## Threshold calibration (06 §3) — NOT COMPUTED
 
-Calibration quantiles need non-conformity scores from the confidence-kind detectors (`fast_consistency`, `rag_grounding` — ADR-012), both stubs. The tau values in `policies/*.yaml` therefore remain `# SEED(pre-calibration)` (ADR-016), and per 06 §3 **a seed value is never judge-facing**: no number in this report derives from one.
+Calibration quantiles need non-conformity scores from the confidence-kind detectors (`fast_consistency`, `rag_grounding` — ADR-012), both stubs. The tau values in `policies/*.yaml` therefore remain `# SEED(pre-calibration)` (ADR-016), and per 06 §3 **a seed value is never judge-facing**: no number in this report derives from one — including the matrices above, whose τ-invariance is pinned by a test.
 
 ## NFR-EVAL-001 — Tier-1 PII recall ≥ 0.95
 
