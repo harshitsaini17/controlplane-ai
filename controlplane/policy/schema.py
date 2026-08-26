@@ -81,6 +81,48 @@ EDIT_ELIGIBLE_LABELS: frozenset[str] = frozenset(
     label for label in TAXONOMY if label.startswith(("pii.", "hallucination."))
 )
 
+#: Labels whose emitting detector has no character extent to point at, so an EDIT verdict
+#: on them has nothing to transform and 04 §4.3 step 4 promotes it to ESCALATE (ADR-015).
+#:
+#: **THE SINGLE SOURCE.** `eval/policy_matrix.py` and `eval/validate_dataset.py` both
+#: reproduce the ADR-015 promotion rather than calling the engine, and each had grown its
+#: own copy — they disagreed about `cost.request_too_large`, so the matrix applied the
+#: promotion where the validator skipped it. Two copies of a rule is one copy plus a latent
+#: divergence; `tests/test_span_less_single_source.py` asserts no third appears.
+#:
+#: Keyed by LABEL, while the engine's real check is per-SIGNAL (`span is None` and not
+#: whole-sentence scope). That is deliberate and the two are not redundant: the engine
+#: decides what actually happens, and this set lets a consumer predict it *without* a
+#: signal in hand — which is exactly what an eval harness reasoning from a label and an
+#: expected action needs. Membership here means "cannot carry a span by construction",
+#: not merely "did not this time".
+#:
+#: `hallucination.low_confidence` is the load-bearing member: `fast_consistency` scores a
+#: whole response (`output_full`), so it can never carry one, and it is the only member that
+#: is EDIT-eligible at all (`EDIT_ELIGIBLE_LABELS` admits `pii.*` and `hallucination.*`),
+#: hence the only one through which the ADR-015 promotion is currently observable.
+#:
+#: `conversation.cumulative_risk` reaches span-less-ness by a different route, worth naming
+#: precisely: `conv_tracker` is registered at stage `conversation` (04 §2), and
+#: `Signal._check_span_stage_coherence` refuses a span at that stage outright — so for this
+#: member the set restates a constraint pydantic already enforces. Note the validator keys on
+#: **stage**, never on label; the guarantee flows label -> detector -> stage -> validator, and
+#: this set is the shortcut across that chain for a caller holding only a label. The three
+#: `cost.*` labels score a whole request (04 §1: span is "null if request-level").
+#:
+#: The non-hallucination members map to escalate or block on every shipped policy today, so
+#: the promotion is unobservable through them — they are here because span-less-ness is a
+#: property of the detector, not of whether a policy currently exercises it.
+SPAN_LESS_LABELS: frozenset[str] = frozenset(
+    {
+        "hallucination.low_confidence",
+        "conversation.cumulative_risk",
+        "cost.budget_exceeded",
+        "cost.request_too_large",
+        "cost.loop_detected",
+    }
+)
+
 #: **Not a label that exists** — deliberately absent from `TAXONOMY`, and never emitted
 #: (ADR-027: a detector fault is an operational event carried by `DetectorFailureRecord`,
 #: not a content risk carried by a `Signal`).

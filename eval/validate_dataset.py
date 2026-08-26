@@ -35,7 +35,7 @@ from typing import Any
 
 import yaml
 
-from controlplane.policy.schema import TAXONOMY, Action, Policy
+from controlplane.policy.schema import SPAN_LESS_LABELS, TAXONOMY, Action, Policy
 
 # --------------------------------------------------------------------------
 # Locations + vocabulary
@@ -87,18 +87,6 @@ CONFIDENCE_LABELS = frozenset(
 #: two branches and no third: dropped with its host at `score >= tau_high`, otherwise its
 #: MAPPED action, unadjusted — `borderline_action` never reaches it.
 ENRICHED_LABELS = frozenset({"privacy.person"})
-
-#: Span-less by design, so an EDIT verdict has no extent to apply a 04 §6 transform to and
-#: 04 §4.3 step 4 promotes it to ESCALATE (ADR-015).
-#:
-#: `hallucination.low_confidence` is the load-bearing member: `fast_consistency` scores a
-#: whole response (`output_full`), so it can never carry a span. The others are here for
-#: completeness — they map to escalate or block on all three shipped policies, so the
-#: promotion is currently unobservable through them.
-SPAN_LESS_LABELS = frozenset(
-    {"hallucination.low_confidence", "conversation.cumulative_risk",
-     "cost.budget_exceeded", "cost.loop_detected"}
-)
 
 #: File stem -> the case-id prefix its cases must use. A case filed under the wrong stem
 #: still validates in isolation but silently distorts the per-detector recall denominator

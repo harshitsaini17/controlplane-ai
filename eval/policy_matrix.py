@@ -44,7 +44,7 @@ from controlplane.detectors.base import (
     Stage,
 )
 from controlplane.policy.engine import evaluate
-from controlplane.policy.schema import Action, Policy
+from controlplane.policy.schema import SPAN_LESS_LABELS, Action, Policy
 
 #: Verdict order used for every row/column, most permissive first (04 §4.2).
 ACTIONS: tuple[Action, ...] = (Action.PASS, Action.EDIT, Action.ESCALATE, Action.BLOCK)
@@ -83,19 +83,6 @@ _ENRICHED: frozenset[str] = frozenset({"privacy.person"})
 #: "certainly present" at 1.0, exactly as the shipped deterministic emitters do.
 _CONFIDENCE: frozenset[str] = frozenset(
     {"hallucination.ungrounded_claim", "hallucination.low_confidence"}
-)
-
-#: Span-less BY DESIGN, so the ADR-015 promotion is reproduced rather than assumed.
-#: `fast_consistency` scores a whole response; `conv_tracker` scores a conversation;
-#: the cost detectors score a request. None of them has a character extent to point at.
-_SPAN_LESS: frozenset[str] = frozenset(
-    {
-        "hallucination.low_confidence",
-        "conversation.cumulative_risk",
-        "cost.budget_exceeded",
-        "cost.request_too_large",
-        "cost.loop_detected",
-    }
 )
 
 _PLANE: dict[str, Plane] = {
@@ -216,7 +203,7 @@ def synthesize(case: dict[str, Any], band: BandScores) -> list[Signal]:
             score, score_kind = 1.0, ScoreKind.DETECTION
 
         stage = _stage_for(own[0], kind)
-        span_less = any(label in _SPAN_LESS for label in own)
+        span_less = any(label in SPAN_LESS_LABELS for label in own)
         span = None
         if not span_less and text:
             span = Span(start=0, end=min(8, len(text)))

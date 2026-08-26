@@ -124,7 +124,10 @@ merely a low one. Sectioned by phase, because the lightened protocol is itself p
 **Phase 4** — M-3/M-4 arise from ADR-027 and are questions of *where* a ruled field lives,
 not whether it exists. M-5/M-6 are gateway-surface gaps in 05 §1, found while implementing
 ingress; M-7 is a 05 §6.1 gap found while implementing upstream dispatch, and M-8 a
-05 §3-vs-§5 tension found while wiring per-detector timing.
+05 §3-vs-§5 tension found while wiring per-detector timing. M-9 is the only one that is
+not a doc gap at all — no doc is unclear, two code copies of a ruled list had drifted —
+and it is logged here because the lightened protocol asks for every in-place resolution to
+be written down, not only the ones that turned on a reading of a doc.
 
 | # | Gap | Resolution | Why it is not a deviation |
 |---|---|---|---|
@@ -134,6 +137,8 @@ ingress; M-7 is a 05 §6.1 gap found while implementing upstream dispatch, and M
 | M-6 | 05 §1.1 says body `stream` "must be compatible with policy `streaming` flag, else `ERR-CFG-002`". "Compatible" admits a reading in which a client may *downgrade* a streaming pipeline to non-streaming — strictly safer buffering, so plausibly allowed | **Strict equality**: ERR-CFG-002 fires in *both* directions. A non-boolean flag gets its own message rather than being coerced (`bool("yes")` is True, which would emit "asked for stream=true" against "configured streaming=true" — an error claiming a value conflicts with itself) | The policy owns the interception mode: ADR-014 ties `consistency: on` to `streaming: false`, so a client-chosen mode would run a pipeline the policy does not describe while `stage_summary` recorded the configured one. Pinned by `test_err_cfg_002_fires_in_both_directions` |
 | M-7 | 05 §6.1 types `base_url` as a bare `<url>` and states no rule for how a request path joins it. The two shipped providers disagree: `kiro-local` carries no version segment (`http://localhost:8000`), `groq` already ends in one (`https://api.groq.com/openai/v1`) | `upstream_url()` inserts `/v1` **iff** `base_url` does not already end in it. Resolved **empirically**, not by convention: both providers were probed keyless — no credential sent, so 401/403 means the path exists and is auth-gated while 404 means it is absent — with a `GET /v1/models` → 401 control row establishing that a 404 is a real absence rather than a network artefact. Probe table recorded in the `upstream_url` docstring with its date | Neither a naive join nor an unconditional `/v1` serves both providers, so *some* rule was required and the doc states none — a gap, not a contradiction. Deciding it by convention would have been a guess about two live endpoints when asking them was cheap. Pinned by `test_the_v1_prefix_is_inserted_only_when_missing`, parametrized over both shipped providers so a config change that moves the segment fails |
 | M-8 | 05 §3 annotates `latency_json` as "per-**detector** ms", but 05 §5 records the same keys as a **fixed span vocabulary** — and that vocabulary has no entry for `numeric_claims`, one of 04 §2's seven detectors (ADR-025). `check_latency_keys` enforces the closed list at the write path, so a `numeric_claims` key is rejected. The detector appears in neither 05 nor 06 | 05 §5 is authoritative on the key vocabulary: it is the more specific statement and is explicitly labelled fixed. **Per-detector timing goes to `cp_detector_latency_ms{detector}`** — the detector-labelled channel 05 §5 already defines for exactly this, open by construction and the metric NFR-P-002 is measured by — while `latency_json` carries span keys only. `numeric_claims` therefore has no `latency_json` entry | Neither contract bends and NFR-P-002 stays measurable per detector. The two wrong answers were **inventing a span name** (`cp.out.numeric` is an undocumented addition to a vocabulary 05 §5 calls fixed — AGENTS.md §4 forbids it) and **folding it into `cp.out.grounding`** (a different detector on a different premise; the span would then misreport whose time it was). Spans are named for pipeline *stages* and already group detectors — `cp.out.tier1` covers both Tier-1 detectors — so a detector without its own span is the vocabulary working as designed, which `check_latency_keys`'s own docstring anticipates: "a per-detector span that is absent is normal" |
+| M-9 | ADR-015 rules the span-less promotion, but no doc says **where the list of span-less labels lives**. `eval/policy_matrix` and `eval/validate_dataset` each reproduce the promotion rather than calling the engine, and each had grown its own copy — which had already diverged: the matrix's set held `cost.request_too_large`, the validator's did not, so the matrix applied the promotion where the validator skipped it | **One definition**: `SPAN_LESS_LABELS` in `controlplane/policy/schema.py`, imported by both consumers. The validator gains `cost.request_too_large`, which is genuinely span-less — it scores a whole request and has no extent to point at, so the validator was the side that was wrong. Guarded by `tests/test_span_less_single_source.py`, which walks the `controlplane/` and `eval/` ASTs for a third copy and asserts **identity** (`is`), not equality, on both imports | Nothing in any doc is contradicted or unclear: the promotion is ruled and both copies were trying to obey it. The defect was duplication, and the honest fix is structural — an `==` assertion would have passed for an equal-but-separate third copy, and a grep for the name would have missed this divergence entirely, since the two sets had **different names** (`_SPAN_LESS` and `SPAN_LESS_LABELS`). Freeze-adjacent and therefore re-verified rather than assumed: 280/280 unchanged, digest `6a3ecbbe75fd020b…` still matching, so a validator edit moved no number |
+
 
 **Resolved 2026-08-26 under the Phase-4 ruling** (was: flagged, not fixed):
 `SPAN_LESS_LABELS` in `eval/validate_dataset.py` contained `cost.runaway_loop`, which is **not in
@@ -142,12 +147,12 @@ provably dead: zero corpus cases carry it, and the validator's output is **byte-
 before and after (280/280, freeze digest `6a3ecbbe75fd020b…` still matching), so the edit to a
 freeze-adjacent file moved no number.
 
-**Flagged, not fixed** (AGENTS.md §11, one line): the two span-less lists still differ, but now by
-a **real** label rather than a typo — `eval/policy_matrix._SPAN_LESS` includes
-`cost.request_too_large` and the validator's does not. It is dead today (zero corpus cases), and
-adding a member to a freeze-adjacent file is outside the ruled scope, so it is reported rather
-than edited; if a `cost.request_too_large` case is ever labelled EDIT, the validator would skip
-the ADR-015 promotion the matrix applies.
+**Closed 2026-08-26 by M-9** (was: flagged, not fixed): the divergence reported here — the matrix
+including `cost.request_too_large` where the validator did not — is resolved by single-sourcing,
+which the Phase-4 housekeeping ruling authorized. The consequence noted at the time still reads
+correctly as the reason it mattered: had a `cost.request_too_large` case ever been labelled EDIT,
+the validator would have skipped the ADR-015 promotion the matrix applies. It stayed dead
+throughout (zero corpus cases), so nothing computed under the freeze was ever affected.
 
 ## Standing Limitations
 
