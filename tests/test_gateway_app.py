@@ -23,6 +23,7 @@ provider key, which is also what makes it safe to run in CI (06 §4's stub-upstr
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import tempfile
@@ -552,6 +553,237 @@ def test_a_detector_fault_does_not_break_the_request(make_client, monkeypatch) -
     # `detector_failures_json`, and the detector still counts as having run (M-10).
     assert "tier1_pii" in view["detectors"]["ran"]
     assert "tier1_pii" not in {r["detector"] for r in view["detectors"]["not_run"]}
+
+
+# ---------------------------------------------------------------------------
+# M-13 — crash safety: released content is never unrecorded
+# ---------------------------------------------------------------------------
+#
+# The guarantee under test is precisely "no released content without a record", not
+# "every request has a record". A crash *before* release delivers nothing, so it
+# discloses nothing; the audit log's job is to make undisclosed-but-unrecorded
+# impossible. The pre-release case below is covered anyway because the same `finally`
+# reaches it, but it is not what makes the guarantee load-bearing.
+#
+# One boundary is worth naming rather than leaving to be discovered: the rescue lives in
+# the streaming generator, so a crash in `handle_completion` *before* that generator is
+# constructed (ingress, or the input lane) leaves no record. Nothing has been released at
+# that point and the client gets a 500, so it is within the ruling — but it is a real edge
+# of the guarantee, not an oversight.
+
+
+async def _drive_asgi(app, use_case: str, *, chunks=None, disconnect_after=None):
+    """POST a streaming request straight at the ASGI app, returning (chunks, error).
+
+    `TestClient` is not usable for this group. It surfaces the response only once the body
+    is consumed, so a test built on it cannot establish *when* content left the gateway
+    relative to the crash — and "post-release" is the entire claim under test. Driving the
+    app directly makes each `http.response.body` message observable as it is sent, so a
+    test can inject its failure at the one instant that matters.
+
+    `chunks` may be supplied by the caller, which is what lets an injected fault fire on
+    the condition "content has already been released" rather than on a call count. Counting
+    calls would silently retarget the moment the input lane's own detector calls changed.
+
+    `receive()` yields the body once and then parks forever. Returning it repeatedly spins
+    Starlette's disconnect listener in a tight loop and the test hangs — which it did,
+    before the park.
+    """
+    body = json.dumps({"messages": [{"role": "user", "content": "hello"}]}).encode()
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST",
+        "path": "/v1/chat/completions", "raw_path": b"/v1/chat/completions",
+        "query_string": b"", "root_path": "", "scheme": "http",
+        "client": ("test", 1), "server": ("test", 80),
+        "headers": [(b"host", b"test"), (b"content-type", b"application/json"),
+                    (HEADER_USE_CASE.lower().encode(), use_case.encode())],
+    }
+    delivered = asyncio.Event()
+    chunks = [] if chunks is None else chunks
+    sent = 0
+
+    async def receive():
+        if not delivered.is_set():
+            delivered.set()
+            return {"type": "http.request", "body": body, "more_body": False}
+        await asyncio.Event().wait()
+
+    async def send(message):
+        nonlocal sent
+        if message["type"] == "http.response.body" and message.get("body"):
+            sent += 1
+            if disconnect_after is not None and sent > disconnect_after:
+                raise OSError("client went away")
+            chunks.append(message["body"].decode())
+
+    try:
+        # A deadline, so a hang fails the test instead of stalling the suite.
+        await asyncio.wait_for(app(scope, receive, send), timeout=15)
+    except BaseException as exc:  # noqa: BLE001 - the crash under test propagates here
+        return chunks, type(exc).__name__
+    return chunks, None
+
+
+def _stream_app(tmp_path, text: str):
+    """A gateway whose upstream streams `text` with a yield point between tokens."""
+
+    class Streamer:
+        def resolve_model(self, tier: str, provider=None) -> str:
+            return "stub-model"
+
+        async def stream_text(self, messages, *, tier="small", provider=None, extra=None):
+            for word in text.split(" "):
+                await asyncio.sleep(0)  # let the loop interleave, as a real provider does
+                yield word + " "
+
+    gateway = Gateway(
+        dispatcher=Streamer(), metrics=MetricsRegistry(),
+        db_path=str(tmp_path / "audit.db"), key_map={},
+    )
+    return gateway, create_app(gateway)
+
+
+THREE_SENTENCES = "One sentence here. Two sentence here. Three sentence here."
+FIRST_SENTENCE = "One sentence here."
+
+
+def test_m13_a_post_release_crash_still_writes_an_audit_record(tmp_path, monkeypatch) -> None:
+    """★ A request that released content MUST leave a record, however the handler dies.
+
+    The motivating incident is real, and reproducing it is the point: `note_pii_intercepts`
+    read `AppliedEdit.labels` where the field is `label`, and the `AttributeError`
+    propagated past the audit write on a request whose sentences had already reached the
+    client — only `GatewayError` was caught. ADR-002 forbids recalling released text, so the
+    response could not be withdrawn and nothing recorded that it happened: the one
+    combination the audit log exists to make impossible (FR-AUD-001).
+
+    The fault is injected into that same function, on the condition that content has already
+    been released — so this is a regression test for the defect class, not for one field
+    name. `note_pii_intercepts` is also called by the input lane, which is exactly why the
+    condition is "a frame has gone out" rather than a call count.
+    """
+    gateway, app = _stream_app(tmp_path, THREE_SENTENCES)
+    chunks: list[str] = []
+    real = pipeline.note_pii_intercepts
+
+    def after_release(outcome, use_case, **kwargs):
+        if any(FIRST_SENTENCE in chunk for chunk in chunks):
+            raise AttributeError("'AppliedEdit' object has no attribute 'labels'")
+        return real(outcome, use_case, **kwargs)
+
+    monkeypatch.setattr(pipeline, "note_pii_intercepts", after_release)
+    chunks, error = asyncio.run(_drive_asgi(app, "support_bot", chunks=chunks))
+
+    # The premise, asserted rather than assumed: content really did reach the client first.
+    assert any(FIRST_SENTENCE in chunk for chunk in chunks), chunks
+    assert error is not None, "the injected defect must actually have broken the handler"
+
+    rows = gateway.conn.execute(
+        "SELECT verdict, record_status, latency_json, detectors_json FROM audit_records"
+    ).fetchall()
+    assert len(rows) == 1, "released content with no audit record is the M-13 defect"
+    assert rows[0]["record_status"] == "partial"
+    # Real measurements, not nulls: the row is kept out of aggregates by its status, so
+    # there is no reason to blank fields that were genuinely observed (AGENTS.md §7).
+    assert set(json.loads(rows[0]["latency_json"])) >= {"gateway_overhead_ms", "upstream_ms"}
+    assert json.loads(rows[0]["detectors_json"])["ran"], "coverage records what had run"
+
+
+def test_m13_a_partial_record_is_visible_in_the_canonical_view(tmp_path, monkeypatch) -> None:
+    """05 §4 renders `record_status` on every record, so a reader need not know it is
+    conditional — an absent key would make `complete` and `unrecorded` indistinguishable."""
+    gateway, app = _stream_app(tmp_path, THREE_SENTENCES)
+    chunks: list[str] = []
+    real = pipeline.note_pii_intercepts
+
+    def after_release(outcome, use_case, **kwargs):
+        if any(FIRST_SENTENCE in chunk for chunk in chunks):
+            raise RuntimeError("a defect in a handler downstream of release")
+        return real(outcome, use_case, **kwargs)
+
+    monkeypatch.setattr(pipeline, "note_pii_intercepts", after_release)
+    asyncio.run(_drive_asgi(app, "support_bot", chunks=chunks))
+
+    request_id = gateway.conn.execute("SELECT request_id FROM audit_records").fetchone()[0]
+    assert canonical_view(gateway.conn, request_id)["record_status"] == "partial"
+
+
+def test_m13_a_client_disconnect_mid_stream_is_recorded(tmp_path) -> None:
+    """An abandoned stream is also a request that got part-way, and is recorded as one.
+
+    Content has already been released here, so this is the same guarantee as the crash
+    case reached by a different route: the disconnect surfaces as an error thrown at the
+    suspended `yield`, which the `finally` covers.
+    """
+    gateway, app = _stream_app(tmp_path, THREE_SENTENCES)
+    chunks, error = asyncio.run(_drive_asgi(app, "support_bot", disconnect_after=1))
+
+    assert chunks, "the first frame must have been delivered before the disconnect"
+    assert error is not None
+    rows = gateway.conn.execute("SELECT record_status FROM audit_records").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["record_status"] == "partial"
+
+
+def test_m13_an_uneventful_stream_is_marked_complete(tmp_path) -> None:
+    """The control, and the one that gives the marker meaning.
+
+    Without it, a bug marking every record `partial` would satisfy every test above while
+    making the column useless — and every downstream aggregate would filter to nothing.
+    """
+    gateway, app = _stream_app(tmp_path, THREE_SENTENCES)
+    chunks, error = asyncio.run(_drive_asgi(app, "support_bot"))
+
+    assert error is None
+    assert chunks
+    rows = gateway.conn.execute("SELECT record_status FROM audit_records").fetchall()
+    assert len(rows) == 1, "one record per request (FR-AUD-001), not one per attempt"
+    assert rows[0]["record_status"] == "complete"
+
+
+def test_m13_the_rescue_does_not_write_a_second_record(tmp_path) -> None:
+    """The `finally` must not duplicate a record the normal path already wrote.
+
+    05 §3 is one row per request and append-only, so a second INSERT raises rather than
+    replacing — meaning an unguarded rescue would turn every successful stream into an
+    `AuditWriteError` swallowed inside the `finally`. Asserted on the database rather than
+    on the guard flag: the flag is an implementation detail, the row count is the contract.
+    """
+    gateway, app = _stream_app(tmp_path, THREE_SENTENCES)
+    asyncio.run(_drive_asgi(app, "support_bot"))
+    count = gateway.conn.execute("SELECT COUNT(*) FROM audit_records").fetchone()[0]
+    assert count == 1
+
+
+def test_m13_a_crash_before_any_release_is_also_recorded(tmp_path, monkeypatch) -> None:
+    """A crash on the first unit, before anything is released, still records the request.
+
+    Not the headline case — nothing was delivered, so nothing was disclosed — but the record
+    is the only evidence the request happened, and its coverage says what had run. This pins
+    that the rescue does not depend on content having been released, which a `finally`
+    reached only after the first `yield` would.
+
+    The fault is scoped to `OUTPUT_SENTENCE` so it lands inside the generator. Patching
+    `run_lane` unconditionally breaks the *input* lane instead, which runs in
+    `handle_completion` before this generator exists — a crash there is outside the rescue
+    and outside the guarantee, since nothing has been released.
+    """
+    gateway, app = _stream_app(tmp_path, THREE_SENTENCES)
+    real = pipeline.run_lane
+
+    async def only_output_sentence(stage, *args, **kwargs):
+        if stage is Stage.OUTPUT_SENTENCE:
+            raise RuntimeError("a defect on the first output unit")
+        return await real(stage, *args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "run_lane", only_output_sentence)
+    chunks, error = asyncio.run(_drive_asgi(app, "support_bot"))
+
+    assert not any("sentence here." in chunk for chunk in chunks), chunks
+    assert error is not None
+    rows = gateway.conn.execute("SELECT record_status FROM audit_records").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["record_status"] == "partial"
 
 
 # ---------------------------------------------------------------------------

@@ -42,7 +42,13 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from controlplane.audit import review
 from controlplane.audit.db import init_db
-from controlplane.audit.records import AuditRecord, serialize_actions, write_record
+from controlplane.audit.records import (
+    RECORD_STATUS_COMPLETE,
+    RECORD_STATUS_PARTIAL,
+    AuditRecord,
+    serialize_actions,
+    write_record,
+)
 from controlplane.detectors.base import Signal, Stage
 from controlplane.gateway import pipeline
 from controlplane.gateway.config import GatewayConfig, load_gateway_config
@@ -202,8 +208,12 @@ class Gateway:
         tier_requested: str | None = None,
         tokens_in: int | None = None,
         tokens_out: int | None = None,
+        record_status: str = RECORD_STATUS_COMPLETE,
     ) -> None:
         """Write the one record for this request (FR-AUD-001).
+
+        `record_status` is `"partial"` only from a crash path (M-13); every ordinary write
+        leaves the default. See `_stream_response` for why the default is the safe one.
 
         `est_cost_usd` stays `None` unless the active provider can price the model that
         actually answered — ADR-022's null-not-zero rule. A zero would read as "this was
@@ -228,6 +238,7 @@ class Gateway:
             est_cost_usd=est,
             latency_json=json.dumps(pipeline.clamp_latency(latency)),
             detectors_json=coverage.serialize(),
+            record_status=record_status,
         )
         write_record(self.conn, record)
         self.metrics.increment(
@@ -509,6 +520,30 @@ async def _stream_response(
     the HTTP status is committed before the first check runs, so a mid-stream BLOCK cannot
     become a 4xx and a mid-stream ESCALATE cannot become the 202 — 04 §4.4's
     terminate-and-notify is the documented behaviour for exactly this reason.
+
+    **The record is written under `finally`, and this is the only handler that needs it
+    (M-13).** `_input_terminal` and `_buffered_response` both audit *before* returning their
+    response, so a throw there costs the client its answer but never leaves released content
+    unrecorded. This generator is the inverse: it yields content and audits afterwards, so
+    every line between the first `yield` and the write is a window in which a request can be
+    delivered with no record of it. That window was not hypothetical — `note_pii_intercepts`
+    read a field that did not exist, and the `AttributeError` propagated past the write on a
+    request whose sentences had already reached the client (only `GatewayError` was caught).
+    ADR-002 forbids recalling released text, so the response could not be taken back and
+    nothing at all recorded that it happened.
+
+    A crash-path record is marked `record_status='partial'`, because it describes how far the
+    request got and not how it ended: its `verdict` is the most severe verdict reached so
+    far, its coverage lists what had run by then. Client disconnect arrives as
+    `GeneratorExit`/`CancelledError` thrown at the suspended `yield` and takes the same path,
+    which is correct — an abandoned stream is also a request that got part-way.
+
+    The rescue is **synchronous throughout** (`finalize_latency`, `state.audit` and the
+    sqlite write underneath them), and that is a requirement rather than an accident: a
+    `finally` reached by cancellation cannot reliably `await`, since the next suspension
+    point raises `CancelledError` again. So the partial record is written and the review row
+    is not — quarantining needs an await, and a review item is recoverable from the audit
+    record while the audit record is recoverable from nothing.
     """
     model = state.dispatcher.resolve_model(TIER)
 
@@ -530,6 +565,57 @@ async def _stream_response(
         released: list[str] = []
         seen: list[str] = []
         stream_started = time.perf_counter()
+        # Guards against a double INSERT: 05 §3 is one row per request and append-only, so a
+        # second write raises rather than replacing. The flag is set only after a write
+        # returns, which means an audit write that ITSELF fails still leaves the crash path
+        # free to try the smaller partial record.
+        audited = False
+        # Declared before the try, not at the terminal rendering below, because the rescue
+        # path reads both: a crash before the rendering would otherwise raise
+        # UnboundLocalError *inside* the finally and lose the record it exists to save.
+        review_id: str | None = None
+        quarantine_text = ""
+
+        def finalize_latency() -> None:
+            """The 06 §4 streaming figures. Both are well defined mid-flight: overhead is
+            the sum of the holds that actually happened, and `upstream_ms` the stream
+            duration minus those holds — so a partial record carries real measurements, and
+            it is `record_status` rather than a missing key that keeps them out of a
+            published aggregate."""
+            total_ms = (time.perf_counter() - started) * 1000.0
+            stream_ms = (time.perf_counter() - stream_started) * 1000.0
+            latency["upstream_ms"] = round(max(0.0, stream_ms - stream_hold_ms), 3)
+            latency["gateway_overhead_ms"] = pipeline.gateway_overhead_ms(
+                total_ms=total_ms, upstream_ms=latency["upstream_ms"],
+                held_ms=held_ms, streaming=True,
+            )
+
+        def write_partial() -> None:
+            """The M-13 fallback: record a request that died after releasing content.
+
+            Marked `partial`, so the row is a statement about how far the request got. Every
+            figure on it is real — the verdict is the most severe reached so far, the latency
+            the holds that actually happened — and `record_status` is what keeps them out of
+            a published aggregate, rather than nulling fields to make the row look harmless.
+
+            `quarantined` is reported as whether an id was actually minted. If the crash
+            landed between minting and the review INSERT, the audit says quarantined with a
+            `review_id` naming a row that does not exist — which is the honest record of what
+            happened, and is why the admin listing resolves review items by query rather than
+            trusting an id from this column.
+            """
+            finalize_latency()
+            state.audit(
+                request=request, verdict=_final_verdict(terminal, verdicts, request),
+                stage_summary=STAGE_STREAMED, signals=signals, coverage=coverage,
+                latency=latency,
+                actions_json=serialize_actions(
+                    applied=actions, input_redactions=input_redactions,
+                    quarantined=review_id is not None, review_id=review_id,
+                ),
+                model_used=model, tier_requested=TIER,
+                record_status=RECORD_STATUS_PARTIAL,
+            )
 
         async def check(segment_text: str) -> bool:
             """Check one unit. Returns False when the stream must stop (04 §4.4)."""
@@ -560,82 +646,87 @@ async def _stream_response(
             released.append(outcome.text or "")
             return True
 
+        # M-13: from here on, content can reach the client, so no exit may skip the
+        # record. `finally` covers all three ways this generator can end — a raise, a
+        # return, and the GeneratorExit of a client disconnect.
         try:
-            async for delta in state.dispatcher.stream_text(messages, tier=TIER):
-                seen.append(delta)
-                for segment in buffer.feed(delta):
-                    if not await check(segment.text):
+            try:
+                async for delta in state.dispatcher.stream_text(messages, tier=TIER):
+                    seen.append(delta)
+                    for segment in buffer.feed(delta):
+                        if not await check(segment.text):
+                            break
+                        yield _delta_frame(request.request_id, model, released[-1])
+                    if terminal is not None:
                         break
-                    yield _delta_frame(request.request_id, model, released[-1])
-                if terminal is not None:
-                    break
 
-            if terminal is None:
-                for segment in buffer.flush():
-                    if not await check(segment.text):
-                        break
-                    yield _delta_frame(request.request_id, model, released[-1])
-        except GatewayError:
-            # 05 §1.2 ERR-UP-001 mid-stream. The status line is already 200, so the error
-            # cannot be re-rendered as a 502 — the stream ends and the record says why.
-            # ADR-002: released text cannot be recalled, so there is nothing to undo.
-            yield _final_frame(request.request_id, model, "error",
-                               {"error": {"code": "ERR-UP-001"}})
-            terminal = terminal or None
+                if terminal is None:
+                    for segment in buffer.flush():
+                        if not await check(segment.text):
+                            break
+                        yield _delta_frame(request.request_id, model, released[-1])
+            except GatewayError:
+                # 05 §1.2 ERR-UP-001 mid-stream. The status line is already 200, so the error
+                # cannot be re-rendered as a 502 — the stream ends and the record says why.
+                # ADR-002: released text cannot be recalled, so there is nothing to undo.
+                yield _final_frame(request.request_id, model, "error",
+                                   {"error": {"code": "ERR-UP-001"}})
+                terminal = terminal or None
 
-        # -- terminal rendering (04 §4.4) ---------------------------------
-        review_id: str | None = None
-        quarantine_text = ""
-
-        if terminal is not None:
-            verdict, outcome = terminal
-            if outcome.action is Action.BLOCK:
-                yield _delta_frame(request.request_id, model,
-                                   request.policy.messages.block_fallback)
-                yield _final_frame(request.request_id, model, BLOCK_FINISH_REASON,
-                                   {"verdict": "block"})
+            # -- terminal rendering (04 §4.4) ---------------------------------
+            if terminal is not None:
+                verdict, outcome = terminal
+                if outcome.action is Action.BLOCK:
+                    yield _delta_frame(request.request_id, model,
+                                       request.policy.messages.block_fallback)
+                    yield _final_frame(request.request_id, model, BLOCK_FINISH_REASON,
+                                       {"verdict": "block"})
+                else:
+                    # 04 §4.4: the ENTIRE response is quarantined — released and unreleased
+                    # alike — because the reviewer judges the response, not the remainder.
+                    # The id is minted here so the frame below can name it, but the row is not
+                    # written until after the audit record exists (FK, see `quarantine`).
+                    review_id = str(uuid.uuid4())
+                    quarantine_text = "".join(seen) + buffer.pending
+                    yield _delta_frame(request.request_id, model,
+                                       outcome.user_message or "")
+                    yield _final_frame(request.request_id, model, "stop",
+                                       {"verdict": "escalate", "review_id": review_id})
             else:
-                # 04 §4.4: the ENTIRE response is quarantined — released and unreleased
-                # alike — because the reviewer judges the response, not the remainder.
-                # The id is minted here so the frame below can name it, but the row is not
-                # written until after the audit record exists (FK, see `quarantine`).
-                review_id = str(uuid.uuid4())
-                quarantine_text = "".join(seen) + buffer.pending
-                yield _delta_frame(request.request_id, model,
-                                   outcome.user_message or "")
-                yield _final_frame(request.request_id, model, "stop",
-                                   {"verdict": "escalate", "review_id": review_id})
-        else:
-            controlplane: dict[str, Any] = {"verdict": "pass"}
-            if actions:
-                controlplane["verdict"] = "edit"
-                controlplane["actions"] = json.loads(serialize_actions(applied=actions))
-            yield _final_frame(request.request_id, model, "stop", controlplane)
+                controlplane: dict[str, Any] = {"verdict": "pass"}
+                if actions:
+                    controlplane["verdict"] = "edit"
+                    controlplane["actions"] = json.loads(serialize_actions(applied=actions))
+                yield _final_frame(request.request_id, model, "stop", controlplane)
 
-        yield f"data: {DONE}\n\n"
+            yield f"data: {DONE}\n\n"
 
-        # -- audit (one record per request, FR-AUD-001) -------------------
-        final = _final_verdict(terminal, verdicts, request)
-        total_ms = (time.perf_counter() - started) * 1000.0
-        stream_ms = (time.perf_counter() - stream_started) * 1000.0
-        latency["upstream_ms"] = round(max(0.0, stream_ms - stream_hold_ms), 3)
-        latency["gateway_overhead_ms"] = pipeline.gateway_overhead_ms(
-            total_ms=total_ms, upstream_ms=latency["upstream_ms"],
-            held_ms=held_ms, streaming=True,
-        )
-        state.audit(
-            request=request, verdict=final, stage_summary=STAGE_STREAMED,
-            signals=signals, coverage=coverage, latency=latency,
-            actions_json=serialize_actions(
-                applied=actions, input_redactions=input_redactions,
-                quarantined=review_id is not None, review_id=review_id,
-                fallback_used=(request.policy.messages.block_fallback
-                               if final.action is Action.BLOCK else None),
-            ),
-            model_used=model, tier_requested=TIER,
-        )
-        if review_id is not None:
-            await state.quarantine(request, quarantine_text, review_id)
+            # -- audit (one record per request, FR-AUD-001) -------------------
+            final = _final_verdict(terminal, verdicts, request)
+            finalize_latency()
+            state.audit(
+                request=request, verdict=final, stage_summary=STAGE_STREAMED,
+                signals=signals, coverage=coverage, latency=latency,
+                actions_json=serialize_actions(
+                    applied=actions, input_redactions=input_redactions,
+                    quarantined=review_id is not None, review_id=review_id,
+                    fallback_used=(request.policy.messages.block_fallback
+                                   if final.action is Action.BLOCK else None),
+                ),
+                model_used=model, tier_requested=TIER,
+            )
+            audited = True
+            if review_id is not None:
+                await state.quarantine(request, quarantine_text, review_id)
+        finally:
+            if not audited:
+                try:
+                    write_partial()
+                except Exception:  # noqa: BLE001
+                    # Swallowed deliberately: this runs while another exception may be in
+                    # flight, and raising here would REPLACE it — the operator would then
+                    # see the rescue's failure instead of the defect that caused it.
+                    pass
 
     return StreamingResponse(
         body(), media_type="text/event-stream",

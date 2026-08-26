@@ -69,7 +69,17 @@ SCHEMA_DDL: tuple[str, ...] = (
       -- `{}` = coverage not recorded, distinct from `{"ran":[],"not_run":[]}` = nothing ran
       -- and nothing was expected (the `[]`-vs-NULL distinction of Amendment 1, restated).
       detectors_json TEXT NOT NULL DEFAULT '{}',
-      sampled_deep INTEGER DEFAULT 0
+      sampled_deep INTEGER DEFAULT 0,
+      -- Crash-safety marker (M-13). `complete` = every stage of the lifecycle finished and
+      -- this row states the final verdict. `partial` = the handler died mid-flight AFTER
+      -- content had already been released, so the row records how far the request got
+      -- rather than how it ended. A queryable COLUMN and not a JSON leaf on purpose: every
+      -- aggregate over this table (latency benchmark, FP/FN eval, dashboard) must be able
+      -- to exclude partials in its WHERE clause, and a marker buried in `actions_json`
+      -- would silently average a crashed request's timings into a published number
+      -- (AGENTS.md §7). DEFAULT 'complete' so only the crash path can set the other value.
+      record_status TEXT NOT NULL DEFAULT 'complete'
+        CHECK(record_status IN ('complete','partial'))
     )
     """,
     """

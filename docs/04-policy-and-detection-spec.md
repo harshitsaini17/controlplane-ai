@@ -64,6 +64,8 @@ Common contract: `async detect(ctx) -> list[Signal]`; must respect its latency b
 | `loop_guard` | input | <1 ms | `cost.loop_detected` | sliding window per conversation |
 | `conv_tracker` | conversation | <1 ms | `conversation.cumulative_risk` | running totals of pii/hallucination signals per conversation id — **`stage` ∈ {output_sentence, output_full, conversation} only** (ADR-021) |
 
+**Stage names each detector's native granularity — the unit of text it consumes — not a whitelist of delivery modes:** a non-streaming pipeline buffers the full response and runs the `output_sentence` detectors over that buffered text (02 §4), so `output_full` marks the detectors that *cannot* work sentence-by-sentence rather than the only ones that run when a whole response is available (M-11, ratified 2026-08-27).
+
 ### 2.2 Enrichment stage — `entity_enricher` (ADR-011)
 
 Runs after fast-path detection, before the policy engine. For each span-bearing `hallucination.*` signal: spaCy `en_core_web_sm` NER over the span (± its sentence window); a PERSON entity appends `privacy.person` to `labels` and `responsibility` to `planes` of the **same** signal (one-signal rule, FR-DET-005). Budget < 10 ms per enriched span. Enrichment failure → skip + log; it never blocks and is not a policy `fail_mode` class.

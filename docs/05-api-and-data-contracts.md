@@ -92,7 +92,14 @@ CREATE TABLE audit_records (
   -- distinction ADR-027 Amendment 1 draws between `[]` and NULL. Any record the gateway
   -- writes for a completed request states both lists.
   detectors_json TEXT NOT NULL DEFAULT '{}',
-  sampled_deep INTEGER DEFAULT 0
+  sampled_deep INTEGER DEFAULT 0,
+  -- Crash-safety marker (M-13). `complete` = the lifecycle finished and `verdict` is final.
+  -- `partial` = the handler died mid-flight after content was already released; the row
+  -- records how far the request got. A column, not a JSON leaf: every aggregate over this
+  -- table must be able to exclude partials, and a marker inside `actions_json` would let a
+  -- crashed request's timings into a published number.
+  record_status TEXT NOT NULL DEFAULT 'complete'
+    CHECK(record_status IN ('complete','partial'))
 );
 CREATE TABLE review_items (
   review_id TEXT PRIMARY KEY, request_id TEXT REFERENCES audit_records,
@@ -157,6 +164,7 @@ The proposal/README show this shape (assembled from `audit_records`):
   "latency": {"gateway_overhead_ms":46.1,"upstream_ms":1240.0},
   "detectors": {"ran":["tier1_pii","numeric_claims"],
                 "not_run":[{"detector":"fast_consistency","reason":"not_implemented"}]},
+  "record_status": "complete",
   "override": {"decision":"approve","note":"claim verified against filing","ts":"…"}
 }
 ```
@@ -166,6 +174,14 @@ runs and finds nothing emits no signal, so a short `signals` list is indistingui
 check that never happened. `ran` lists every detector that executed; `not_run` lists every
 detector the policy's configuration would have exercised for this request but which did not,
 each with a `reason`.
+
+**`record_status` — crash safety (M-13).** `complete` means the lifecycle finished and
+`verdict` is final. `partial` means the handler died mid-flight **after** content had already
+been released to the client: ADR-002 forbids recalling released text, so the honest record is
+one that says how far the request got. On a `partial` row `verdict`, `latency` and `detectors`
+are all as-far-as-it-got and **must not be aggregated as if complete** — the latency benchmark,
+the FP/FN eval and the dashboard all filter `record_status = 'complete'`. It is a column rather
+than a key inside `actions` precisely so that filter is expressible in SQL.
 
 `reason` vocabulary — **`not_implemented`** (the detector has no live implementation in this
 phase; see the deferred-scope register in 08). Extending this list is a doc change, as for any

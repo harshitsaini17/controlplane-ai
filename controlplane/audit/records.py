@@ -47,6 +47,20 @@ from controlplane.telemetry import spans
 #: dashboard groups by.
 STAGE_SUMMARIES: frozenset[str] = frozenset({"input", "streamed", "completed"})
 
+#: 05 §3 `record_status` (M-13). `partial` is written ONLY by the crash path: a request
+#: whose handler died mid-flight after content had already been released. Every aggregate
+#: over this table must filter on it — see `AuditRecord.record_status`.
+#:
+#: Named constants, and the frozenset is derived from them rather than listed separately, so
+#: the vocabulary has one definition. The crash path in particular must not carry a bare
+#: string literal: its call sits inside a `finally` that swallows exceptions, so a typo there
+#: would raise `AuditWriteError` where nothing could report it — the record would be lost
+#: precisely on the path that exists to save it, and silently.
+RECORD_STATUS_COMPLETE = "complete"
+RECORD_STATUS_PARTIAL = "partial"
+
+RECORD_STATUSES: frozenset[str] = frozenset({RECORD_STATUS_COMPLETE, RECORD_STATUS_PARTIAL})
+
 #: 05 §3 CHECK vocabularies, restated so a bad value fails with a useful message
 #: instead of a bare `IntegrityError` naming no column.
 TIERS: frozenset[str] = frozenset({"small", "frontier"})
@@ -454,6 +468,15 @@ class AuditRecord:
 
     sampled_deep: bool = False
 
+    #: Crash-safety marker (M-13). `complete` means the lifecycle finished and `verdict` is
+    #: this request's final verdict. `partial` means the handler died mid-flight **after**
+    #: content had already been released to the client, so the row records how far the
+    #: request got rather than how it ended — on that row `verdict`, `latency` and the
+    #: coverage lists are all as-far-as-it-got, and none of them may be aggregated as if
+    #: complete (AGENTS.md §7). Defaults to `complete` so only the crash path can mark a
+    #: row otherwise; there is no code path that leaves this unset.
+    record_status: str = RECORD_STATUS_COMPLETE
+
     #: The 04 §4.3 step-5 stamp, stamped on EVERY verdict by `from_verdict` — not only on
     #: an ESCALATE. Empty tuple means "nothing contributed", which is a fact; it is stored
     #: as `[]` and never as NULL (ADR-027 Amendment 1).
@@ -503,6 +526,11 @@ def _validate(record: AuditRecord) -> str:
     if record.stage_summary not in STAGE_SUMMARIES:
         raise AuditWriteError(
             f"stage_summary {record.stage_summary!r} not in {sorted(STAGE_SUMMARIES)} (05 §3)"
+        )
+    if record.record_status not in RECORD_STATUSES:
+        raise AuditWriteError(
+            f"record_status {record.record_status!r} not in {sorted(RECORD_STATUSES)} "
+            "(05 §3, M-13)"
         )
     if record.tier_requested is not None and record.tier_requested not in TIERS:
         raise AuditWriteError(
@@ -567,8 +595,8 @@ def write_record(conn: sqlite3.Connection, record: AuditRecord) -> None:
                   contributing_signal_ids, failure_record_ids,
                   actions_json, tier_requested, model_used, upstream_class,
                   cascade_escalated, tokens_in, tokens_out, est_cost_usd,
-                  latency_json, detectors_json, sampled_deep
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                  latency_json, detectors_json, sampled_deep, record_status
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     record.request_id, record.ts_utc, record.use_case,
@@ -579,7 +607,7 @@ def write_record(conn: sqlite3.Connection, record: AuditRecord) -> None:
                     record.upstream_class, int(record.cascade_escalated),
                     record.tokens_in, record.tokens_out, record.est_cost_usd,
                     record.latency_json, record.detectors_json,
-                    int(record.sampled_deep),
+                    int(record.sampled_deep), record.record_status,
                 ),
             )
     except sqlite3.IntegrityError as exc:
@@ -633,6 +661,9 @@ def canonical_view(conn: sqlite3.Connection, request_id: str) -> dict[str, Any]:
         "latency": json.loads(row["latency_json"]),
         "detectors": json.loads(row["detectors_json"]),
         "sampled_deep": bool(row["sampled_deep"]),
+        # Present on every record, not only partials: a reader must be able to tell a
+        # complete record from a partial one without knowing whether the key is optional.
+        "record_status": row["record_status"],
     }
     if row["conversation_id"] is not None:
         view["conversation_id"] = row["conversation_id"]
