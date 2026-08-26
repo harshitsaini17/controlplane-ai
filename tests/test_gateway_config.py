@@ -34,6 +34,7 @@ from controlplane.gateway.config import (
 #: 05 §6.1's prose fixes the tier vocabulary; parsed rather than restated so drift on
 #: either side fails (the same differential rule `test_telemetry.py` applies to §5).
 DOC_05 = Path(__file__).resolve().parents[1] / "docs" / "05-api-and-data-contracts.md"
+DOC_01 = Path(__file__).resolve().parents[1] / "docs" / "01-requirements-and-scenarios.md"
 _TIER_SENTENCE = re.compile(r"\*\*Tier names are ((?:`[a-z_]+`(?:,? and )?)+)\*\*")
 
 #: Concrete model ids the shipped Groq tiers bind (ADR-022 keys prices by these).
@@ -139,11 +140,23 @@ def test_the_tier_vocabulary_matches_05_6_1() -> None:
     )
 
 
-def test_fr_gw_006_usage_sanity_knobs_present_with_documented_default() -> None:
-    """FR-GW-006: the canary needs both knobs; 25 is the documented default delta."""
+def test_fr_gw_006_usage_sanity_knobs_match_the_documented_defaults() -> None:
+    """FR-GW-006 as ruled by ADR-028: the shipped config carries the documented defaults.
+
+    Differential — the two figures are read out of 01 FR-GW-006's own "(defaults 2.0 / 50)"
+    rather than restated here, so changing the config without changing the requirement (or
+    the reverse) fails. `max_token_delta` is deliberately absent: ADR-028 withdrew the
+    count_tokens comparison it parametrised, and `UsageSanity` forbids extra keys.
+    """
     sanity = load_gateway_config().usage_sanity
     assert sanity.canary_on_startup is True
-    assert sanity.max_token_delta == 25
+    assert sanity.method == "local_estimate"
+
+    fr = next(line for line in DOC_01.read_text().splitlines() if "FR-GW-006" in line)
+    documented = re.search(r"defaults ([\d.]+) / (\d+)", fr)
+    assert documented is not None, "01 FR-GW-006's '(defaults X / Y)' phrasing has moved"
+    assert sanity.max_ratio == float(documented.group(1))
+    assert sanity.min_delta_floor == int(documented.group(2))
 
 
 def test_dev_class_provider_price_is_unknown_not_zero() -> None:

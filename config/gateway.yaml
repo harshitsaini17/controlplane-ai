@@ -134,17 +134,32 @@ providers:
 active_provider: kiro-local                # dev class — fine for building, not for numbers
 
 # ---------------------------------------------------------------------------
-# FR-GW-006 — startup canary + usage-sanity invariant.
+# FR-GW-006 — startup canary + usage-sanity invariant (as ruled by ADR-028).
 #
-# At boot the gateway fires one canary request at `active_provider` and compares
-# count_tokens against the reported prompt token count. delta > 25 tokens means the
-# provider's accounting cannot be trusted:
+# At boot the gateway fires one canary request at `active_provider` and compares the
+# provider's reported prompt_tokens against a REPO-LOCAL estimate. The reference is
+# local by ruling: comparing a provider endpoint (count_tokens) against a provider
+# field (usage.prompt_tokens) put both sides of the check in the hands of the party
+# being audited, and it only looked sound because this dev gateway inflates one side.
+#
+# Fail condition — BOTH must hold, so a short prompt's chat-template overhead cannot
+# trip it on the ratio alone:
+#   reported outside [estimate / max_ratio, estimate * max_ratio]
+#   AND |reported - estimate| > min_delta_floor
+# Consequence by class (unchanged):
 #   measured class -> FAIL BOOT (refuse to start; a measured-class provider that
 #                     miscounts would silently corrupt every judge-facing number)
 #   dev class      -> WARN LOUDLY and continue (expected here; that is what `dev` means)
+#
+# This detects GROSS accounting corruption — the ~5000-token offset above, caught as
+# 5074 vs ~14, a 362x ratio. It is NOT a fine-grained accounting audit and does not
+# claim to be: a local estimate cannot model a provider's chat template exactly.
+#
 # Any fallback engagement increments cp_fallback_engaged_total and logs at WARNING —
 # never silently. A silent fallback during the demo would look like success.
 # ---------------------------------------------------------------------------
 usage_sanity:
   canary_on_startup: true
-  max_token_delta: 25
+  method: local_estimate         # the only value; no provider endpoint is ever the reference
+  max_ratio: 2.0                 # tokenizer variance is well under 2x; injection is multiplicative
+  min_delta_floor: 50            # tokens; absorbs chat-template overhead on a short canary

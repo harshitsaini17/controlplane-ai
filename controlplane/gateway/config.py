@@ -223,15 +223,33 @@ class Provider(BaseModel):
 
 
 class UsageSanity(BaseModel):
-    """FR-GW-006 knobs for the startup canary."""
+    """FR-GW-006 knobs for the startup canary, as ruled by ADR-028.
+
+    The reference count is **repo-local**. The superseded form of this invariant compared
+    one provider endpoint (`count_tokens`) against another provider field
+    (`usage.prompt_tokens`) — never an independent check, because both sides belong to the
+    party being audited. It appeared to work only because the shipped dev provider inflates
+    one side and not the other.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     canary_on_startup: bool
-    #: Tokens. Delta above this between `count_tokens` and the provider's reported
-    #: prompt-token count means the provider's accounting is untrustworthy: a
-    #: measured-class provider fails boot, a dev-class one warns loudly (FR-GW-006).
-    max_token_delta: int = Field(ge=0)
+    #: `Literal`, not an enum with room to grow, and that is the ruling made structural:
+    #: ADR-028 says no provider endpoint is *ever* the sole reference, so there is no second
+    #: value to offer. A provider count endpoint may appear only as a supplementary row in
+    #: the canary result, which is not a `method`.
+    method: Literal["local_estimate"] = "local_estimate"
+    #: Multiplicative bound. Reported prompt tokens must land inside
+    #: `[estimate / max_ratio, estimate * max_ratio]`. Ratio rather than a flat delta
+    #: because tokenizer variance is bounded well under 2x while scaffold injection is
+    #: multiplicative — the shipped dev provider reports 5074 for a ~14-token prompt.
+    #: Must exceed 1.0: at exactly 1.0 the band collapses and any variance fails boot.
+    max_ratio: float = Field(gt=1.0)
+    #: Absolute floor, in tokens, on `|reported - estimate|`. Both conditions must hold to
+    #: fail, so this is what stops a short canary prompt from failing on chat-template
+    #: overhead — a few added role tokens can breach a 2x ratio while meaning nothing.
+    min_delta_floor: int = Field(ge=0)
 
 
 class GatewayConfig(BaseModel):

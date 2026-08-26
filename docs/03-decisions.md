@@ -572,6 +572,75 @@ because a timestamp is not a signal id. Asserted in both directions:
 reads stored columns), `controlplane/audit/db.py`, `controlplane/audit/records.py`,
 `tests/test_audit_records.py` (+10), `docs/08` (D5 closed).
 
+## ADR-028 — The usage-sanity canary's reference count is repo-local (resolves D1-usage-canary-has-no-independent-count-on-the-measured-class)
+
+**Context.** FR-GW-006 specified a boot canary comparing `count_tokens` against the provider's
+reported prompt-token count, failing a measured-class boot past `usage_sanity.max_token_delta`.
+Implementing it surfaced that `count_tokens` is **not repo code** — it is a *provider endpoint*.
+Keyless existence probes with a control row (2026-08-26) found it present on `kiro-local` (**dev**
+→ warn) and absent on `groq` (**measured** → fail boot): the invariant was implementable exactly
+where its consequence was a warning, and unimplementable where it refused boot.
+
+**The defect is in the requirement, not the implementation.** Comparing one provider endpoint
+against one provider field was never an independent check — **both sides belong to the party being
+audited**. It appeared to work only because the shipped dev gateway inflates one side and not the
+other.
+
+**Ruling.**
+
+1. **The reference is a LOCAL ESTIMATE computed by repo code.** No provider endpoint is ever the
+   sole reference. Default estimator: a deterministic chars-based heuristic (~4 chars/token), or a
+   local tokenizer where one is bundled. **The estimator's name is recorded in the canary result**
+   (`chars-per-token-v1`), because changing the divisor changes every verdict the check has ever
+   produced.
+2. **The check is a ratio bound with an absolute floor,** both in config:
+
+   ```yaml
+   usage_sanity: {method: local_estimate, max_ratio: 2.0, min_delta_floor: 50}
+   ```
+
+   Fail when reported `prompt_tokens` falls outside `[estimate/max_ratio, estimate*max_ratio]`
+   **AND** `|delta| > min_delta_floor`. Ratio rather than flat delta because tokenizer variance is
+   bounded well under 2x while scaffold injection is multiplicative (5,074 reported vs ~14 real).
+
+   **This invariant detects GROSS accounting corruption — its ADR-018 purpose — and explicitly
+   does not claim a fine-grained accounting audit.** A local estimate cannot model a provider's
+   server-side chat template; that residue is what `min_delta_floor` absorbs.
+3. **Consequences unchanged:** measured-class fails boot, dev-class warns loudly and continues.
+   A provider that *does* expose a genuine count endpoint MAY contribute a **supplementary
+   cross-check row** in the canary output — never the primary reference. `CanaryResult.cross_checks`
+   exists for that, so adding one later cannot be mistaken for changing the reference.
+
+**On the filed options — no convergence to claim.** The deviation report recommended option B:
+provider-internal self-consistency, one prompt sent twice (streaming vs non-streaming), comparing
+the provider's *own* reported counts. **This ruling's rationale defeats B on exactly the ground it
+defeats the original** — both sides of B are still provider-reported, so B replaced one
+non-independent comparison with another. B would have caught the specific ADR-018 bug (whose
+inflation happens to affect only the non-streaming path) while remaining blind to any error
+consistent across both paths, which B's own trade-off line admitted. Recording this rather than
+reading B as "substantially the ruling": the ruling supersedes the recommendation.
+
+**Trade-off accepted.** A chars-based estimate is crude, so the check has no resolution below
+~2x. That is the honest bound of a dependency-free local reference, and it is deliberately not
+closed by adding a real tokenizer: a tokenizer is a new dependency (02 §8 requires an ADR note)
+whose own systematic error against the provider's chat template would compete with the threshold —
+the precise trade-off that made option A unattractive. The instrument is sized to the failure it
+must catch: a 362x discrepancy.
+
+**Implementation note (not a contract).** The canary prompt's **length** turned out to be
+load-bearing and is pinned by a test. Because the conditions are ANDed, `max_ratio` only binds
+where `estimate * (max_ratio - 1) > min_delta_floor` — above ~50 tokens at the shipped knobs.
+Measured with a first-draft 31-char prompt (estimate 8): the band was [4, 16] yet nothing failed
+until reported > 58, so a **5x inflation passed** and `max_ratio` was dead weight. The shipped
+prompt estimates 64 tokens, which inverts the ordering and makes the ratio the binding constraint
+— the regime this ruling's rationale assumes.
+`test_the_ratio_bound_is_operative_at_the_shipped_prompt_length` fails if either is changed back.
+
+**Docs touched:** this ADR, 01 §1 FR-GW-006 (rewritten), 05 §6.1 (`usage_sanity` schema + the
+gross-vs-fine-grained scope statement), `config/gateway.yaml`,
+`controlplane/gateway/canary.py` (new), `controlplane/gateway/config.py` (`UsageSanity`),
+`tests/test_canary.py` (new, 38), `tests/test_gateway_config.py`, `docs/08` (D1 closed).
+
 ## Minor resolutions log (review findings 6–8 — doc edits, no ADR needed)
 
 - **F6:** Cost plane gets a live enforcement moment — demo beat 7b added (budget-exhaustion BLOCK, SC-2 now covered live).

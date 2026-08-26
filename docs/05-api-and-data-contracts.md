@@ -200,10 +200,27 @@ providers:
       small: <model_id> | null
       frontier: <model_id> | null
 active_provider: <provider name>
-usage_sanity:                    # FR-GW-006
+usage_sanity:                    # FR-GW-006, as ruled by ADR-028
   canary_on_startup: <bool>
-  max_token_delta: <int>
+  method: local_estimate         # ONLY value — the reference count is repo-local; no
+                                 # provider endpoint is ever the sole reference
+  max_ratio: <float>             # > 1.0; reported must land in [est/max_ratio, est*max_ratio]
+  min_delta_floor: <int>         # tokens; |reported - est| must ALSO exceed this to fail
 ```
+
+**The canary's reference count is repo-local (ADR-028).** The superseded form compared a
+provider endpoint (`count_tokens`) against a provider field (`usage.prompt_tokens`) — both sides
+owned by the party being audited, so it was never an independent check. The estimator is repo
+code (a deterministic chars-per-token heuristic, or a bundled local tokenizer) and its name is
+recorded in the canary result. Failure requires **both** conditions: outside the ratio band
+**and** an absolute delta above `min_delta_floor`. Consequence is unchanged — measured-class
+fails boot, dev-class warns loudly and continues.
+
+This invariant detects **gross accounting corruption**, which is its ADR-018 purpose. It
+**explicitly does not claim** a fine-grained accounting audit: a local estimate cannot model a
+provider's server-side chat template, so small disagreements are expected and are what
+`min_delta_floor` absorbs. Where a provider does expose a genuine token-count endpoint, it MAY
+appear as a supplementary cross-check row in the canary output — never as the primary reference.
 
 **`upstream_class` is a provenance claim, not a label.** `measured` means the provider's
 token accounting and prices are trustworthy, so data produced through it may carry

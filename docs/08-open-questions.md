@@ -65,22 +65,24 @@ slugs lived scattered across doc prose, YAML comments, docstrings and test notes
 | `[D2-adr-026-eyj-derivation-is-arithmetically-wrong]` | MINOR | ADR-026 impl | **CLOSED** — correction ratified (the error was the adjudicator's). ADR-026 carries a dated Correction block **preserving the original false claim verbatim** before refuting it with the arithmetic. The test pair asserting the false literal *as false* is retained as the artifact |
 | `[D2-report-emits-a-q18-publication-gate-adr-025-lifted]` | **MAJOR** | ADR-026 §5 run | **CLOSED** — ruled by **ADR-026 Amendment 2**: the §5 no-touch rule binds measurement-affecting code, not presentation prose, subject to four conditions. Note corrected; figure identity **PROVEN** and committed as `reports/eval_report_prose_fix.diff`. Logged under *Prose-fix log* below (clause (d)) |
 | `[D5-detector-failure-signal-is-unconstructible]` | **MAJOR** | Phase 3 | **CLOSED** — ruled by **ADR-027**, Option B: a detector fault is an **operational event, not a content risk** (no span, no plane, not detector-emitted, not policy-mapped), so the closed 04 §1.1 taxonomy is right to reject it and `Signal` is right to refuse to construct it. 04 §5 rewritten around `DetectorFailureRecord`; `detector_failures_json` added to 05 §3/§4; the §4.3 step-5 stamp now names contributing signal_ids **+ failure_record_ids**; review-queue `escalation_cause` added to 05 §2; 06 §5 reads the new field. Resolution semantics unchanged — `fail_closed` is an **ESCALATE floor**, never an override, so a genuine content BLOCK still wins |
-| `[D1-usage-canary-has-no-independent-count-on-the-measured-class]` | **BLOCKER** | Phase 4 | **OPEN** — FR-GW-006's canary compares `count_tokens` against the provider's reported prompt-token count, but `count_tokens` is a **provider endpoint**, present on `kiro-local` (**dev** class → warn) and absent on `groq` (**measured** class → fail boot). The invariant is implementable only where its consequence does not matter. Report below |
+| `[D1-usage-canary-has-no-independent-count-on-the-measured-class]` | **BLOCKER** | Phase 4 | **CLOSED** — ruled by **ADR-028**: the reference count is **repo-local** (`method: local_estimate`, estimator named in the result), never a provider endpoint, because comparing `count_tokens` against `usage.prompt_tokens` put both sides of the check in the hands of the party being audited. Ratio bound + absolute floor, ANDed (`max_ratio: 2.0`, `min_delta_floor: 50`); consequences unchanged (measured fails boot, dev warns). Scope stated in 01/05: **gross** corruption, not a fine-grained accounting audit. **The filed recommendation (option B) was NOT adopted** — it compared two provider-reported counts, so the ruling's rationale defeats it too; recorded in the ADR rather than read as convergence |
 | `[D5-adr-027-stamp-has-no-column-in-the-05-3-ddl]` | **BLOCKER** | Phase 4 | **CLOSED** — ruled by **ADR-027 Amendment 1**, Option A: two `TEXT NOT NULL DEFAULT '[]'` columns added to the 05 §3 DDL. The non-derivability analysis is ratified into the amendment — `detector_failures_json` carries fail_open records, the escalate floor leaves a content BLOCK standing, and `contributing_signal_ids` is a strict subset of `signals_json` by design — so the stamp is **stored, not derived**; `escalation_cause` derives from the stored columns. Round-trip verified (21 columns, `[]` not NULL when empty); 10 tests added, all 6 mutants killed including the one reproducing this defect. No migration needed: no `.db` existed |
 
-**Open: one.** Of **16** filed deviations, **15** are ruled and closed and **one is OPEN**:
-`[D1-usage-canary-has-no-independent-count-on-the-measured-class]` against FR-GW-006 (report
-below). Both Phase-4 BLOCKERs were filed against settled contracts; the stamp one closed by
-**ADR-027 Amendment 1** — a gap in ADR-027's own audit representation, found while wiring the
-write path that ADR specified, which is the second time implementing 04 §5 literally has
-surfaced a defect in the contract describing it.
+**Open: zero.** All **16** filed deviations are ruled and closed. The two Phase-4 BLOCKERs closed
+together: `[D5-adr-027-stamp-has-no-column-in-the-05-3-ddl]` by **ADR-027 Amendment 1** and
+`[D1-usage-canary-has-no-independent-count-on-the-measured-class]` by **ADR-028**. Both were
+defects in *settled contracts* rather than in code — the stamp one a gap in ADR-027's own audit
+representation, found while wiring the write path that ADR specified; the canary one a
+requirement whose independent reference did not exist, found by probing for it. Per the note
+below, `Open: zero` means **nothing undecided**, not nothing missing: four Standing Limitations
+remain, and closing a deviation never closes the gap it documented.
 
 The **eight** filed from Step 4 up to that closure account as: **two** measured-accuracy findings
 (D3, D8), **four** found while implementing the ADRs (`detector_params`, the `per` citation
 marker, the NANP constraint, the `eyJ` derivation), **one** report-prose gate found after the
 re-measurement, and **D5**. The **two** Phase-4 filings are the **ninth and tenth** from Step 4
-onward, of which **one** (the stamp) is now closed and **one** remains open — 9 closed + 1 open =
-10, and 6 pre-Step-4 closures bring the total to 16.
+onward and are **both now closed** — 10 closed + 0 open = 10, and 6 pre-Step-4 closures bring the
+total to 16.
 **Three of those eight were found by writing the ADR-026 spec-derived tests**, which is the
 outcome that discipline exists to produce: tests authored from the specifications rather than
 from the fixtures caught two defects in the ruled specs themselves and one in the implementer's
@@ -88,7 +90,7 @@ reading of them, *before* any number was computed. D5 was found the same way —
 04 §5 literally and discovering the object it describes cannot exist.
 
 ⚠ **Open deviations and open questions are separate counts.** Six *questions* remain OPEN
-above — **Q-01, Q-05, Q-06, Q-07, Q-08, Q-10** — alongside the one open deviation, and the two
+above — **Q-01, Q-05, Q-06, Q-07, Q-08, Q-10** — while **zero deviations** are open, and the two
 registers are deliberately kept apart: a deviation is a contradiction awaiting a ruling, a
 question is a decision not yet needed. Collapsing them into one "open" number would hide which
 kind of answer is owed. (The *gaps* left behind by closures are the
@@ -510,7 +512,7 @@ Ruling: `python -m eval.validate_dataset` is the gate, named in 06 §2.4. It che
 
 **Q-02 — Upstream provider choice** — RESOLVED 2026-08-24, **RE-RESOLVED 2026-08-25 (ADR-018)**. The fallback half is **reopened as Q-10**.
 Ruling (current): provider set is classed by provenance, not picked as a single winner — **`measured` = {`groq`, `ollama-local`}**, **`dev` = {`kiro-local`}**; `active_provider: kiro-local` for development. Both Groq ids were verified first-party as *production* models (`llama-3.1-8b-instant` small, `llama-3.3-70b-versatile` frontier). Written to `config/gateway.yaml` per the amended 05 §6.1 schema.
-Supersedes the 2026-08-24 ruling (upstream = Anthropic API / `claude-sonnet-4-6`), which is now moot — including its ⚠ note about that id not matching Anthropic's published naming. That concern was well-founded and the same class of failure is now caught at boot rather than by inspection: FR-GW-006's canary refuses a measured-class boot whose token accounting disagrees with `count_tokens` by more than `usage_sanity.max_token_delta`.
+Supersedes the 2026-08-24 ruling (upstream = Anthropic API / `claude-sonnet-4-6`), which is now moot — including its ⚠ note about that id not matching Anthropic's published naming. That concern was well-founded and the same class of failure is now caught at boot rather than by inspection: FR-GW-006's canary refuses a measured-class boot whose reported token accounting disagrees grossly with a **repo-local estimate** (ADR-028 — the earlier `count_tokens` / `max_token_delta` form of this sentence named a mechanism that ruling withdrew).
 ⚠ Price provenance remains the weak link, not the ids. The schema half is now fixed — ADR-022 keys prices by concrete model id, so the two-tier cascade is expressible and `[D2-price-table-cannot-express-per-tier-cost]` is CLOSED. The *provenance* half is not, and re-checking live on 2026-08-25 made it worse rather than better: `groq.com/pricing` 308-redirects to a homepage carrying no price content, `console.groq.com/docs/pricing` 404s, `console.groq.com/settings/billing` is authenticated with no public table, and the per-model doc pages contain zero dollar figures. **No first-party Groq price table is reachable at all**, so every figure in `config/gateway.yaml` rests on secondary aggregators plus a stale December-2024 blog post. ADR-022's `source_url`/`retrieved` fields now carry that admission in the config itself rather than in a comment. Consequence for AGENTS.md §7: the 06 §6 cost simulation may publish a **relative** delta (which survives a proportional error in both tiers) but **not an absolute dollar figure** until a first-party table exists.
 
 **Q-11 — Multi-turn case encoding in `eval/dataset/conversation.jsonl`** — RESOLVED 2026-08-25 (MINOR gap, AGENTS.md §6; agent-resolved, obvious low-risk answer).
