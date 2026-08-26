@@ -92,8 +92,27 @@ class Tiers(BaseModel):
     frontier: str | None = None
 
     def resolve(self, tier: str) -> str | None:
-        """Concrete model id for `tier`, or None if this provider cannot serve it."""
-        return getattr(self, tier, None)
+        """Concrete model id for `tier`, or None if this provider cannot serve it.
+
+        Refuses a name outside 05 §6.1's vocabulary instead of answering it. A bare
+        `getattr` returns a dict for `resolve("model_config")` and a bound method for
+        `resolve("dict")`, and either would travel onward as the `model` field of a
+        dispatch — a garbage value wearing the shape of a resolution. The vocabulary is
+        read off the field set rather than restated, so it cannot drift from the two
+        fields above it.
+
+        `KeyError` follows `GatewayConfig.provider`'s treatment of an unknown name, and
+        is the honest class for what this is: a caller bug. It is deliberately not an
+        `UpstreamError` — that is ERR-UP-001, whose 502/retry-yes semantics (05 §1.2)
+        would have a client retry a typo forever. It is also distinct from `None`, which
+        is a real provider answering that it cannot serve a real tier.
+        """
+        if tier not in type(self).model_fields:
+            raise KeyError(
+                f"unknown tier {tier!r}; 05 §6.1 defines exactly "
+                f"{sorted(type(self).model_fields)}"
+            )
+        return getattr(self, tier)
 
 
 class ModelPrice(BaseModel):

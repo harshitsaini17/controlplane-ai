@@ -8,6 +8,7 @@ tainted numbers out of judge-facing artifacts (AGENTS.md §7).
 from __future__ import annotations
 
 import copy
+import re
 import warnings
 from pathlib import Path
 from typing import Any
@@ -23,11 +24,17 @@ from controlplane.gateway.config import (
     GatewayConfig,
     PricingWarning,
     TaintedDataError,
+    Tiers,
     UpstreamClass,
     load_gateway_config,
     require_measured_upstream,
     taint_output_path,
 )
+
+#: 05 §6.1's prose fixes the tier vocabulary; parsed rather than restated so drift on
+#: either side fails (the same differential rule `test_telemetry.py` applies to §5).
+DOC_05 = Path(__file__).resolve().parents[1] / "docs" / "05-api-and-data-contracts.md"
+_TIER_SENTENCE = re.compile(r"\*\*Tier names are ((?:`[a-z_]+`(?:,? and )?)+)\*\*")
 
 #: Concrete model ids the shipped Groq tiers bind (ADR-022 keys prices by these).
 GROQ_SMALL = "llama-3.1-8b-instant"
@@ -88,6 +95,48 @@ def test_q10_ollama_provider_is_declared_but_binds_no_model() -> None:
     ollama = load_gateway_config().provider("ollama-local")
     assert ollama.tiers.small is None and ollama.tiers.frontier is None
     assert ollama.tiers.resolve("small") is None
+
+
+@pytest.mark.parametrize("attribute", ["model_config", "dict", "json", "copy"])
+def test_resolve_refuses_a_non_tier_attribute_name(attribute: str) -> None:
+    """★ `resolve` was a bare `getattr`, so any attribute name resolved to something.
+
+    `resolve("model_config")` returned a dict and `resolve("dict")` a bound method, and
+    either would have travelled onward as the `model` field of an upstream dispatch — a
+    garbage value wearing the shape of a resolution. These four names are all real
+    attributes of the pydantic model, so they are exactly the ones a bare `getattr`
+    answered instead of refusing.
+    """
+    tiers = Tiers(small="m-small", frontier="m-frontier")
+    with pytest.raises(KeyError, match="unknown tier"):
+        tiers.resolve(attribute)
+
+
+def test_an_unbound_but_real_tier_is_none_not_an_error() -> None:
+    """The two negative answers stay distinct.
+
+    `None` is a real provider reporting it cannot serve a real tier — a routing fact the
+    dispatcher turns into ERR-UP-001. An unknown *name* is a caller bug. Collapsing them
+    would either make a typo look like a capacity limit or make a legitimately unbound
+    tier crash the request.
+    """
+    assert Tiers().resolve("small") is None
+    assert Tiers(frontier="m").resolve("small") is None
+
+
+def test_the_tier_vocabulary_matches_05_6_1() -> None:
+    """Differential against the doc: a tier added on one side only must fail.
+
+    Parsed out of 05 §6.1's prose rather than restated here, because restating the
+    implementation's own literal would prove nothing (06 §3.1 rule 3).
+    """
+    match = _TIER_SENTENCE.search(DOC_05.read_text())
+    assert match is not None, "05 §6.1's 'Tier names are …' sentence has moved"
+    documented = set(re.findall(r"`([a-z_]+)`", match.group(1)))
+    assert documented == set(Tiers.model_fields), (
+        f"05 §6.1 documents {sorted(documented)}, Tiers declares "
+        f"{sorted(Tiers.model_fields)}"
+    )
 
 
 def test_fr_gw_006_usage_sanity_knobs_present_with_documented_default() -> None:
