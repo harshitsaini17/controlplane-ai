@@ -41,6 +41,14 @@ SCHEMA_DDL: tuple[str, ...] = (
                                     --  fail_mode_applied, ts}. Operational events, not
                                     -- content risks: no span, no plane, no label, no text,
                                     -- so this column has no NFR-SEC-001 surface at all
+      -- The 04 §4.3 step-5 stamp (ADR-027 Amendment 1). JSON arrays of ids, EMPTY ARRAY
+      -- and never NULL when none contributed: `[]` says "nothing did", NULL would say
+      -- "we did not record", and only the first is a fact the reviewer can act on.
+      -- STORED, not derived. `detector_failures_json` carries fail_open records too, and
+      -- the ADR-027 escalate floor can coexist with a genuine content BLOCK, so
+      -- reconstructing the stamp by filtering on `fail_mode_applied` misreports both.
+      contributing_signal_ids TEXT NOT NULL DEFAULT '[]',
+      failure_record_ids TEXT NOT NULL DEFAULT '[]',
       actions_json TEXT,            -- transforms applied, spans, fallback used
       -- Tier binding + provenance (05 §3 as amended by ADR-018 and the tier-mapping ruling).
       -- `tier_requested` is the tier the router picked PRE-dispatch; `model_used` is the

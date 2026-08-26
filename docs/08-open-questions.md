@@ -66,20 +66,21 @@ slugs lived scattered across doc prose, YAML comments, docstrings and test notes
 | `[D2-report-emits-a-q18-publication-gate-adr-025-lifted]` | **MAJOR** | ADR-026 §5 run | **CLOSED** — ruled by **ADR-026 Amendment 2**: the §5 no-touch rule binds measurement-affecting code, not presentation prose, subject to four conditions. Note corrected; figure identity **PROVEN** and committed as `reports/eval_report_prose_fix.diff`. Logged under *Prose-fix log* below (clause (d)) |
 | `[D5-detector-failure-signal-is-unconstructible]` | **MAJOR** | Phase 3 | **CLOSED** — ruled by **ADR-027**, Option B: a detector fault is an **operational event, not a content risk** (no span, no plane, not detector-emitted, not policy-mapped), so the closed 04 §1.1 taxonomy is right to reject it and `Signal` is right to refuse to construct it. 04 §5 rewritten around `DetectorFailureRecord`; `detector_failures_json` added to 05 §3/§4; the §4.3 step-5 stamp now names contributing signal_ids **+ failure_record_ids**; review-queue `escalation_cause` added to 05 §2; 06 §5 reads the new field. Resolution semantics unchanged — `fail_closed` is an **ESCALATE floor**, never an override, so a genuine content BLOCK still wins |
 | `[D1-usage-canary-has-no-independent-count-on-the-measured-class]` | **BLOCKER** | Phase 4 | **OPEN** — FR-GW-006's canary compares `count_tokens` against the provider's reported prompt-token count, but `count_tokens` is a **provider endpoint**, present on `kiro-local` (**dev** class → warn) and absent on `groq` (**measured** class → fail boot). The invariant is implementable only where its consequence does not matter. Report below |
-| `[D5-adr-027-stamp-has-no-column-in-the-05-3-ddl]` | **BLOCKER** | Phase 4 | **OPEN** — 05 §4 lists `contributing_signal_ids`/`failure_record_ids` as canonical-view keys and 05 §2 derives `escalation_cause` from them, but 05 §3's `audit_records` DDL declares neither column, so `write_record` drops both at the write boundary. Not recoverable by derivation. Blocks 05 §2 `escalation_cause` and ADR-027 consequence 3 (report below) |
+| `[D5-adr-027-stamp-has-no-column-in-the-05-3-ddl]` | **BLOCKER** | Phase 4 | **CLOSED** — ruled by **ADR-027 Amendment 1**, Option A: two `TEXT NOT NULL DEFAULT '[]'` columns added to the 05 §3 DDL. The non-derivability analysis is ratified into the amendment — `detector_failures_json` carries fail_open records, the escalate floor leaves a content BLOCK standing, and `contributing_signal_ids` is a strict subset of `signals_json` by design — so the stamp is **stored, not derived**; `escalation_cause` derives from the stored columns. Round-trip verified (21 columns, `[]` not NULL when empty); 10 tests added, all 6 mutants killed including the one reproducing this defect. No migration needed: no `.db` existed |
 
-**Open: two.** Of **16** filed deviations, **14** are ruled and closed and **two are OPEN**,
-both filed in Phase 4 and both BLOCKER: `[D1-usage-canary-has-no-independent-count-on-the-measured-class]` against FR-GW-006, and `[D5-adr-027-stamp-has-no-column-in-the-05-3-ddl]`
-against 05 §3 vs §4/§2 (reports below). D5-detector-failure was the last *closure*, by
-**ADR-027** at the start of Phase 4 — and the second open item is a gap in that same ruling's
-audit representation, found while wiring the write path it specified.
+**Open: one.** Of **16** filed deviations, **15** are ruled and closed and **one is OPEN**:
+`[D1-usage-canary-has-no-independent-count-on-the-measured-class]` against FR-GW-006 (report
+below). Both Phase-4 BLOCKERs were filed against settled contracts; the stamp one closed by
+**ADR-027 Amendment 1** — a gap in ADR-027's own audit representation, found while wiring the
+write path that ADR specified, which is the second time implementing 04 §5 literally has
+surfaced a defect in the contract describing it.
 
 The **eight** filed from Step 4 up to that closure account as: **two** measured-accuracy findings
 (D3, D8), **four** found while implementing the ADRs (`detector_params`, the `per` citation
 marker, the NANP constraint, the `eyJ` derivation), **one** report-prose gate found after the
 re-measurement, and **D5**. The **two** Phase-4 filings are the **ninth and tenth** from Step 4
-onward and the only ones still open — 8 closed + 2 open = 10, and 6 pre-Step-4 closures bring the
-total to 16.
+onward, of which **one** (the stamp) is now closed and **one** remains open — 9 closed + 1 open =
+10, and 6 pre-Step-4 closures bring the total to 16.
 **Three of those eight were found by writing the ADR-026 spec-derived tests**, which is the
 outcome that discipline exists to produce: tests authored from the specifications rather than
 from the fixtures caught two defects in the ruled specs themselves and one in the implementer's
@@ -87,7 +88,7 @@ reading of them, *before* any number was computed. D5 was found the same way —
 04 §5 literally and discovering the object it describes cannot exist.
 
 ⚠ **Open deviations and open questions are separate counts.** Six *questions* remain OPEN
-above — **Q-01, Q-05, Q-06, Q-07, Q-08, Q-10** — alongside the two open deviations, and the two
+above — **Q-01, Q-05, Q-06, Q-07, Q-08, Q-10** — alongside the one open deviation, and the two
 registers are deliberately kept apart: a deviation is a contradiction awaiting a ruling, a
 question is a decision not yet needed. Collapsing them into one "open" number would hide which
 kind of answer is owed. (The *gaps* left behind by closures are the

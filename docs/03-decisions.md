@@ -516,6 +516,62 @@ filtering, and to keep an operational outage from ever being presentable as a po
 **Docs touched:** this ADR, 04 §4.3 (step-5 stamp) and §5 (rewritten), 05 §2/§3/§4,
 06 §5, `controlplane/policy/engine.py`, `docs/08` (D5 closed, M-3 logged).
 
+### Amendment 1 (2026-08-26) — the step-5 stamp is STORED, not derived
+
+**Context.** Consequence 2 above extended the §4.3 step-5 stamp to "contributing signal_ids **+
+failure_record_ids**" and 05 §4 listed both as canonical-view keys, but **05 §3's own
+`audit_records` DDL declared neither column**. The dataclass populated both from the verdict and
+the write path then dropped them silently — verified by round-trip on a fresh DB: 19 columns,
+neither list among them. Filed as `[D5-adr-027-stamp-has-no-column-in-the-05-3-ddl]` (BLOCKER)
+while wiring the write path this ADR specified.
+
+**Ruling — Option A: add the columns.**
+
+```sql
+contributing_signal_ids TEXT NOT NULL DEFAULT '[]',
+failure_record_ids      TEXT NOT NULL DEFAULT '[]',
+```
+
+JSON arrays of ids. **Empty array when none contributed, never NULL:** `[]` is the fact "nothing
+did", NULL would say "we did not record", and only the first is something a reviewer can act on.
+`escalation_cause` in the admin API (05 §2) derives from these stored columns.
+
+**Why derivation cannot substitute** — the non-derivability analysis from the deviation report,
+ratified:
+
+1. `detector_failures_json` is populated on **fail_open** too, so the presence of a failure record
+   does not mean it contributed. A consumer filtering that column would credit a fault that
+   decided nothing.
+2. Filtering on `fail_mode_applied` misreports in the other direction: the escalate **floor**
+   leaves a genuine content BLOCK standing, so a fail_closed record can sit in a row whose verdict
+   was decided by content.
+3. `contributing_signal_ids` is a **strict subset** of `signals_json` by design — the signals that
+   *decided*, not the signals that *fired*. Nothing in the row recovers which were which.
+
+Only an explicit write preserves any of these distinctions.
+
+**Trade-off accepted.** Two more columns whose contents duplicate ids already present elsewhere in
+the row. That redundancy is the point: the ids are cheap and the *relationship* they record —
+which of the things that fired actually decided — is not reconstructible at any price.
+
+**Prototype note.** No migration was written and none was needed: no `.db` file existed in the
+tree, so the DDL change takes effect on the next `init_db()`. A prototype DB may be recreated
+rather than migrated (ADR-006 is SQLite, single-file).
+
+**Implementation note (not a contract).** The NFR-SEC-001 shape tripwire in `records.py` needed a
+column-keyed UUID exemption for these two columns: a bare array element's leaf path is `[0]`, not
+a field name, so the existing field-keyed `MINTED_ID_FIELDS` exemption never fires for it.
+Measured: **24.9%** of single-uuid4 arrays (499/2000) contain a digit run the tripwire reads as a
+raw value, so roughly one ESCALATE in four would have refused to write its own explanation. The
+exemption is UUID-only — narrower than `MINTED_ID_FIELDS`, which also accepts ISO timestamps —
+because a timestamp is not a signal id. Asserted in both directions:
+`test_amendment1_the_uuid_exemption_is_not_a_laundering_channel` and
+`test_amendment1_an_iso_timestamp_buys_no_exemption_in_the_stamp`.
+
+**Docs touched:** this amendment, 05 §3 (DDL + the stored-not-derived note), 05 §2 (`escalation_cause`
+reads stored columns), `controlplane/audit/db.py`, `controlplane/audit/records.py`,
+`tests/test_audit_records.py` (+10), `docs/08` (D5 closed).
+
 ## Minor resolutions log (review findings 6–8 — doc edits, no ADR needed)
 
 - **F6:** Cost plane gets a live enforcement moment — demo beat 7b added (budget-exhaustion BLOCK, SC-2 now covered live).

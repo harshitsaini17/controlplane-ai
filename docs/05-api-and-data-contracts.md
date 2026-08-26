@@ -52,7 +52,9 @@ reverse-engineer.
 
 The field is **derived, not stored**: it is computed from the referenced
 `audit_records.detector_failures_json` and the step-5 stamp (§4 `contributing_signal_ids` /
-`failure_record_ids`), so there is one source of truth for why a verdict happened. `both` is a
+`failure_record_ids`), so there is one source of truth for why a verdict happened. The *stamp
+itself* is stored, not derived (ADR-027 Amendment 1) — it is `escalation_cause` that is computed,
+by reading those columns. `both` is a
 real case — a content signal and a fault can escalate the same unit — and is reported as `both`
 rather than collapsed to either side.
 
@@ -69,6 +71,11 @@ CREATE TABLE audit_records (
                                 -- {failure_id, detector, error_class, stage,
                                 --  fail_mode_applied, ts}. Operational events, not
                                 -- content risks: no span, no plane, no label, no text
+  -- The §4.3 step-5 stamp (ADR-027 Amendment 1). JSON arrays of ids; `[]` when none
+  -- contributed, NEVER NULL — `[]` is the fact "nothing did", NULL would say "we did
+  -- not record". STORED, not derived: see the note below the table for why.
+  contributing_signal_ids TEXT NOT NULL DEFAULT '[]',
+  failure_record_ids TEXT NOT NULL DEFAULT '[]',
   actions_json TEXT,            -- transforms applied, spans, fallback used. Input-stage
                                 -- redaction (ADR-020) records its stage, spans and
                                 -- categories here — never the values (NFR-SEC-001)
@@ -104,6 +111,14 @@ not an unexplained quarantine. Without the second list, that record and a conten
 indistinguishable after the fact, and the reviewer has no way to tell which one they are looking
 at. `detector_failures_json` is populated on **fail_open** too: a dropped detector that left no
 trace is indistinguishable from one that ran and found nothing.
+
+**The stamp is stored, not derived (ADR-027 Amendment 1).** It cannot be reconstructed by
+filtering `detector_failures_json`, and the attempt misreports in both directions: that column
+carries **fail_open** records too, so a filter would credit a failure that did not contribute;
+and the ADR-027 escalate **floor** leaves a genuine content BLOCK standing, so a record can
+hold both a fail_closed failure and a content-driven verdict at once. `contributing_signal_ids`
+is likewise a strict subset of `signals_json` by design — the signals that *decided*, not the
+signals that *fired*. Only an explicit write preserves any of these distinctions.
 
 Rule: nothing outside `review_items.quarantined_text` ever stores model output verbatim, and that column is written **post-masking** of Tier-1 PII spans (NFR-SEC-001).
 

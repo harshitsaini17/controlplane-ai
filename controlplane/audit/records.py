@@ -75,6 +75,21 @@ MINTED_ID_FIELDS: frozenset[str] = frozenset({
     "signal_id", "failure_id", "review_id", "ts",
 })
 
+#: The two 04 §4.3 step-5 stamp columns (ADR-027 Amendment 1). Their elements are ids the
+#: system minted, so they get the same conditional exemption as `MINTED_ID_FIELDS` — but
+#: keyed on the COLUMN, because a bare array element's `_iter_strings` path is `[0]`, not a
+#: field name, so the field-keyed exemption never fires for it.
+#:
+#: This is the pre-existing uuid4 false-positive resurfacing in a new column shape, not a
+#: new theory: measured here, 24.9% of single-uuid4 arrays (499/2000) contain a digit run
+#: the shape tripwire reads as a raw value. Left unexempted, roughly one ESCALATE in four
+#: would refuse to write its own explanation.
+#:
+#: NARROWER than `MINTED_ID_FIELDS` on purpose: UUID only, no ISO-timestamp branch. A
+#: timestamp is not a signal id, so accepting one here would widen the exemption past
+#: anything these columns can legitimately hold.
+ID_LIST_COLUMNS: tuple[str, ...] = ("contributing_signal_ids", "failure_record_ids")
+
 
 class AuditWriteError(ValueError):
     """The record is malformed — bad enum value, unknown latency key, missing id."""
@@ -128,6 +143,42 @@ def _is_minted_identifier(key: str, text: str) -> bool:
         return False
 
 
+def _is_uuid(text: str) -> bool:
+    try:
+        uuid.UUID(text)
+        return True
+    except ValueError:
+        return False
+
+
+def _check_id_list(column: str, ids: object) -> None:
+    """Validate one step-5 id list. Raises, or returns nothing.
+
+    Refuses a bare string outright. `contributing_signal_ids="abc"` is a plausible slip and
+    would otherwise be *iterable* — the row would store `["a","b","c"]`, three ids that
+    never existed, and a reviewer would read three contributing signals off it.
+
+    Elements that are not uuid4 still pass, because `Signal.signal_id` is typed `str` and a
+    caller may set its own; they are simply scanned by the shape tripwire like any other
+    string, which is what keeps this from being a hole.
+    """
+    if isinstance(ids, str) or not isinstance(ids, (list, tuple)):
+        raise AuditWriteError(
+            f"{column} must be a sequence of ids, got {type(ids).__name__}. A bare string "
+            "would be stored one character per id (ADR-027 Amendment 1)."
+        )
+    values = []
+    for index, value in enumerate(ids):
+        if not isinstance(value, str) or not value:
+            raise AuditWriteError(
+                f"{column}[{index}] must be a non-empty string id, got {value!r}"
+            )
+        values.append(value)
+    # Scanned as a list so `_iter_strings` walks the elements; serialization for the row
+    # itself belongs to `write_record`, which is where the write concern lives.
+    _check_no_raw_values(column, values)
+
+
 def _check_no_raw_values(column: str, payload: object) -> None:
     """Raise `PiiLeakError` if any string leaf of `payload` looks like a raw value.
 
@@ -137,7 +188,12 @@ def _check_no_raw_values(column: str, payload: object) -> None:
     `evidence`, `meta`, or a note "just for debugging".
     """
     for path, text in _iter_strings(payload):
-        if _is_minted_identifier(path.rsplit(".", 1)[-1], text):
+        if column in ID_LIST_COLUMNS:
+            # Column-keyed, UUID-only — see `ID_LIST_COLUMNS`. Still conditional: a value
+            # that is not a UUID falls through to the tripwire below.
+            if _is_uuid(text):
+                continue
+        elif _is_minted_identifier(path.rsplit(".", 1)[-1], text):
             continue
         shape = _raw_value_shape(text)
         if shape is not None:
@@ -286,7 +342,9 @@ class AuditRecord:
     latency_json: str = "{}"
     sampled_deep: bool = False
 
-    #: Set when the verdict was ESCALATE and a review item was created.
+    #: The 04 §4.3 step-5 stamp, stamped on EVERY verdict by `from_verdict` — not only on
+    #: an ESCALATE. Empty tuple means "nothing contributed", which is a fact; it is stored
+    #: as `[]` and never as NULL (ADR-027 Amendment 1).
     contributing_signal_ids: tuple[str, ...] = ()
     failure_record_ids: tuple[str, ...] = ()
 
@@ -347,6 +405,9 @@ def _validate(record: AuditRecord) -> str:
     if record.est_cost_usd is not None and record.est_cost_usd < 0:
         raise AuditWriteError(f"est_cost_usd cannot be negative, got {record.est_cost_usd}")
 
+    for column in ID_LIST_COLUMNS:
+        _check_id_list(column, getattr(record, column))
+
     for column in CONTENT_COLUMNS:
         raw = getattr(record, column)
         try:
@@ -374,6 +435,11 @@ def write_record(conn: sqlite3.Connection, record: AuditRecord) -> None:
     would quietly make the log rewritable, which is the one property it must not have.
     """
     verdict = _validate(record)
+    # Safe to dump unchecked: `_validate` has already refused a non-sequence, a bare string
+    # and any element that looks like a raw value. NOT sorted — the stamp is a record of
+    # what the engine converged, and reordering it would misrepresent that order as
+    # canonical.
+    id_lists = tuple(json.dumps(list(getattr(record, c))) for c in ID_LIST_COLUMNS)
     try:
         with conn:
             conn.execute(
@@ -381,15 +447,17 @@ def write_record(conn: sqlite3.Connection, record: AuditRecord) -> None:
                 INSERT INTO audit_records (
                   request_id, ts_utc, use_case, policy_version, conversation_id,
                   stage_summary, verdict, signals_json, detector_failures_json,
+                  contributing_signal_ids, failure_record_ids,
                   actions_json, tier_requested, model_used, upstream_class,
                   cascade_escalated, tokens_in, tokens_out, est_cost_usd,
                   latency_json, sampled_deep
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     record.request_id, record.ts_utc, record.use_case,
                     record.policy_version, record.conversation_id, record.stage_summary,
                     verdict, record.signals_json, record.detector_failures_json,
+                    *id_lists,
                     record.actions_json, record.tier_requested, record.model_used,
                     record.upstream_class, int(record.cascade_escalated),
                     record.tokens_in, record.tokens_out, record.est_cost_usd,
@@ -425,6 +493,11 @@ def canonical_view(conn: sqlite3.Connection, request_id: str) -> dict[str, Any]:
         "verdict": row["verdict"],
         "signals": json.loads(row["signals_json"]),
         "detector_failures": json.loads(row["detector_failures_json"]),
+        # Top-level in 05 §4, alongside `signals`/`detector_failures` rather than nested in
+        # either: the stamp is a claim about which of BOTH lists decided the verdict, so it
+        # cannot sit inside one of them.
+        "contributing_signal_ids": json.loads(row["contributing_signal_ids"]),
+        "failure_record_ids": json.loads(row["failure_record_ids"]),
         "actions": json.loads(row["actions_json"]),
         "model": {
             "tier_requested": row["tier_requested"],

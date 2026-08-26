@@ -18,6 +18,7 @@ import yaml
 
 from controlplane.audit.db import init_db
 from controlplane.audit.records import (
+    ID_LIST_COLUMNS,
     AuditRecord,
     AuditWriteError,
     PiiLeakError,
@@ -380,3 +381,184 @@ def test_every_minted_value_this_project_actually_produces_is_exempt() -> None:
     assert _is_minted_identifier("ts", record.ts)
     assert _is_minted_identifier("failure_id", record.failure_id)
     assert _is_minted_identifier("signal_id", pii_signal().signal_id)
+
+
+# --------------------------------------------------------------------------
+# ADR-027 Amendment 1 — the §4.3 step-5 stamp is STORED, not derived
+# --------------------------------------------------------------------------
+
+#: uuid4 values whose *shape* trips `_raw_value_shape` (found by search, pinned as
+#: literals so the test is deterministic rather than ~25%-of-the-time). The first has a
+#: 7+ digit run, the second a grouped run the tripwire reads as SSN/credit-card shaped.
+TRIPWIRE_SHAPED_UUIDS = (
+    "3442569d-ff63-404b-befd-d0ba89c6bd0f",
+    "85b828d2-c5dd-4b94-8642-795c30a45e2a",
+)
+
+
+def test_amendment1_the_stamp_round_trips_into_the_05_4_view(conn) -> None:
+    """★ The columns 05 §4 lists as canonical keys must survive a write.
+
+    This is the D5 regression: both keys were in the §4 view and derived by §2, while the
+    §3 DDL declared neither column — so the writer dropped them silently.
+    """
+    sid, fid = str(uuid.uuid4()), str(uuid.uuid4())
+    write_record(conn, base_record(
+        verdict=Action.ESCALATE,
+        contributing_signal_ids=(sid,),
+        failure_record_ids=(fid,),
+    ))
+    view = canonical_view(conn, "req-1")
+    assert view["contributing_signal_ids"] == [sid]
+    assert view["failure_record_ids"] == [fid]
+
+
+def test_amendment1_an_empty_stamp_is_an_empty_array_never_null(conn) -> None:
+    """`[]` says "nothing contributed"; NULL would say "we did not record"."""
+    write_record(conn, base_record())
+    stored = conn.execute(
+        "SELECT contributing_signal_ids, failure_record_ids FROM audit_records "
+        "WHERE request_id = 'req-1'"
+    ).fetchone()
+    assert stored["contributing_signal_ids"] == "[]"
+    assert stored["failure_record_ids"] == "[]"
+
+    view = canonical_view(conn, "req-1")
+    assert view["contributing_signal_ids"] == []
+    assert view["failure_record_ids"] == []
+
+
+@pytest.mark.parametrize("column", ["contributing_signal_ids", "failure_record_ids"])
+def test_amendment1_a_bare_string_is_refused_not_iterated(conn, column: str) -> None:
+    """★ `contributing_signal_ids="abc"` must not store three ids that never existed.
+
+    A string is iterable, so the permissive reading of this slip is `["a","b","c"]` — and a
+    reviewer would then read three contributing signals off the record.
+    """
+    with pytest.raises(AuditWriteError, match="must be a sequence of ids"):
+        write_record(conn, base_record(**{column: "abc"}))
+
+
+@pytest.mark.parametrize("bad", [123, None, {"a": 1}])
+def test_amendment1_a_non_sequence_stamp_is_refused(conn, bad: object) -> None:
+    with pytest.raises(AuditWriteError, match="must be a sequence of ids"):
+        write_record(conn, base_record(contributing_signal_ids=bad))
+
+
+def test_amendment1_an_empty_element_is_refused(conn) -> None:
+    with pytest.raises(AuditWriteError, match="non-empty string id"):
+        write_record(conn, base_record(failure_record_ids=("",)))
+
+
+@pytest.mark.parametrize("minted", TRIPWIRE_SHAPED_UUIDS)
+def test_amendment1_a_digit_heavy_id_in_the_stamp_is_not_a_leak(conn, minted: str) -> None:
+    """★ The uuid4 false positive must not resurface in the new column shape.
+
+    A bare array element's `_iter_strings` path is `[0]`, not a field name, so the
+    field-keyed `MINTED_ID_FIELDS` exemption never fires for it. Measured before the fix:
+    24.9% of single-uuid4 arrays were refused — one ESCALATE in four unable to write its
+    own explanation.
+    """
+    write_record(conn, base_record(request_id=minted[:8], contributing_signal_ids=(minted,)))
+    assert canonical_view(conn, minted[:8])["contributing_signal_ids"] == [minted]
+
+
+@pytest.mark.parametrize("leak", ["001-01-0001", "4111111111111111"])
+def test_amendment1_the_uuid_exemption_is_not_a_laundering_channel(conn, leak: str) -> None:
+    """★ A real raw value in the stamp column is still refused.
+
+    The exemption is conditional on the element actually parsing as a UUID, so it cannot
+    become a hole for the mistake the tripwire exists to catch (NFR-SEC-001).
+    """
+    with pytest.raises(PiiLeakError):
+        write_record(conn, base_record(contributing_signal_ids=(leak,)))
+
+
+#: An ISO-8601 timestamp whose fractional part is a 7-digit run, so the shape tripwire
+#: flags it. A plain `…T12:00:00.123456` is NOT flagged at all, which would make the test
+#: below vacuous — the refusal has to be attributable to the narrowed exemption.
+ISO_TS_TRIPPING_THE_SHAPE_CHECK = "2026-08-26T12:00:00.1234567"
+
+
+def test_amendment1_an_iso_timestamp_buys_no_exemption_in_the_stamp(conn, uc3: Policy) -> None:
+    """★ Narrower than `MINTED_ID_FIELDS` on purpose: UUID only, no timestamp branch.
+
+    Differential, not just a refusal: the SAME string is exempt as a `ts` field, because
+    that exemption is field-keyed and accepts ISO timestamps. In a stamp column it must be
+    refused — a timestamp is not a signal id, and accepting one would widen the exemption
+    past anything these columns can legitimately hold.
+    """
+    import dataclasses
+
+    outcome = resolve_failure(
+        DetectorFailureRecord(detector="tier1_pii", error_class="DetectorTimeout"), uc3,
+    )
+    exempt_as_ts = serialize_failures(
+        [dataclasses.replace(outcome, ts=ISO_TS_TRIPPING_THE_SHAPE_CHECK)]
+    )
+    assert ISO_TS_TRIPPING_THE_SHAPE_CHECK in exempt_as_ts, (
+        "precondition: this value is exempt in a `ts` field, so the refusal below is "
+        "attributable to ID_LIST_COLUMNS being UUID-only"
+    )
+
+    with pytest.raises(PiiLeakError):
+        write_record(conn, base_record(
+            failure_record_ids=(ISO_TS_TRIPPING_THE_SHAPE_CHECK,)))
+
+
+def test_amendment1_the_stamp_is_not_derivable_from_the_failures_column(conn) -> None:
+    """★ Why the amendment stores rather than derives.
+
+    A **fail_open** fault is recorded in `detector_failures_json` and contributes nothing to
+    the verdict, so a consumer filtering that column would credit a failure that did not
+    decide anything. The stored stamp is the only place the difference survives.
+    """
+    uc1 = Policy(**yaml.safe_load((POLICY_DIR / "support_bot.yaml").read_text()))
+    record = DetectorFailureRecord(detector="tier2_toxicity", error_class="DetectorTimeout")
+    outcome = resolve_failure(record, uc1)          # support_bot: tier2 -> fail_open
+    assert outcome.action is None, "precondition: fail_open contributes no verdict action"
+    write_record(conn, base_record(
+        detector_failures_json=serialize_failures([outcome]),
+        failure_record_ids=(),          # fail_open contributed nothing
+    ))
+    view = canonical_view(conn, "req-1")
+
+    assert len(view["detector_failures"]) == 1, "the fault is recorded (ADR-027)"
+    assert view["detector_failures"][0]["fail_mode_applied"] == "fail_open"
+    assert view["failure_record_ids"] == [], (
+        "a fail_open fault must not appear in the stamp; deriving the stamp by filtering "
+        "detector_failures_json would credit it with the verdict"
+    )
+
+
+def test_amendment1_from_verdict_carries_the_engine_stamp_to_the_db(conn, uc3: Policy) -> None:
+    """End to end: the engine's stamp, through `from_verdict`, into the stored row.
+
+    Reads the ids off the *verdict* rather than restating literals, so a change to what the
+    engine stamps fails here instead of passing against a hardcoded expectation.
+    """
+    signal = pii_signal()
+    verdict = evaluate([signal], uc3)
+    record = AuditRecord.from_verdict(
+        request_id="req-e2e", verdict=verdict, stage_summary="input", signals=[signal],
+    )
+    write_record(conn, record)
+
+    view = canonical_view(conn, "req-e2e")
+    assert view["contributing_signal_ids"] == list(verdict.contributing_signal_ids)
+    assert view["failure_record_ids"] == list(verdict.failure_record_ids)
+    assert view["contributing_signal_ids"], "a PII signal that decided must be named"
+
+
+def test_amendment1_the_ddl_declares_every_column_the_writer_stamps() -> None:
+    """Differential against 05 §3: the doc's DDL must declare both stamp columns.
+
+    Parses the doc rather than restating the column names, so drift on either side fails.
+    """
+    doc = (Path(__file__).resolve().parents[1]
+           / "docs" / "05-api-and-data-contracts.md").read_text()
+    ddl = doc.split("CREATE TABLE audit_records (", 1)[1].split(");", 1)[0]
+    for column in ID_LIST_COLUMNS:
+        assert f"{column} TEXT NOT NULL DEFAULT '[]'" in ddl, (
+            f"05 §3 must declare {column} as a non-null JSON array (ADR-027 Amendment 1)"
+        )
