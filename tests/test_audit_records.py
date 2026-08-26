@@ -9,6 +9,7 @@ in the audit DB is still there when a report reads it.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -19,11 +20,13 @@ import yaml
 from controlplane.audit.db import init_db
 from controlplane.audit.records import (
     ID_LIST_COLUMNS,
+    NOT_RUN_REASONS,
     AuditRecord,
     AuditWriteError,
     PiiLeakError,
     canonical_view,
     serialize_actions,
+    serialize_detectors,
     serialize_failures,
     serialize_signals,
     write_record,
@@ -562,3 +565,193 @@ def test_amendment1_the_ddl_declares_every_column_the_writer_stamps() -> None:
         assert f"{column} TEXT NOT NULL DEFAULT '[]'" in ddl, (
             f"05 §3 must declare {column} as a non-null JSON array (ADR-027 Amendment 1)"
         )
+
+
+# --------------------------------------------------------------------------
+# M-10 — the coverage column (`detectors_json`, 05 §3/§4)
+# --------------------------------------------------------------------------
+
+DOC_05 = (Path(__file__).resolve().parents[1] / "docs" / "05-api-and-data-contracts.md")
+
+
+def _doc_audit_columns() -> list[str]:
+    """Column names in 05 §3's `audit_records` DDL, in declared order."""
+    ddl = DOC_05.read_text().split("CREATE TABLE audit_records (", 1)[1].split(");", 1)[0]
+    names = []
+    for line in ddl.splitlines():
+        line = re.sub(r"--.*$", "", line).strip()
+        for part in line.split(","):
+            m = re.match(r"^([a-z_]+)\s+(?:TEXT|INTEGER|REAL)\b", part.strip())
+            if m:
+                names.append(m.group(1))
+    return names
+
+
+def _code_audit_columns() -> list[str]:
+    """Column names in `db.SCHEMA_DDL`'s `audit_records`, in declared order."""
+    from controlplane.audit.db import SCHEMA_DDL
+
+    body = SCHEMA_DDL[0].split("(", 1)[1]
+    names = []
+    for line in body.splitlines():
+        line = re.sub(r"--.*$", "", line).strip()
+        for part in line.split(","):
+            m = re.match(r"^([a-z_]+)\s+(?:TEXT|INTEGER|REAL)\b", part.strip())
+            if m:
+                names.append(m.group(1))
+    return names
+
+
+def test_m10_the_doc_ddl_and_the_code_ddl_declare_the_same_columns() -> None:
+    """★ The guard whose absence let a doc-only column ship unnoticed.
+
+    The pre-existing differential named the two Amendment-1 columns as literals, so it could
+    only ever catch drift in *those two*. When 05 §3 gained `detectors_json` and `db.py` had
+    not, the whole suite stayed green — a doc declaring a column the database does not have
+    is exactly the contract mismatch AGENTS.md §5 calls D2.
+
+    This compares the full column list, in order, in BOTH directions, so any future column
+    added to one side alone fails here regardless of its name.
+    """
+    doc, code = _doc_audit_columns(), _code_audit_columns()
+    assert doc == code, (
+        f"05 §3 and db.SCHEMA_DDL disagree.\n"
+        f"  doc-only : {[c for c in doc if c not in code]}\n"
+        f"  code-only: {[c for c in code if c not in doc]}\n"
+        f"  order differs: {doc != code and sorted(doc) == sorted(code)}"
+    )
+
+
+def test_m10_the_coverage_column_is_declared_in_both_ddls() -> None:
+    """Named explicitly, so a deletion is a failure and not merely a silent absence."""
+    assert "detectors_json" in _doc_audit_columns()
+    assert "detectors_json" in _code_audit_columns()
+
+
+def test_m10_the_reason_vocabulary_matches_the_doc() -> None:
+    """★ Differential: parse the vocabulary out of 05 §4 rather than restating the code.
+
+    Blanking `NOT_RUN_REASONS` or adding an undocumented member fails, and so does adding a
+    reason to the doc without implementing it.
+    """
+    doc = DOC_05.read_text()
+    para = re.search(r"`reason` vocabulary(.*?)\n\n", doc, re.S)
+    assert para, "05 §4 must state the `reason` vocabulary"
+    documented = set(re.findall(r"\*\*`([a-z_]+)`\*\*", para.group(1)))
+    assert documented, "no bolded reason tokens found in 05 §4"
+    assert documented == set(NOT_RUN_REASONS), (
+        f"05 §4 documents {sorted(documented)}, code has {sorted(NOT_RUN_REASONS)}"
+    )
+
+
+def test_m10_coverage_round_trips_through_the_canonical_view(conn) -> None:
+    """What the gateway writes is what 05 §4 renders."""
+    write_record(conn, AuditRecord(
+        request_id="cov-1", use_case="finance_advisor", policy_version=3,
+        verdict="escalate", stage_summary="completed",
+        detectors_json=serialize_detectors(
+            ran=["tier1_pii", "numeric_claims"],
+            not_run=[("fast_consistency", "not_implemented")],
+        ),
+    ))
+    view = canonical_view(conn, "cov-1")["detectors"]
+    assert view["ran"] == ["tier1_pii", "numeric_claims"]
+    assert view["not_run"] == [
+        {"detector": "fast_consistency", "reason": "not_implemented"}
+    ]
+
+
+def test_m10_unrecorded_is_distinct_from_nothing_ran(conn) -> None:
+    """★ `{}` and `{"ran":[],"not_run":[]}` are different facts, and both are storable.
+
+    The same distinction ADR-027 Amendment 1 draws between `[]` and NULL: one is a claim
+    about the request, the other about the recording. A writer that normalised `{}` into
+    empty lists would assert coverage was measured when it was not.
+    """
+    write_record(conn, AuditRecord(
+        request_id="cov-default", use_case="hr_copilot", policy_version=1,
+        verdict="pass", stage_summary="completed"))
+    assert canonical_view(conn, "cov-default")["detectors"] == {}
+
+    write_record(conn, AuditRecord(
+        request_id="cov-empty", use_case="hr_copilot", policy_version=1,
+        verdict="pass", stage_summary="completed",
+        detectors_json=serialize_detectors()))
+    assert canonical_view(conn, "cov-empty")["detectors"] == {"ran": [], "not_run": []}
+
+
+@pytest.mark.parametrize("payload, fragment", [
+    ({"ran": ["not_a_detector"]}, "04 §2 registry"),
+    ({"not_run": [{"detector": "nope", "reason": "not_implemented"}]}, "04 §2 registry"),
+    ({"not_run": [{"detector": "tier1_pii", "reason": "because"}]}, "not in"),
+    ({"ran": "tier1_pii"}, "must be a list"),
+    ({"not_run": [{"detector": "tier1_pii"}]}, "exactly"),
+    ({"ran": [], "surprise": []}, "unknown key"),
+    ([], "must be a JSON object"),
+])
+def test_m10_a_malformed_coverage_value_is_refused(conn, payload, fragment) -> None:
+    """Every field is checked against a closed vocabulary, with a message naming the column."""
+    with pytest.raises(AuditWriteError, match=re.escape(fragment)):
+        write_record(conn, AuditRecord(
+            request_id="bad", use_case="u", policy_version=1, verdict="pass",
+            stage_summary="completed", detectors_json=json.dumps(payload)))
+
+
+def test_m10_a_detector_cannot_both_run_and_not_run(conn) -> None:
+    """★ The check that makes the column trustworthy as coverage.
+
+    Every other rule can be satisfied by a record asserting both, which no reader could
+    resolve — so the contradiction is refused at the write path rather than left to whoever
+    reads the row.
+    """
+    with pytest.raises(AuditWriteError, match="both"):
+        write_record(conn, AuditRecord(
+            request_id="contradiction", use_case="u", policy_version=1, verdict="pass",
+            stage_summary="completed",
+            detectors_json=serialize_detectors(
+                ran=["tier1_pii"], not_run=[("tier1_pii", "not_implemented")])))
+
+
+def test_m10_a_not_run_entry_is_not_a_detector_failure(conn) -> None:
+    """★ ADR-027 boundary: ran-and-broke and never-ran are independent columns.
+
+    A record can carry a not-run entry with an empty failures column — the case this field
+    exists for. Were the two conflated, a Phase-5 gap would appear in the audit as a
+    detector fault that never occurred, and `cp_detector_failures_total` would count it.
+    """
+    write_record(conn, AuditRecord(
+        request_id="gap-only", use_case="finance_advisor", policy_version=3,
+        verdict="pass", stage_summary="completed",
+        detectors_json=serialize_detectors(
+            ran=["tier1_pii"], not_run=[("fast_consistency", "not_implemented")])))
+    view = canonical_view(conn, "gap-only")
+    assert view["detectors"]["not_run"][0]["detector"] == "fast_consistency"
+    assert view["detector_failures"] == []
+    # And nothing in the coverage entry carries a fail mode: there was no policy resolution.
+    assert "fail_mode_applied" not in view["detectors"]["not_run"][0]
+
+
+def test_m10_the_uc3_case_this_field_exists_for(conn) -> None:
+    """★ The concrete requirement: UC-3 asks for consistency, and it is not there.
+
+    `finance_advisor` sets `consistency: "on"`, so a reader seeing no
+    `hallucination.low_confidence` signal must be able to tell "checked, clean" from "never
+    checked". Reads the flag out of the shipped policy rather than hardcoding it, so this
+    test follows the config.
+    """
+    policy = yaml.safe_load((POLICY_DIR / "finance_advisor.yaml").read_text())
+    assert policy["consistency"] == "on", "UC-3 is the case this field exists for"
+
+    write_record(conn, AuditRecord(
+        request_id="uc3", use_case="finance_advisor", policy_version=3,
+        verdict="pass", stage_summary="completed", signals_json="[]",
+        detectors_json=serialize_detectors(
+            ran=["tier1_pii", "numeric_claims"],
+            not_run=[("fast_consistency", "not_implemented")])))
+
+    view = canonical_view(conn, "uc3")
+    assert view["signals"] == []
+    absent = {e["detector"] for e in view["detectors"]["not_run"]}
+    assert "fast_consistency" in absent, (
+        "a consistency-free verdict under consistency:on must say the check did not run"
+    )

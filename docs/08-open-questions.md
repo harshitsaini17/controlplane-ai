@@ -127,7 +127,9 @@ ingress; M-7 is a 05 §6.1 gap found while implementing upstream dispatch, and M
 05 §3-vs-§5 tension found while wiring per-detector timing. M-9 is the only one that is
 not a doc gap at all — no doc is unclear, two code copies of a ruled list had drifted —
 and it is logged here because the lightened protocol asks for every in-place resolution to
-be written down, not only the ones that turned on a reading of a doc.
+be written down, not only the ones that turned on a reading of a doc. M-10 is
+downstream of the Phase-5 deferral recorded below: deferring two detectors made
+*absence of coverage* a fact the audit record had no way to state.
 
 | # | Gap | Resolution | Why it is not a deviation |
 |---|---|---|---|
@@ -138,6 +140,7 @@ be written down, not only the ones that turned on a reading of a doc.
 | M-7 | 05 §6.1 types `base_url` as a bare `<url>` and states no rule for how a request path joins it. The two shipped providers disagree: `kiro-local` carries no version segment (`http://localhost:8000`), `groq` already ends in one (`https://api.groq.com/openai/v1`) | `upstream_url()` inserts `/v1` **iff** `base_url` does not already end in it. Resolved **empirically**, not by convention: both providers were probed keyless — no credential sent, so 401/403 means the path exists and is auth-gated while 404 means it is absent — with a `GET /v1/models` → 401 control row establishing that a 404 is a real absence rather than a network artefact. Probe table recorded in the `upstream_url` docstring with its date | Neither a naive join nor an unconditional `/v1` serves both providers, so *some* rule was required and the doc states none — a gap, not a contradiction. Deciding it by convention would have been a guess about two live endpoints when asking them was cheap. Pinned by `test_the_v1_prefix_is_inserted_only_when_missing`, parametrized over both shipped providers so a config change that moves the segment fails |
 | M-8 | 05 §3 annotates `latency_json` as "per-**detector** ms", but 05 §5 records the same keys as a **fixed span vocabulary** — and that vocabulary has no entry for `numeric_claims`, one of 04 §2's seven detectors (ADR-025). `check_latency_keys` enforces the closed list at the write path, so a `numeric_claims` key is rejected. The detector appears in neither 05 nor 06 | 05 §5 is authoritative on the key vocabulary: it is the more specific statement and is explicitly labelled fixed. **Per-detector timing goes to `cp_detector_latency_ms{detector}`** — the detector-labelled channel 05 §5 already defines for exactly this, open by construction and the metric NFR-P-002 is measured by — while `latency_json` carries span keys only. `numeric_claims` therefore has no `latency_json` entry | Neither contract bends and NFR-P-002 stays measurable per detector. The two wrong answers were **inventing a span name** (`cp.out.numeric` is an undocumented addition to a vocabulary 05 §5 calls fixed — AGENTS.md §4 forbids it) and **folding it into `cp.out.grounding`** (a different detector on a different premise; the span would then misreport whose time it was). Spans are named for pipeline *stages* and already group detectors — `cp.out.tier1` covers both Tier-1 detectors — so a detector without its own span is the vocabulary working as designed, which `check_latency_keys`'s own docstring anticipates: "a per-detector span that is absent is normal" |
 | M-9 | ADR-015 rules the span-less promotion, but no doc says **where the list of span-less labels lives**. `eval/policy_matrix` and `eval/validate_dataset` each reproduce the promotion rather than calling the engine, and each had grown its own copy — which had already diverged: the matrix's set held `cost.request_too_large`, the validator's did not, so the matrix applied the promotion where the validator skipped it | **One definition**: `SPAN_LESS_LABELS` in `controlplane/policy/schema.py`, imported by both consumers. The validator gains `cost.request_too_large`, which is genuinely span-less — it scores a whole request and has no extent to point at, so the validator was the side that was wrong. Guarded by `tests/test_span_less_single_source.py`, which walks the `controlplane/` and `eval/` ASTs for a third copy and asserts **identity** (`is`), not equality, on both imports | Nothing in any doc is contradicted or unclear: the promotion is ruled and both copies were trying to obey it. The defect was duplication, and the honest fix is structural — an `==` assertion would have passed for an equal-but-separate third copy, and a grep for the name would have missed this divergence entirely, since the two sets had **different names** (`_SPAN_LESS` and `SPAN_LESS_LABELS`). Freeze-adjacent and therefore re-verified rather than assumed: 280/280 unchanged, digest `6a3ecbbe75fd020b…` still matching, so a validator edit moved no number |
+| M-10 | The Phase-5 amendment above creates a case no doc had a field for: `finance_advisor` sets `consistency: "on"`, but `fast_consistency` has no implementation this phase. A detector that runs and finds nothing emits no `Signal`, so a short `signals_json` cannot distinguish **checked-and-clean** from **never-checked** — and 05 §3/§4 recorded only signals, failures and the step-5 stamp, none of which answers *what was attempted* | **`detectors_json TEXT NOT NULL DEFAULT '{}'`** in the 05 §3 DDL, rendered as `detectors` in the §4 canonical view: `{ran: [name], not_run: [{detector, reason}]}`. `reason` is a fixed vocabulary with one member, `not_implemented`. Every string is validated against a closed set — detector names against `BUDGETS_MS` (the 04 §2 registry), reasons against `NOT_RUN_REASONS` — and a detector appearing in **both** lists is refused, since that contradiction is unresolvable by any reader. `{}` means *coverage not recorded* and stays distinct from `{"ran":[],"not_run":[]}` (*nothing ran, nothing expected*), the same `[]`-vs-NULL distinction as Amendment 1 | Nothing in any doc is contradicted: 05 had no coverage field because until this phase every detector in the registry was presumed present, so the question never arose. The field is **not** a `DetectorFailureRecord` and must not be read as one — a failure means *ran and broke* and carries `fail_mode_applied` because a policy resolved it, whereas a not-run entry means no attempt was made, so there is no fault, no fail mode, and nothing to resolve (ADR-027 stands unchanged). Deliberately outside `CONTENT_COLUMNS`: a value constrained to eleven known names cannot be a raw value, so the shape tripwire would add false positives and no safety. **Also closes a hole in the older guard** — the Amendment-1 differential named its two columns as literals, so when 05 §3 gained this column and `db.py` had not, the whole suite stayed green; the replacement compares the full column list in both directions and by order, and was mutation-probed on all three |
 
 
 **Resolved 2026-08-26 under the Phase-4 ruling** (was: flagged, not fixed):
@@ -187,6 +190,51 @@ measurements; its scope was wrong, not the artifact. The failure is disclosed in
 rather than dropped, because a check narrowed *after* it fails must show its working or the
 narrowing is indistinguishable from evading it.
 ---
+
+## Deferred scope (phase assignment)
+
+**Purpose.** What is *planned but not yet built*, and which phase owns it. This is a third
+register, distinct from the two above it: an **open question** is undecided, a **Standing
+Limitation** is decided-and-permanently-unmet, and a deferred item is decided, understood, and
+simply not reached yet. Without it, "not implemented" and "not required" are indistinguishable
+from outside the code — and the whole point of AGENTS.md §7 is that a reader can tell coverage
+from the absence of coverage.
+
+**Amended 2026-08-27** (ruling, no ADR — no contract changes): `fast_consistency` and
+`rag_grounding` move to **Phase 5** (the detector ML stack) alongside the Tier-2 classifiers.
+Both were previously carried as if in scope for the gateway spine; neither is. The list now
+matches the tree.
+
+| Phase | Item | State in the tree |
+|---|---|---|
+| **5 — detector ML stack** | `tier2_injection`, `tier2_toxicity` | `detectors/tier2_classifiers.py`, `STUB(phase-1-scaffold, Q-04 deferred)`; checkpoints unpicked (Q-04) |
+| **5 — detector ML stack** | `fast_consistency` | `detectors/consistency.py`, 7-line stub. Needs a second sample at temperature + embedding cosine (04 §2.3, ADR-014) |
+| **5 — detector ML stack** | `rag_grounding` | **no module at all.** Needs sentence-vs-context embeddings (04 §2) |
+| 5 | `entity_enricher` (ADR-011) | `detectors/entity_enricher.py` stub; needs spaCy `en_core_web_sm` |
+| 6 — cost plane | `cost_budget`, `loop_guard`, cascade probe (ADR-013) | `detectors/cost.py` stub; `sse_proxy` carries no probe **by design**, not stubbed (a probe that silently did nothing would make `cascade_escalated` false for the wrong reason) |
+| 6 | `conv_tracker` (FR-GW-005) | `detectors/conversation.py` stub |
+| 7 — slow lane | deep audit: `entropy`, `fairness`, `sampler` | three stubs under `deep_audit/` |
+| 7 | dashboard (ADR-007) | `dashboard/app.py` absent |
+
+**Measured inventory, 2026-08-27** — 3 of the 11 detectors declared in
+`detectors/base.BUDGETS_MS` are live, where "live" means a module exposes an instance whose
+`.name` matches a budget entry and which has an `async detect`:
+
+| | Detectors |
+|---|---|
+| **Live (3)** | `tier1_pii`, `tier1_blocklist`, `numeric_claims` |
+| **Declared but absent (8)** | `tier2_injection`, `tier2_toxicity`, `fast_consistency`, `rag_grounding`, `entity_enricher`, `cost_budget`, `loop_guard`, `conv_tracker` |
+
+`BUDGETS_MS` is deliberately **not** trimmed to the live three: `register()` refuses a detector
+with no budget, so the table is the 04 §2 registry transcribed, and an entry there is a statement
+about the spec rather than about today's tree.
+
+**The consequence this creates is a requirement, not a caveat.** `finance_advisor` (UC-3) sets
+`consistency: "on"`, so its policy asks for a check that no longer exists in this phase. A record
+that listed only the detectors which *ran* would let a reader infer coverage that was never
+attempted. Every audit record therefore carries what ran **and** what was expected but did not,
+with a reason — see M-10 and 05 §3/§4 `detectors_json`. A registry gap is recorded as *not run*;
+that is a different fact from a `DetectorFailureRecord`, which means a detector ran and broke.
 
 ## DEVIATION REPORT [D2-detector-params-cannot-hold-list-values]
 Severity: MINOR

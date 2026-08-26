@@ -61,6 +61,14 @@ SCHEMA_DDL: tuple[str, ...] = (
       cascade_escalated INTEGER,
       tokens_in INTEGER, tokens_out INTEGER, est_cost_usd REAL,
       latency_json TEXT,            -- per-detector ms + gateway_overhead_ms + upstream_ms
+      -- Coverage (M-10): {"ran": [name], "not_run": [{detector, reason}]}. A detector that
+      -- runs and finds nothing emits no Signal, so a short `signals_json` cannot distinguish
+      -- "checked, clean" from "never checked". This column states which it was. A not-run
+      -- entry is NOT a detector failure: `detector_failures_json` means ran-and-broke, this
+      -- means no attempt was made, so there is no fault and no fail_mode to record.
+      -- `{}` = coverage not recorded, distinct from `{"ran":[],"not_run":[]}` = nothing ran
+      -- and nothing was expected (the `[]`-vs-NULL distinction of Amendment 1, restated).
+      detectors_json TEXT NOT NULL DEFAULT '{}',
       sampled_deep INTEGER DEFAULT 0
     )
     """,

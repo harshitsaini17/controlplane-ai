@@ -85,6 +85,13 @@ CREATE TABLE audit_records (
   cascade_escalated INTEGER,
   tokens_in INTEGER, tokens_out INTEGER, est_cost_usd REAL,
   latency_json TEXT,            -- per-detector ms + gateway_overhead_ms + upstream_ms
+  -- Coverage: which detectors RAN for this request, and which were expected and did not
+  -- (M-10). Absence of coverage is a fact a reader must be able to see, not infer from a
+  -- short `signals_json`. `{}` means "coverage not recorded" and is distinct from
+  -- `{"ran":[],"not_run":[]}` = "nothing ran and nothing was expected" — the same
+  -- distinction ADR-027 Amendment 1 draws between `[]` and NULL. Any record the gateway
+  -- writes for a completed request states both lists.
+  detectors_json TEXT NOT NULL DEFAULT '{}',
   sampled_deep INTEGER DEFAULT 0
 );
 CREATE TABLE review_items (
@@ -148,9 +155,45 @@ The proposal/README show this shape (assembled from `audit_records`):
             "upstream_class":"measured","cascade_escalated":true},
   "cost": {"tokens_in":812,"tokens_out":344,"est_usd":0.0041},
   "latency": {"gateway_overhead_ms":46.1,"upstream_ms":1240.0},
+  "detectors": {"ran":["tier1_pii","numeric_claims"],
+                "not_run":[{"detector":"fast_consistency","reason":"not_implemented"}]},
   "override": {"decision":"approve","note":"claim verified against filing","ts":"…"}
 }
 ```
+
+**`detectors` — coverage, and why it is not derivable from `signals` (M-10).** A detector that
+runs and finds nothing emits no signal, so a short `signals` list is indistinguishable from a
+check that never happened. `ran` lists every detector that executed; `not_run` lists every
+detector the policy's configuration would have exercised for this request but which did not,
+each with a `reason`.
+
+`reason` vocabulary — **`not_implemented`** (the detector has no live implementation in this
+phase; see the deferred-scope register in 08). Extending this list is a doc change, as for any
+other fixed vocabulary here.
+
+**`{}` means "coverage not recorded"**, and is deliberately distinct from
+`{"ran":[],"not_run":[]}`, which asserts that nothing ran and nothing was expected. This is the
+same distinction ADR-027 Amendment 1 draws between `[]` and NULL: one is a fact about the
+request, the other a fact about the recording. Every record the gateway writes for a completed
+request states both lists; `{}` is what a record written outside that path carries.
+
+Three properties of the field are load-bearing:
+
+- **A not-run entry is not a `DetectorFailureRecord`.** A failure record means a detector ran
+  and broke, and carries a `fail_mode_applied` because a policy resolved it. A not-run entry
+  means no attempt was made, so there is no fault, no fail mode, and nothing for a policy to
+  resolve. Collapsing the two would either invent failures that never occurred or hide gaps.
+- **A detector switched off by policy is not listed**, because it was never expected. `not_run`
+  answers "what did this configuration ask for and not get", and mixing deliberate
+  configuration into it would make the field mean two things at once.
+- **`ran` is a union across units.** One request is one record (FR-AUD-001) but a streaming
+  response is many sentence units, so a per-unit list would be a list of lists answering a
+  question nobody asks. The coverage question is "was this check ever applied to this
+  response", and the union answers exactly that.
+
+The concrete case this exists for: `finance_advisor` sets `consistency: "on"`, and
+`fast_consistency` is Phase 5. Its records say so, in the record, rather than presenting a
+consistency-free verdict as though the check had passed.
 
 ## 5. Telemetry names (fixed vocabulary)
 

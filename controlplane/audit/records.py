@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from controlplane.detectors.base import Signal, _raw_value_shape
+from controlplane.detectors.base import BUDGETS_MS, Signal, _raw_value_shape
 from controlplane.policy.engine import FailureOutcome, Verdict
 from controlplane.policy.schema import Action
 from controlplane.telemetry import spans
@@ -89,6 +89,113 @@ MINTED_ID_FIELDS: frozenset[str] = frozenset({
 #: timestamp is not a signal id, so accepting one here would widen the exemption past
 #: anything these columns can legitimately hold.
 ID_LIST_COLUMNS: tuple[str, ...] = ("contributing_signal_ids", "failure_record_ids")
+
+#: 05 §4 `not_run[].reason` vocabulary. Fixed: extending it is a doc change.
+#:
+#: Only one member today, and that is the honest state rather than an oversight — the eight
+#: detectors in `BUDGETS_MS` without an implementation are all absent for the same reason.
+#: A `timeout`/`disabled` member would be inventing vocabulary for cases the system cannot
+#: currently produce, and a reason that never occurs is worse than absent: a reader cannot
+#: tell whether it means "never happens" or "we stopped recording it".
+NOT_RUN_REASONS: frozenset[str] = frozenset({"not_implemented"})
+
+#: Coverage column (M-10). Deliberately NOT in `CONTENT_COLUMNS`: every string it can hold
+#: is checked against a closed vocabulary below — detector names against the 04 §2 registry
+#: (`BUDGETS_MS`) and reasons against `NOT_RUN_REASONS` — which is a strictly stronger
+#: guarantee than the shape tripwire. A value that must be one of eleven known names cannot
+#: be a raw value, so scanning it would add a false-positive surface and no safety.
+DETECTORS_COLUMN = "detectors_json"
+
+
+def serialize_detectors(*, ran: object = (), not_run: object = ()) -> str:
+    """Build the `detectors_json` value (05 §4). The one place this shape is constructed.
+
+    `not_run` takes `(detector, reason)` pairs. Kept as a function rather than left to each
+    caller so the key names cannot drift between the gateway and a test fixture.
+
+    Keyword-only, matching `serialize_actions`, and here the reason is sharper than
+    consistency: the two parameters are interchangeable sequences whose transposition
+    inverts the record — every detector that ran would be filed as never attempted. That is
+    the precise misreading this column exists to prevent, and no validation could catch it,
+    since both orderings are perfectly well-formed.
+    """
+    return json.dumps({
+        "ran": list(ran),
+        "not_run": [{"detector": d, "reason": r} for d, r in not_run],
+    })
+
+
+def _check_detectors(payload: object) -> None:
+    """Validate the coverage column against 05 §4. Raises `AuditWriteError`, or returns.
+
+    `{}` passes: it means "coverage not recorded", which is a different claim from
+    `{"ran": [], "not_run": []}` ("nothing ran, nothing expected") and both are legitimate
+    — the `[]`-vs-NULL distinction of ADR-027 Amendment 1, restated for this column.
+    """
+    if not isinstance(payload, dict):
+        raise AuditWriteError(
+            f"{DETECTORS_COLUMN} must be a JSON object, got {type(payload).__name__} (05 §4)"
+        )
+    if not payload:
+        return
+
+    unknown_keys = set(payload) - {"ran", "not_run"}
+    if unknown_keys:
+        raise AuditWriteError(
+            f"{DETECTORS_COLUMN} has unknown key(s) {sorted(unknown_keys)}; 05 §4 defines "
+            "`ran` and `not_run`"
+        )
+
+    ran = payload.get("ran", [])
+    if isinstance(ran, str) or not isinstance(ran, list):
+        raise AuditWriteError(
+            f"{DETECTORS_COLUMN}.ran must be a list of detector names, got "
+            f"{type(ran).__name__}"
+        )
+    for index, name in enumerate(ran):
+        if name not in BUDGETS_MS:
+            raise AuditWriteError(
+                f"{DETECTORS_COLUMN}.ran[{index}] = {name!r} is not a detector in the 04 §2 "
+                f"registry; known: {sorted(BUDGETS_MS)}"
+            )
+
+    not_run = payload.get("not_run", [])
+    if isinstance(not_run, str) or not isinstance(not_run, list):
+        raise AuditWriteError(
+            f"{DETECTORS_COLUMN}.not_run must be a list of "
+            f"{{detector, reason}} objects, got {type(not_run).__name__}"
+        )
+    for index, entry in enumerate(not_run):
+        if not isinstance(entry, dict):
+            raise AuditWriteError(
+                f"{DETECTORS_COLUMN}.not_run[{index}] must be an object with `detector` and "
+                f"`reason`, got {type(entry).__name__}"
+            )
+        if set(entry) != {"detector", "reason"}:
+            raise AuditWriteError(
+                f"{DETECTORS_COLUMN}.not_run[{index}] must have exactly `detector` and "
+                f"`reason`, got {sorted(entry)}"
+            )
+        if entry["detector"] not in BUDGETS_MS:
+            raise AuditWriteError(
+                f"{DETECTORS_COLUMN}.not_run[{index}].detector = {entry['detector']!r} is "
+                f"not in the 04 §2 registry; known: {sorted(BUDGETS_MS)}"
+            )
+        if entry["reason"] not in NOT_RUN_REASONS:
+            raise AuditWriteError(
+                f"{DETECTORS_COLUMN}.not_run[{index}].reason = {entry['reason']!r} not in "
+                f"{sorted(NOT_RUN_REASONS)} (05 §4)"
+            )
+
+    # A detector cannot both have run and not run. This is the check that makes the column
+    # trustworthy as coverage: without it a caller could satisfy every rule above and still
+    # write a record asserting both, which no reader could resolve.
+    overlap = sorted({e["detector"] for e in not_run} & set(ran))
+    if overlap:
+        raise AuditWriteError(
+            f"{DETECTORS_COLUMN}: {overlap} appear in both `ran` and `not_run`; a detector "
+            "either ran for this request or it did not"
+        )
 
 
 class AuditWriteError(ValueError):
@@ -340,6 +447,11 @@ class AuditRecord:
     est_cost_usd: float | None = None
 
     latency_json: str = "{}"
+
+    #: Coverage (M-10, 05 §4). `"{}"` = not recorded; the gateway writes both lists for
+    #: every completed request. Build it with `serialize_detectors`.
+    detectors_json: str = "{}"
+
     sampled_deep: bool = False
 
     #: The 04 §4.3 step-5 stamp, stamped on EVERY verdict by `from_verdict` — not only on
@@ -408,6 +520,11 @@ def _validate(record: AuditRecord) -> str:
     for column in ID_LIST_COLUMNS:
         _check_id_list(column, getattr(record, column))
 
+    try:
+        _check_detectors(json.loads(record.detectors_json))
+    except json.JSONDecodeError as exc:
+        raise AuditWriteError(f"{DETECTORS_COLUMN} is not valid JSON ({exc})") from exc
+
     for column in CONTENT_COLUMNS:
         raw = getattr(record, column)
         try:
@@ -450,8 +567,8 @@ def write_record(conn: sqlite3.Connection, record: AuditRecord) -> None:
                   contributing_signal_ids, failure_record_ids,
                   actions_json, tier_requested, model_used, upstream_class,
                   cascade_escalated, tokens_in, tokens_out, est_cost_usd,
-                  latency_json, sampled_deep
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                  latency_json, detectors_json, sampled_deep
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     record.request_id, record.ts_utc, record.use_case,
@@ -461,7 +578,8 @@ def write_record(conn: sqlite3.Connection, record: AuditRecord) -> None:
                     record.actions_json, record.tier_requested, record.model_used,
                     record.upstream_class, int(record.cascade_escalated),
                     record.tokens_in, record.tokens_out, record.est_cost_usd,
-                    record.latency_json, int(record.sampled_deep),
+                    record.latency_json, record.detectors_json,
+                    int(record.sampled_deep),
                 ),
             )
     except sqlite3.IntegrityError as exc:
@@ -513,6 +631,7 @@ def canonical_view(conn: sqlite3.Connection, request_id: str) -> dict[str, Any]:
             "est_usd": row["est_cost_usd"],
         },
         "latency": json.loads(row["latency_json"]),
+        "detectors": json.loads(row["detectors_json"]),
         "sampled_deep": bool(row["sampled_deep"]),
     }
     if row["conversation_id"] is not None:
