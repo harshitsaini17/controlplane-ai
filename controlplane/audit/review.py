@@ -121,6 +121,7 @@ async def create_item(
     request_id: str,
     quarantined_text: str,
     use_case: str,
+    review_id: str | None = None,
     metrics: MetricsRegistry | None = None,
 ) -> str:
     """Quarantine one response and return its `review_id` (FR-POL-005).
@@ -135,7 +136,13 @@ async def create_item(
     if not request_id:
         raise ReviewError("request_id is required; a review item must reference its audit record")
 
-    review_id = str(uuid.uuid4())
+    # `review_id` is caller-mintable because 05 §3 makes `review_items.request_id` a
+    # REFERENCES to `audit_records` and `db.connect` enables `PRAGMA foreign_keys=ON`. The
+    # audit record must therefore exist first — but its `actions_json` names the review id
+    # (05 §4), so the id has to be known before either row is written. Minting it here and
+    # nowhere else would make that ordering impossible to satisfy without a second UPDATE
+    # to a table whose append-only discipline forbids one.
+    review_id = review_id or str(uuid.uuid4())
     masked = await mask_pii(quarantined_text)
     try:
         with conn:
