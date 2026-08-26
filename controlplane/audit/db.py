@@ -34,7 +34,13 @@ SCHEMA_DDL: tuple[str, ...] = (
       request_id TEXT PRIMARY KEY, ts_utc TEXT, use_case TEXT, policy_version INTEGER,
       conversation_id TEXT NULL, stage_summary TEXT,          -- input|streamed|completed
       verdict TEXT CHECK(verdict IN ('pass','edit','block','escalate')),
-      signals_json TEXT,            -- list[Signal] per 04 §1 (evidence fields only — no raw PII)
+      signals_json TEXT,            -- list[Signal] per 04 §1 (evidence fields only — no raw PII).
+                                    -- PURE Signals: a detector fault is never one (ADR-027)
+      detector_failures_json TEXT,  -- list[DetectorFailureRecord] per 04 §5 (ADR-027):
+                                    -- {failure_id, detector, error_class, stage,
+                                    --  fail_mode_applied, ts}. Operational events, not
+                                    -- content risks: no span, no plane, no label, no text,
+                                    -- so this column has no NFR-SEC-001 surface at all
       actions_json TEXT,            -- transforms applied, spans, fallback used
       -- Tier binding + provenance (05 §3 as amended by ADR-018 and the tier-mapping ruling).
       -- `tier_requested` is the tier the router picked PRE-dispatch; `model_used` is the

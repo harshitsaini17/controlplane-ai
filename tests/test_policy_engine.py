@@ -816,3 +816,115 @@ def test_input_rescan_failure_means_the_request_is_never_dispatched() -> None:
     assert outcome.promoted_to_escalate is True
     assert outcome.dispatch is False
     assert outcome.text is None
+
+
+# --------------------------------------------------------------------------
+# ADR-027 — a detector fault is an operational event, not a content risk
+# --------------------------------------------------------------------------
+
+
+def test_adr027_failure_record_is_not_a_signal_and_carries_no_content_surface() -> None:
+    """ADR-027: no span, no plane, no label — so there is nothing that could leak.
+
+    The point of the ruling is structural, so the test is structural: the record must
+    not have grown the fields that would make it a content-risk object, because that
+    is what would put it back in the closed 04 §1.1 taxonomy it was excluded from.
+    """
+    record = DetectorFailureRecord(detector="tier1_pii", error_class="DetectorTimeout")
+    assert not isinstance(record, Signal)
+    for forbidden in ("span", "planes", "labels", "score", "text", "evidence"):
+        assert not hasattr(record, forbidden), forbidden
+
+
+def test_adr027_record_mints_identity_without_making_the_engine_impure() -> None:
+    """ADR-027: `failure_id`/`ts` are minted at construction, as `Signal.signal_id` is.
+
+    Determinism (FR-POL-001) is a property of `evaluate()`, not of the inputs: two
+    records for the same fault differ in id, yet must produce identical verdicts. That
+    is the actual guarantee, so it is what gets asserted — not merely that the fields
+    exist.
+    """
+    policy = ALL_POLICIES["finance_advisor.yaml"]
+    first = DetectorFailureRecord(detector="tier1_pii", error_class="DetectorTimeout")
+    second = DetectorFailureRecord(detector="tier1_pii", error_class="DetectorTimeout")
+    assert first.failure_id != second.failure_id
+    assert first.ts and first.failure_id
+    assert evaluate([], policy, failures=[first]).action is (
+        evaluate([], policy, failures=[second]).action
+    )
+
+
+def test_adr027_fail_closed_is_an_escalate_floor_not_an_override() -> None:
+    """ADR-027 item 1: the record forces an ESCALATE *floor* on the unit's verdict.
+
+    A floor and an override differ exactly where a real content BLOCK is present: an
+    override would *downgrade* it to ESCALATE, quietly releasing something the policy
+    blocked. The 04 §4.2 severity order is what makes the floor correct, so both
+    directions are asserted.
+    """
+    policy = ALL_POLICIES["finance_advisor.yaml"]
+    assert policy.fail_mode.tier1 is FailMode.FAIL_CLOSED
+    record = DetectorFailureRecord(detector="tier1_pii", error_class="DetectorTimeout")
+
+    # Floor: a PASS-only unit is lifted to ESCALATE.
+    assert evaluate([], policy, failures=[record]).action is Action.ESCALATE
+
+    # Not an override: a blocking signal still wins.
+    blocking = Signal(
+        detector="tier2_injection",
+        planes=[Plane.RESPONSIBILITY],
+        labels=["security.prompt_injection"],
+        score=0.97,
+        score_kind=ScoreKind.DETECTION,
+        span=None,
+        stage=Stage.INPUT,
+        evidence="injection classifier probability",
+        latency_ms=18.0,
+    )
+    assert policy.action_for("security.prompt_injection") is Action.BLOCK
+    assert evaluate([blocking], policy, failures=[record]).action is Action.BLOCK
+
+
+def test_adr027_escalate_with_no_content_signals_is_self_explaining() -> None:
+    """ADR-027 item 2: the step-5 stamp names signal_ids *and* failure_record_ids.
+
+    This is the case the ruling exists for: an ESCALATE whose `contributing_signal_ids`
+    is empty is otherwise an unexplained quarantine. With the failure ids stamped, a
+    reviewer can tell a detector outage from a content decision without re-running.
+    """
+    policy = ALL_POLICIES["finance_advisor.yaml"]
+    record = DetectorFailureRecord(detector="tier1_pii", error_class="DetectorTimeout")
+    verdict = evaluate([], policy, failures=[record])
+
+    assert verdict.action is Action.ESCALATE
+    assert verdict.contributing_signal_ids == ()
+    assert verdict.failure_record_ids == (record.failure_id,)
+
+
+def test_adr027_fail_open_failure_is_recorded_but_does_not_contribute() -> None:
+    """A fail_open fault is audited (05 §5) yet stamps no id: it decided nothing."""
+    policy = ALL_POLICIES["support_bot.yaml"]
+    assert policy.fail_mode.tier2 is FailMode.FAIL_OPEN
+    record = DetectorFailureRecord(detector="tier2_toxicity", error_class="DetectorError")
+    verdict = evaluate([], policy, failures=[record])
+
+    assert verdict.action is Action.PASS
+    assert verdict.failure_record_ids == ()
+    assert len(verdict.failure_outcomes) == 1
+
+
+def test_adr027_audit_entry_has_the_documented_shape_and_no_content() -> None:
+    """05 §3/§4: `detector_failures_json` elements carry exactly the six ruled keys."""
+    policy = ALL_POLICIES["finance_advisor.yaml"]
+    record = DetectorFailureRecord(
+        detector="tier1_pii", error_class="DetectorTimeout", stage=Stage.INPUT
+    )
+    entry = resolve_failure(record, policy).audit_entry()
+
+    assert set(entry) == {
+        "failure_id", "detector", "error_class", "stage", "fail_mode_applied", "ts",
+    }
+    assert entry["fail_mode_applied"] == "fail_closed"
+    assert entry["stage"] == "input"
+    assert entry["failure_id"] == record.failure_id
+    assert all(isinstance(v, str) for v in entry.values())

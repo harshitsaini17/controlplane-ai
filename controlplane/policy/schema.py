@@ -81,9 +81,17 @@ EDIT_ELIGIBLE_LABELS: frozenset[str] = frozenset(
     label for label in TAXONOMY if label.startswith(("pii.", "hallucination."))
 )
 
-#: Synthesized on detector timeout/error (04 §5). Resolution is governed by the
-#: policy `fail_mode` for the detector's class, NOT by the `actions` map, so it is
-#: rejected as an action key to keep the two mechanisms unambiguous.
+#: **Not a label that exists** — deliberately absent from `TAXONOMY`, and never emitted
+#: (ADR-027: a detector fault is an operational event carried by `DetectorFailureRecord`,
+#: not a content risk carried by a `Signal`).
+#:
+#: It survives here as a **rejected action key**, and ADR-027 makes that rejection more
+#: correct rather than obsolete: faults are resolved by the policy `fail_mode` for the
+#: detector's class, never by the `actions` map, so a policy mapping this key would be
+#: asserting the opposite of the ruling. 04 §5 described it as a synthesized *label* for
+#: this project's whole history before ADR-027, so a reader of any earlier revision may
+#: still reach for it — the guard is what turns that into a load error naming `fail_mode`
+#: instead of a silently dead mapping.
 DETECTOR_FAILURE_LABEL = "_meta.detector_failure"
 
 

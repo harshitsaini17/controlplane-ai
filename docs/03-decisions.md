@@ -461,6 +461,61 @@ figure-identity proof committed as `reports/eval_report_prose_fix.diff`.
 **Docs touched:** this ADR, `eval/run_all.py` (note text only), `docs/08` (ledger entry + prose-fix
 log), README claims rows citing the corrected report.
 
+## ADR-027 — A detector fault is an operational event, not a content risk (resolves D5-detector-failure-signal-is-unconstructible)
+
+**Context.** 04 §5 instructed the gateway to "synthesize" a signal carrying
+`labels: ["_meta.detector_failure"]` on `DetectorTimeout`/`DetectorError`. `Signal` validates
+its labels against the **closed** §1.1 taxonomy, which contains no `_meta.*` entry — so the
+object §5 required was literally unconstructible. Implementing the failure path surfaced the
+contradiction as a MAJOR deviation rather than a coding obstacle: two settled contracts
+disagreed, and either could have been the one to bend.
+
+**Ruling — Option B: the taxonomy stays closed and §5's wording is corrected.** A detector
+fault is an **operational** event, not a content risk. It has **no span**, belongs to **no
+plane**, is **not detector-emitted**, and is **not policy-mapped** — `fail_mode` governs it,
+per detector class. It therefore does not belong in the §1.1 taxonomy at all, and `Signal` is
+right to refuse it. The gateway synthesizes a distinct type instead:
+
+```
+DetectorFailureRecord {failure_id, detector, error_class, stage, fail_mode_applied, ts}
+```
+
+Four normative consequences:
+
+1. **04 §5 rewritten.** Resolution semantics are **unchanged**: `fail_open` → proceed, record,
+   increment `cp_detector_failures_total{detector,fail_mode}`; `fail_closed` → the record forces
+   an **ESCALATE floor** on the unit's verdict, never a silent BLOCK.
+2. **Audit representation (05 §3/§4).** `signals_json` stays **pure Signals**; a new
+   `detector_failures_json` column carries the records. The §4.3 step-5 stamp extends to
+   "contributing signal_ids **+ failure_record_ids**", so an ESCALATE with zero content signals
+   is self-explaining in the audit.
+3. **Review-queue visibility (05 §2).** An escalation caused by a failure record must be
+   distinguishable from one caused by content when listed via the admin API: the reviewer sees
+   "detector X failed under fail_closed", not a bare quarantine.
+4. **The 06 §5 fault-injection harness reads `detector_failures_json`.**
+
+**Rationale, for the record.** The alternative — widening §1.1 with an `_meta.*` namespace —
+would have bought the same audit trail at the cost of making the taxonomy no longer a taxonomy
+*of content risk*. Every downstream consumer that iterates labels (the label→action map, the
+plane partition, the span logic, the dataset's `labels_expected`) would then have had to learn
+that one family of labels means "nothing was found; something broke", and each of those is a
+place the distinction could be forgotten. Keeping the two kinds of event in two types makes the
+distinction structural instead of remembered.
+
+**"Floor" is load-bearing.** A floor lifts a PASS or EDIT to ESCALATE but leaves a genuine
+content BLOCK standing, because §4.2 severity ranks BLOCK above ESCALATE. An *override* would
+have downgraded that BLOCK — releasing, on the strength of a detector outage, something the
+policy had blocked. The existing convergence already implements the floor; no new logic was
+introduced, which is what "resolution semantics unchanged" means in practice.
+
+**Trade-off accepted.** Two shapes now flow out of the detection stage instead of one, so the
+audit writer, the fault-injection harness and the review queue each handle both. That is a real
+cost, paid to keep `signals_json` a set of content findings that a reader can trust without
+filtering, and to keep an operational outage from ever being presentable as a policy violation.
+
+**Docs touched:** this ADR, 04 §4.3 (step-5 stamp) and §5 (rewritten), 05 §2/§3/§4,
+06 §5, `controlplane/policy/engine.py`, `docs/08` (D5 closed, M-3 logged).
+
 ## Minor resolutions log (review findings 6–8 — doc edits, no ADR needed)
 
 - **F6:** Cost plane gets a live enforcement moment — demo beat 7b added (budget-exhaustion BLOCK, SC-2 now covered live).

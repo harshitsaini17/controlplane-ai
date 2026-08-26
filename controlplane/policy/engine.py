@@ -18,7 +18,9 @@ the *explanation* is stable too, not merely the verdict.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from controlplane.detectors.base import (
     ENRICHED_LABELS_KEY,
@@ -99,28 +101,37 @@ def fail_class_for(detector: str) -> str:
 
 @dataclass(frozen=True)
 class DetectorFailureRecord:
-    """One detector fault awaiting `fail_mode` resolution (04 §5).
+    """One detector fault awaiting `fail_mode` resolution (04 §5, ADR-027).
 
-    **Deliberately not a `Signal`, and this is a filed deviation, not a shortcut.**
-    04 §5 says the gateway "synthesizes" a signal carrying
-    `labels: ["_meta.detector_failure"]`, but `Signal` validates its labels against
-    the closed 04 §1.1 taxonomy, which does not contain `_meta.detector_failure` —
-    so that object is literally unconstructible. See
-    `[D5-detector-failure-signal-is-unconstructible]` in `docs/08`.
-
-    The engine's failure LOGIC is representation-agnostic, so it is implemented
-    here and the contradiction is reported rather than resolved: whichever way the
-    ruling goes (widen the taxonomy, or amend §5's wording), `evaluate()` keeps the
-    same signature and `resolve_failures` keeps the same behaviour. Only the type of
-    the thing handed in changes.
+    **Deliberately not a `Signal` — and per ADR-027 that is now the contract, not a
+    workaround.** A detector fault is an *operational* event, not a content risk: it
+    has no span, belongs to no plane, is not emitted by a detector, and is not
+    mapped by the label->action table (`fail_mode` governs it, per detector class).
+    It therefore does not belong in the closed 04 §1.1 taxonomy, and `Signal` is
+    right to refuse it. `signals_json` stays pure Signals; these records travel in
+    `detector_failures_json` (05 §3).
 
     `error_class` is a class NAME, never an exception instance or message: an
     upstream traceback can quote the very content being checked (NFR-SEC-001), which
     is the same reason `run_with_budget` refuses to interpolate the exception.
+
+    `failure_id` and `ts` are minted **at construction by the gateway**, exactly as
+    `Signal.signal_id` is, and neither ever reaches the verdict computation — so
+    `evaluate()` stays the pure function FR-POL-001 requires. They exist to make an
+    ESCALATE with zero content signals self-explaining in the audit (05 §4).
+
+    ADR-027 names `fail_mode_applied` as part of the recorded shape; it is not a
+    field here because it is a property of the *resolution*, unknowable at fault
+    time. `FailureOutcome.audit_entry()` emits it, so the documented six-key shape
+    exists at the audit boundary where the ruling places it. Logged as M-3 in
+    `docs/08-open-questions.md`.
     """
 
     detector: str
     error_class: str
+    stage: Stage = Stage.OUTPUT_FULL
+    failure_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    ts: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def fail_class(self) -> str:
         return fail_class_for(self.detector)
@@ -172,6 +183,30 @@ class FailureOutcome:
     fail_class: str
     fail_mode: FailMode
     action: Action | None  # None == fail_open: proceed, audit only
+    failure_id: str = ""
+    stage: Stage = Stage.OUTPUT_FULL
+    ts: str = ""
+
+    def audit_entry(self) -> dict[str, str]:
+        """The `detector_failures_json` element for this fault (05 §3/§4, ADR-027).
+
+        This is where `fail_mode_applied` becomes a recorded fact. It is emitted here
+        rather than stored on `DetectorFailureRecord` because the mode applied is a
+        property of the resolution, not of the fault: at fault time no policy has been
+        consulted yet, so a field there could only ever hold a placeholder.
+
+        Carries no span, no plane, no label and no text — a fault is an operational
+        event, and there is nothing about it that could leak checked content
+        (NFR-SEC-001). `error_class` is a class name by construction.
+        """
+        return {
+            "failure_id": self.failure_id,
+            "detector": self.detector,
+            "error_class": self.error_class,
+            "stage": self.stage.value,
+            "fail_mode_applied": self.fail_mode.value,
+            "ts": self.ts,
+        }
 
 
 @dataclass(frozen=True)
@@ -213,6 +248,21 @@ class Verdict:
         return tuple(
             outcome.signal_id
             for outcome in self.signal_outcomes
+            if outcome.action is self.action
+        )
+
+    @property
+    def failure_record_ids(self) -> tuple[str, ...]:
+        """Failure records whose resolved action equals the verdict (05 §4, ADR-027).
+
+        The companion to `contributing_signal_ids`, and the reason the 04 §4.3 step-5
+        stamp names both: an ESCALATE with an empty `contributing_signal_ids` and one
+        entry here is a detector outage under `fail_closed`, not an unexplained
+        quarantine. A reviewer can tell those apart without re-running anything.
+        """
+        return tuple(
+            outcome.failure_id
+            for outcome in self.failure_outcomes
             if outcome.action is self.action
         )
 
@@ -443,4 +493,7 @@ def resolve_failure(record: DetectorFailureRecord, policy: Policy) -> FailureOut
         fail_class=fail_class,
         fail_mode=mode,
         action=action,
+        failure_id=record.failure_id,
+        stage=record.stage,
+        ts=record.ts,
     )

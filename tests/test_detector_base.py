@@ -417,7 +417,7 @@ def test_detector_failure_is_not_double_wrapped() -> None:
 
 
 def test_cancellation_is_not_treated_as_a_detector_fault() -> None:
-    """Cooperative cancellation must not synthesize a _meta.detector_failure signal."""
+    """Cooperative cancellation must not become a `DetectorFailureRecord` (04 §5)."""
 
     class Cancelled:
         name = "tier1_pii"

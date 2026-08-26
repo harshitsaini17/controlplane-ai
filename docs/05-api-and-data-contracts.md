@@ -37,11 +37,24 @@ Error body: `{error:{code, message, request_id}}`. Never include prompt/response
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /admin/review?status=pending` | list review items (quarantined responses; PII spans pre-redacted in the *listing view*) |
+| `GET /admin/review?status=pending` | list review items (quarantined responses; PII spans pre-redacted in the *listing view*); each item carries `escalation_cause` per ADR-027 — see below |
 | `POST /admin/review/{review_id}` body `{decision: approve|reject, note}` | HITL override (FR-AUD-002); approve releases stored response via `GET /admin/review/{id}/released` |
 | `POST /admin/policies/reload` | hot-reload YAML (FR-CFG-002); returns loaded versions |
 | `GET /admin/policies` | active policies + versions |
 | `GET /metrics` | metrics snapshot JSON (dashboard + doc-07 reveals read this) |
+
+**An escalation caused by a detector fault is labelled as one (ADR-027).** Every listed review
+item carries `escalation_cause ∈ {content, detector_failure, both}`, plus
+`failure_summary: [{detector, error_class, fail_mode_applied}]` when a fault contributed. A
+reviewer opening the queue sees "detector `tier2_toxicity` failed under fail_closed" rather than
+a bare quarantine, which is the difference between a decision they can action and one they must
+reverse-engineer.
+
+The field is **derived, not stored**: it is computed from the referenced
+`audit_records.detector_failures_json` and the step-5 stamp (§4 `contributing_signal_ids` /
+`failure_record_ids`), so there is one source of truth for why a verdict happened. `both` is a
+real case — a content signal and a fault can escalate the same unit — and is reported as `both`
+rather than collapsed to either side.
 
 ## 3. SQLite schema (ADR-006; WAL mode; append-only semantics for audit)
 
@@ -50,7 +63,12 @@ CREATE TABLE audit_records (
   request_id TEXT PRIMARY KEY, ts_utc TEXT, use_case TEXT, policy_version INTEGER,
   conversation_id TEXT NULL, stage_summary TEXT,          -- input|streamed|completed
   verdict TEXT CHECK(verdict IN ('pass','edit','block','escalate')),
-  signals_json TEXT,            -- list[Signal] per 04 §1 (evidence fields only — no raw PII)
+  signals_json TEXT,            -- list[Signal] per 04 §1 (evidence fields only — no raw PII).
+                                -- PURE Signals: a detector fault is never one (ADR-027)
+  detector_failures_json TEXT,  -- list[DetectorFailureRecord] per 04 §5 (ADR-027):
+                                -- {failure_id, detector, error_class, stage,
+                                --  fail_mode_applied, ts}. Operational events, not
+                                -- content risks: no span, no plane, no label, no text
   actions_json TEXT,            -- transforms applied, spans, fallback used. Input-stage
                                 -- redaction (ADR-020) records its stage, spans and
                                 -- categories here — never the values (NFR-SEC-001)
@@ -80,6 +98,13 @@ CREATE TABLE cost_ledger (
   use_case TEXT, month TEXT, spent_usd REAL, PRIMARY KEY (use_case, month)
 );
 ```
+**Why both id lists are stamped (ADR-027).** An ESCALATE whose `contributing_signal_ids` is
+empty and whose `failure_record_ids` has one entry is a detector outage under `fail_closed` —
+not an unexplained quarantine. Without the second list, that record and a content escalation are
+indistinguishable after the fact, and the reviewer has no way to tell which one they are looking
+at. `detector_failures_json` is populated on **fail_open** too: a dropped detector that left no
+trace is indistinguishable from one that ran and found nothing.
+
 Rule: nothing outside `review_items.quarantined_text` ever stores model output verbatim, and that column is written **post-masking** of Tier-1 PII spans (NFR-SEC-001).
 
 **Input EDIT leaves an audit trail, not a rewritten history (ADR-020).** Pre-dispatch
@@ -97,6 +122,10 @@ The proposal/README show this shape (assembled from `audit_records`):
   "verdict": "escalate",
   "signals": [{"detector":"fast_consistency","labels":["hallucination.low_confidence"],
                "score":0.41,"stage":"output_full","latency_ms":38.2}],
+  "detector_failures": [{"failure_id":"…","detector":"tier2_toxicity",
+                         "error_class":"DetectorTimeout","stage":"output_full",
+                         "fail_mode_applied":"fail_closed","ts":"…"}],
+  "contributing_signal_ids": ["…"], "failure_record_ids": ["…"],
   "actions": {"quarantined": true, "review_id":"…",
               "input_redactions": [{"stage":"input","category":"pii.ssn",
                                     "span":{"start":42,"end":53}}]},

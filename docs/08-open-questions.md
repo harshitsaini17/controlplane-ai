@@ -64,16 +64,24 @@ slugs lived scattered across doc prose, YAML comments, docstrings and test notes
 | `[D2-nanp-n-constraint-rejects-nothing-as-composed]` | **MAJOR** | ADR-026 impl | **CLOSED** — ruled: keep the composition, correct the description (ADR-026 Amendment 1). v1's `_PHONE` is deliberately retained and shadows both NANP rows, which therefore add **zero recall**; the whole v2 phone gain is E.164 + the spaced-parenthesis variant. Narrowing `_PHONE` would break v2's superset property and orphan the permanent v1 baseline. Precision hardening → **SL-2** |
 | `[D2-adr-026-eyj-derivation-is-arithmetically-wrong]` | MINOR | ADR-026 impl | **CLOSED** — correction ratified (the error was the adjudicator's). ADR-026 carries a dated Correction block **preserving the original false claim verbatim** before refuting it with the arithmetic. The test pair asserting the false literal *as false* is retained as the artifact |
 | `[D2-report-emits-a-q18-publication-gate-adr-025-lifted]` | **MAJOR** | ADR-026 §5 run | **CLOSED** — ruled by **ADR-026 Amendment 2**: the §5 no-touch rule binds measurement-affecting code, not presentation prose, subject to four conditions. Note corrected; figure identity **PROVEN** and committed as `reports/eval_report_prose_fix.diff`. Logged under *Prose-fix log* below (clause (d)) |
-| `[D5-detector-failure-signal-is-unconstructible]` | **MAJOR** | Phase 3 | **OPEN** — 04 §5 prescribes synthesizing a signal whose label the closed 04 §1.1 taxonomy rejects, so `Signal` refuses to construct it. Implemented around (`DetectorFailureRecord`) without deciding; the audit-record consequence is undecided |
+| `[D5-detector-failure-signal-is-unconstructible]` | **MAJOR** | Phase 3 | **CLOSED** — ruled by **ADR-027**, Option B: a detector fault is an **operational event, not a content risk** (no span, no plane, not detector-emitted, not policy-mapped), so the closed 04 §1.1 taxonomy is right to reject it and `Signal` is right to refuse to construct it. 04 §5 rewritten around `DetectorFailureRecord`; `detector_failures_json` added to 05 §3/§4; the §4.3 step-5 stamp now names contributing signal_ids **+ failure_record_ids**; review-queue `escalation_cause` added to 05 §2; 06 §5 reads the new field. Resolution semantics unchanged — `fail_closed` is an **ESCALATE floor**, never an override, so a genuine content BLOCK still wins |
 
-**Open: one** — `[D5-detector-failure-signal-is-unconstructible]`, filed in Phase 3 and awaiting
-a ruling. The other seven are ruled and closed: the four Step-4/ADR-impl findings, the
-`detector_params` schema mismatch, and the report-prose gate found after the re-measurement.
-**Three of those seven were found by writing the ADR-026 spec-derived tests**, which is the
+**Open: zero.** All 14 filed deviations are ruled and closed; D5 was the last, closed by
+**ADR-027** at the start of Phase 4. The eight filed from Step 4 onward account as: **two**
+measured-accuracy findings (D3, D8), **four** found while implementing the ADRs
+(`detector_params`, the `per` citation marker, the NANP constraint, the `eyJ` derivation),
+**one** report-prose gate found after the re-measurement, and **D5**.
+**Three of those eight were found by writing the ADR-026 spec-derived tests**, which is the
 outcome that discipline exists to produce: tests authored from the specifications rather than
 from the fixtures caught two defects in the ruled specs themselves and one in the implementer's
-reading of them, *before* any number was computed. The eighth was found the same way — by
-implementing 04 §5 literally and discovering the object it describes cannot exist.
+reading of them, *before* any number was computed. D5 was found the same way — by implementing
+04 §5 literally and discovering the object it describes cannot exist.
+
+⚠ **Zero open deviations is not zero open questions.** Six *questions* remain OPEN above —
+**Q-01, Q-05, Q-06, Q-07, Q-08, Q-10** — and the two counts are deliberately kept apart: a
+deviation is a contradiction awaiting a ruling, a question is a decision not yet needed.
+Reporting "nothing open" would conflate them. (The *gaps* left behind by closures are the
+separate register below.)
 
 **"Open: zero" means zero undecided, not nothing missing.** Two of those closures leave real gaps
 behind — a decided gap is still a gap. Every such item is carried permanently in the **Standing
@@ -86,15 +94,26 @@ fallback and 2nd-sample duty unassigned, **SL-4**) and the Groq price-provenance
 **Q-18's publication gate is lifted** — ADR-025 made the citation-marker list normative in
 04 §2.4.2, so a `numeric_claims` figure may now be published if labelled v1 or v2 (06 §3.2).
 
-### MINOR resolutions — Phase 3 (logged, not escalated)
+### MINOR resolutions (logged, not escalated)
 
-Per the lightened Phase-3 protocol (AGENTS.md §11): a gap with one obvious low-risk answer is
-resolved in place and logged here, so "Open: one" stays an honest count rather than a low one.
+Per the lightened protocol (AGENTS.md §11.1): a gap with one obvious low-risk answer is resolved
+in place and logged here, so the open-deviation count above stays an *honest* count rather than
+merely a low one. Sectioned by phase, because the lightened protocol is itself phase-scoped.
+
+**Phase 3**
 
 | # | Gap | Resolution | Why it is not a deviation |
 |---|---|---|---|
 | M-1 | 04 §3 defines `fail_mode` per detector **class** (`tier1`/`tier2`/`performance`/`cost`), but no doc maps each 04 §2 detector *to* its class, so `resolve_failure` had nothing to look up | `DETECTOR_FAIL_CLASS` in `controlplane/policy/engine.py`, transcribed from the 04 §2 registry rows. `entity_enricher` is deliberately **absent** (04 §2.2 makes enrichment failure skip-and-log, never blocking) and `fail_class_for()` **raises** on an unmapped detector rather than defaulting | The mapping is mechanical from the registry — every detector's class is unambiguous from its own §2 row. Refusing to invent a mode for an unmapped name is what keeps a future detector from silently inheriting `fail_open`. Pinned by `test_fail_class_covers_every_registry_detector_except_the_enricher` |
 | M-2 | 04 §6 renders redactions as `[REDACTED:<category>]` (bare category, e.g. `email`) while 05 §4 records `category: "pii.ssn"` (full label) in `actions_json` | `AppliedEdit` carries **both**: `category` (bare, for the 04 §6 marker and the 07 beat-4 rendering) and `label` (full, for the 05 §4 audit field). Neither doc bends | Two consumers legitimately want different granularity; the only wrong answer was picking one and making the other doc inaccurate. Neither field ever holds the removed value (NFR-SEC-001), pinned by `test_applied_edit_records_category_and_span_but_never_the_value` |
+
+**Phase 4** — both arise from ADR-027, and both are questions of *where* a ruled field lives,
+not whether it exists.
+
+| # | Gap | Resolution | Why it is not a deviation |
+|---|---|---|---|
+| M-3 | ADR-027 names `fail_mode_applied` as part of the `DetectorFailureRecord` shape, but the mode applied is unknowable at fault time — no policy has been consulted when the gateway synthesizes the record | The field is emitted by **`FailureOutcome.audit_entry()`**, at resolution, so the documented six-key shape (`failure_id, detector, error_class, stage, fail_mode_applied, ts`) exists at the **audit boundary** where 05 §3/§4 consumes it. `DetectorFailureRecord` carries the five facts known at fault time | Placement, not content: every ruled key reaches `detector_failures_json` exactly as ADR-027 specifies. Storing it on the record could only have held a placeholder until resolution overwrote it — a field whose value is a lie for part of its life. Pinned by `test_adr027_audit_entry_has_the_documented_shape_and_no_content` |
+| M-4 | `failure_id`/`ts` are minted by the record, yet FR-POL-001 requires `evaluate()` to be a pure function of (signals, policy) with no clock and no randomness | Minted **at construction by the gateway**, exactly as `Signal.signal_id` already is (`default_factory`), and never read by the verdict computation | Determinism is a property of `evaluate()`, not of its inputs. Pinned by `test_adr027_record_mints_identity_without_making_the_engine_impure`, which asserts the guarantee that matters — two records for the same fault differ in id and yield identical verdicts — rather than merely that the fields exist |
 
 **Flagged, not fixed** (AGENTS.md §11, one line): `SPAN_LESS_LABELS` in `eval/validate_dataset.py`
 contains `cost.runaway_loop`, which is **not in the taxonomy** — the real label is

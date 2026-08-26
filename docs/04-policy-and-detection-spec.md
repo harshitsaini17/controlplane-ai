@@ -333,7 +333,8 @@ All fast-path signals for the current unit (input stage, or one output sentence 
    over the whole sentence when the signal is stage=output_sentence without a span;
    if an edit-mapped signal lacks a span AND is not stage=output_sentence
    → promote that signal to ESCALATE (safe upgrade — no editable extent; ADR-015).
-5. Stamp: verdict, contributing signal_ids, policy_version → audit.
+5. Stamp: verdict, contributing signal_ids **+ failure_record_ids** (ADR-027),
+   policy_version → audit.
 ```
 
 ### 4.4 Streaming interaction
@@ -354,14 +355,31 @@ This supersedes the v1 ban, which was unenforceable as written: it claimed schem
 
 ## 5. Failure semantics (fail-open / fail-closed) — FR-POL-006
 
-On `DetectorTimeout`/`DetectorError`, the gateway synthesizes:
+On `DetectorTimeout`/`DetectorError` the gateway synthesizes a **`DetectorFailureRecord`** —
+a distinct type, **never a `Signal`** (ADR-027):
 ```
-labels: ["_meta.detector_failure"], meta: {detector, error_class}
+{failure_id, detector, error_class, stage, fail_mode_applied, ts}
 ```
-Resolution by policy `fail_mode` for that detector's class:
-- **fail_open** → log + metric `detector_failures_total`; proceed without that detector's signals.
-- **fail_closed** → synthesized signal maps to ESCALATE (never silent BLOCK — a human sees why).
-Changing any fail_mode is a policy-version change; changing the *mechanism* is AGENTS.md D7.
+A detector fault is an **operational event, not a content risk**: no span, no plane, not
+detector-emitted, and not mapped by the label→action table — `fail_mode` governs it, per
+detector class. It therefore has no place in the closed §1.1 taxonomy, and `Signal` is right to
+refuse it. `error_class` is a class **name**, never an exception instance or message: a
+traceback can quote the very content under check (NFR-SEC-001). `fail_mode_applied` is filled
+at resolution — it is a property of the decision, not of the fault, and is unknowable at fault
+time.
+
+Resolution by policy `fail_mode` for that detector's class — **semantics unchanged**:
+- **fail_open** → proceed without that detector's signals; record the fault and increment
+  `cp_detector_failures_total{detector,fail_mode}` (05 §5). Never silent: a dropped detector
+  that left no trace is indistinguishable from one that ran and found nothing.
+- **fail_closed** → the record forces an **ESCALATE floor** on the unit's verdict (never a
+  silent BLOCK — a human sees why). A *floor*, not an override: §4.2 severity still lets a
+  genuine content BLOCK win, so failure handling can never downgrade a block into a release.
+
+Records travel in `detector_failures_json`, never `signals_json` (05 §3/§4), and the §4.3
+step-5 stamp names contributing signal_ids **and** failure_record_ids — so an ESCALATE with
+zero content signals is self-explaining rather than a bare quarantine. Changing any fail_mode
+is a policy-version change; changing the *mechanism* is AGENTS.md D7.
 
 ## 6. EDIT transformations
 

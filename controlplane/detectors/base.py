@@ -117,9 +117,11 @@ class Stage(str, Enum):
 
 
 class DetectorFailure(Exception):
-    """Base for detector faults. 04 §5 turns either subclass into a synthesized
-    `_meta.detector_failure` signal, whose resolution is the policy's `fail_mode`
-    for that detector's class — never a decision made here."""
+    """Base for detector faults. 04 §5 turns either subclass into a
+    `DetectorFailureRecord` — a distinct type, **never a `Signal`** (ADR-027: a fault is
+    an operational event, not a content risk, so it has no place in the closed §1.1
+    taxonomy). Its resolution is the policy's `fail_mode` for that detector's class —
+    never a decision made here."""
 
     def __init__(self, detector: str, message: str = "") -> None:
         self.detector = detector
@@ -127,7 +129,11 @@ class DetectorFailure(Exception):
 
     @property
     def error_class(self) -> str:
-        """Value for `meta.error_class` in the synthesized signal (04 §5)."""
+        """Value for `DetectorFailureRecord.error_class` (04 §5, ADR-027).
+
+        A class NAME, never the exception message: a traceback can quote the very text
+        under check (NFR-SEC-001).
+        """
         return type(self).__name__
 
 

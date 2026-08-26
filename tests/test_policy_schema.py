@@ -864,7 +864,13 @@ def test_unknown_wildcard_family_rejected(valid_policy_dict: dict[str, Any]) -> 
 def test_detector_failure_label_rejected_as_action_key(
     valid_policy_dict: dict[str, Any],
 ) -> None:
-    """04 §5: detector failure is resolved by `fail_mode`, never by the actions map."""
+    """04 §5: detector failure is resolved by `fail_mode`, never by the actions map.
+
+    **Retained and reinforced by ADR-027, not made obsolete by it.** The ruling holds that
+    a fault is not policy-mapped at all, so a policy mapping this key asserts the opposite
+    of the ruling; and because §5 called it a synthesized *label* until ADR-027, a reader
+    of an earlier revision may still write it. The guard turns that into a load error.
+    """
     valid_policy_dict["actions"]["_meta.detector_failure"] = "block"
     with pytest.raises(ValidationError, match="not a valid action key"):
         Policy(**valid_policy_dict)
