@@ -65,12 +65,17 @@ slugs lived scattered across doc prose, YAML comments, docstrings and test notes
 | `[D2-adr-026-eyj-derivation-is-arithmetically-wrong]` | MINOR | ADR-026 impl | **CLOSED** — correction ratified (the error was the adjudicator's). ADR-026 carries a dated Correction block **preserving the original false claim verbatim** before refuting it with the arithmetic. The test pair asserting the false literal *as false* is retained as the artifact |
 | `[D2-report-emits-a-q18-publication-gate-adr-025-lifted]` | **MAJOR** | ADR-026 §5 run | **CLOSED** — ruled by **ADR-026 Amendment 2**: the §5 no-touch rule binds measurement-affecting code, not presentation prose, subject to four conditions. Note corrected; figure identity **PROVEN** and committed as `reports/eval_report_prose_fix.diff`. Logged under *Prose-fix log* below (clause (d)) |
 | `[D5-detector-failure-signal-is-unconstructible]` | **MAJOR** | Phase 3 | **CLOSED** — ruled by **ADR-027**, Option B: a detector fault is an **operational event, not a content risk** (no span, no plane, not detector-emitted, not policy-mapped), so the closed 04 §1.1 taxonomy is right to reject it and `Signal` is right to refuse to construct it. 04 §5 rewritten around `DetectorFailureRecord`; `detector_failures_json` added to 05 §3/§4; the §4.3 step-5 stamp now names contributing signal_ids **+ failure_record_ids**; review-queue `escalation_cause` added to 05 §2; 06 §5 reads the new field. Resolution semantics unchanged — `fail_closed` is an **ESCALATE floor**, never an override, so a genuine content BLOCK still wins |
+| `[D1-usage-canary-has-no-independent-count-on-the-measured-class]` | **BLOCKER** | Phase 4 | **OPEN** — FR-GW-006's canary compares `count_tokens` against the provider's reported prompt-token count, but `count_tokens` is a **provider endpoint**, present on `kiro-local` (**dev** class → warn) and absent on `groq` (**measured** class → fail boot). The invariant is implementable only where its consequence does not matter. Report below |
 
-**Open: zero.** All 14 filed deviations are ruled and closed; D5 was the last, closed by
-**ADR-027** at the start of Phase 4. The eight filed from Step 4 onward account as: **two**
-measured-accuracy findings (D3, D8), **four** found while implementing the ADRs
-(`detector_params`, the `per` citation marker, the NANP constraint, the `eyJ` derivation),
-**one** report-prose gate found after the re-measurement, and **D5**.
+**Open: one.** Of **15** filed deviations, **14** are ruled and closed and **one is OPEN**:
+`[D1-usage-canary-has-no-independent-count-on-the-measured-class]`, filed in Phase 4 against
+FR-GW-006 (report below). D5 was the last *closure*, by **ADR-027** at the start of Phase 4.
+
+The **eight** filed from Step 4 up to that closure account as: **two** measured-accuracy findings
+(D3, D8), **four** found while implementing the ADRs (`detector_params`, the `per` citation
+marker, the NANP constraint, the `eyJ` derivation), **one** report-prose gate found after the
+re-measurement, and **D5**. The Phase-4 filing is the **ninth** from Step 4 onward and the only
+one still open — 8 closed + 1 open = 9, and 6 pre-Step-4 closures bring the total to 15.
 **Three of those eight were found by writing the ADR-026 spec-derived tests**, which is the
 outcome that discipline exists to produce: tests authored from the specifications rather than
 from the fixtures caught two defects in the ruled specs themselves and one in the implementer's
@@ -390,6 +395,63 @@ Options:
   C) Represent the fault as a `Signal` carrying a real label from the affected detector's own scope — trade-off: rejected on sight; it would be indistinguishable from a genuine detection and is the one option that could produce a fabricated risk figure.
 Recommendation: **B** — the taxonomy's closure is what makes label-derived counts trustworthy, and a fault is a different kind of fact from a finding; the cost is a schema field and two sentences of doc, which is cheaper than teaching every consumer to filter a pseudo-label.
 Blocked work: nothing is blocked *today* — `evaluate()`/`resolve_failure()` implement 04 §5's **semantics** correctly (fail_open proceeds and is recorded; fail_closed escalates and never silently blocks; both unit-tested, including the never-BLOCK guarantee swept across every policy × detector × error class). What waits on the ruling is the **audit representation**: the gateway's `signals_json`/`actions_json` write path for detector faults, and the 06 §5 fault-injection harness that will read it back.
+
+## DEVIATION REPORT [D1-usage-canary-has-no-independent-count-on-the-measured-class]
+Severity: BLOCKER
+Doc & section: 01 §1 FR-GW-006; 05 §6.1 `usage_sanity`; ADR-018 (Context)
+The doc says: at boot, one canary request "compares `count_tokens` against the provider's
+reported prompt-token count. Delta > `usage_sanity.max_token_delta` (default 25) ⇒ the
+provider's accounting is untrustworthy: **measured-class fails boot**, **dev-class warns
+loudly and continues**."
+Reality says: `count_tokens` is **not repo code** — it appears nowhere in the tree, and no
+tokenizer is declared in `pyproject.toml` (02 §8's dependency list does not name one). It is a
+**provider endpoint** (Anthropic-shaped `POST /v1/messages/count_tokens`), which is where
+ADR-018's `14 / 75 / 5074` figures came from. Keyless existence probes — **no credential sent**,
+so 401/403 = "exists, auth-gated" and 404 = absent — run 2026-08-26:
+
+| provider | class | probe | result |
+|---|---|---|---|
+| `kiro-local` | dev | `POST /v1/messages/count_tokens` | **401 — EXISTS** |
+| `groq` | measured | `POST /v1/messages/count_tokens` | **404 — ABSENT** |
+| `groq` | measured | `POST /v1/tokenize` | 404 — ABSENT |
+| `groq` | measured | `POST /v1/messages/count_tokens` (Anthropic path) | 404 — ABSENT |
+| `groq` | measured | `GET /v1/models` *(control)* | 401 — host reachable, auth-gated paths do answer |
+
+The control row is what makes the 404s meaningful rather than a network artifact. So the
+independent count this invariant compares against exists **only on the class whose consequence
+is a warning**, and is **absent on the class whose consequence is boot refusal**. The mechanism
+is implementable exactly where it does not matter and unimplementable where it does.
+Impact if we ignore it: the boot-time guard protecting every judge-facing number (AGENTS.md §7)
+degrades to a no-op on the measured class, so the ~5000-token-offset class of bug ADR-018
+documents would reach a report unchallenged. A canary that always passes **because it cannot
+run** is worse than an absent one — it reads as a green check.
+Options:
+  A) Local tokenizer as the independent source (new dep — `tokenizers`/`transformers` plus the
+     Llama tokenizer; **ADR note required per 02 §8**) — trade-off: a local tokenizer does not
+     model Groq's server-side chat template, so its systematic error competes directly with
+     `max_token_delta: 25`. Too tight and a measured-class provider is refused boot over a
+     template mismatch; too loose and it stops being a check. The error budget is unquantified
+     until measured, so the threshold has no meaning yet.
+  B) Redefine the invariant as a **provider-internal self-consistency** check: one identical
+     canary prompt sent twice, streaming and non-streaming, comparing the provider's *own*
+     reported `prompt_tokens`. Needs no external count and works on every provider — and it is
+     precisely the comparison that would have caught ADR-018's bug (75 streaming vs 5074
+     non-streaming, delta 4999 ≫ 25 ⇒ dev-class warn, exactly FR-GW-006's specified behaviour).
+     Trade-off: a different invariant from the one 01 §1 states, so FR-GW-006 and 05 §6.1 change;
+     it cannot catch an error that is *consistent* across both paths.
+  C) Scope FR-GW-006 to providers exposing a token-count endpoint, and make its absence on a
+     measured-class provider a loud boot **WARNING** naming the provider — trade-off: honest and
+     cheap, but the measured path keeps no automated guard; the protection becomes a Standing
+     Limitation rather than a mechanism.
+Recommendation: **B.** It adds no dependency, applies uniformly to both classes, and is the only
+option demonstrated to catch the exact failure the requirement was written in response to — on
+the two shipped providers it yields the right verdict in both directions (kiro-local warns, a
+consistent provider passes). A's error budget could refuse to boot the measured path, which is
+the one path that produces publishable numbers; C removes the guard precisely where it matters.
+Blocked work: Phase 4 item 5's **canary half only** — provider dispatch itself is unaffected, and
+items 2/3/9 proceed against the stub upstream the latency benchmark needs regardless.
+
+---
 
 ## Resolved
 *(move items here with the ruling + date + ADR link)*
