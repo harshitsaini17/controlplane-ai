@@ -28,6 +28,7 @@ REVIEW_TEXTS = (
     "Reach analyst@exam​ple.test for the file.",
     "The customer supplied 4111,1111,1111,1111 as the card identifier.",
     "The displayed price is $555-0143 for the annual package.",
+    "Use (115) 555-0123 for this independently authored review probe.",
 )
 
 
@@ -129,6 +130,19 @@ def test_phone_shaped_price_remains_a_currency_claim() -> None:
     signals = _run(numeric_claims, _ctx(text))
     assert signals
     assert text[signals[0].span.start : signals[0].span.end] == "$555"
+
+
+def test_invalid_nanp_area_code_fires_via_documented_v1_shadowing() -> None:
+    """ADR-026 Amendment 1 / SL-2: accepted v1-superset behavior.
+
+    The constrained NANP rows reject an NPA beginning with 1, but the retained broader v1
+    phone pattern is evaluated first and shadows them. This is deliberately documented as
+    shipping behavior, not asserted as NANP-valid syntax.
+    """
+    text = REVIEW_TEXTS[9]
+    signals = _run(tier1_pii, _ctx(text))
+    assert [signal.labels for signal in signals] == [["pii.phone"]]
+    assert text[signals[0].span.start : signals[0].span.end] == "(115) 555-0123"
 
 
 @pytest.mark.xfail(strict=True, reason="homoglyph normalization is outside the Tier-1 regex contract")

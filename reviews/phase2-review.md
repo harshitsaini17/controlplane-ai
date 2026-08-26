@@ -256,3 +256,76 @@ The amended 06 §2.3 composition recomputes directly from the files as follows:
 ### Checkpoint 2 gate
 
 **BLOCKED — Phase 2 does not close at `9f4e5b701ce0d439c8c90a95579f546280a3d915`.** Required ADR-025/026 revision artifacts and v2 methodology/report are absent; the Tier-1 recall target remains missed; numeric identifiers remain misclassified; and README metric rows lack their committed report. Re-review a later clean commit after C2-F1 through C2-F4 are resolved.
+
+## Checkpoint 2 (re-review)
+
+**Original implementation baseline spot-confirmed:** `9f4e5b701ce0d439c8c90a95579f546280a3d915`
+**Original reviewer baseline spot-confirmed:** `70eeaa4fdd9da72541595b7a6172f5c29ec31fa8`
+**Reports ruling spot-confirmed:** `44f9a20b37bc1ff594714a22a3788c16fc0cb2d5`
+**Revision implementation reviewed:** `6d37fb07b836c64064995127f720216d7be75090`
+**Ruling implementation reviewed:** `babdd5898ef74b25aff481f8c9d9990c51dc39ba`
+**Held report/harness state reviewed:** `7c8261d7a834c6a1699640efc2f506f5ea5c12ef`
+**Publication-gate prose-fix commit reviewed:** `fbcfcf5935525a71f7fa6f5bc7464c87e5c2fb18`
+**Corrected report, proof, and ledger commit reviewed:** `91045b2315beb82708859881b63be679a29f666c`
+**Review date:** 2026-08-26
+**Scope:** full-effort re-review of the revision/ruling/report chain; edits confined to `reviews/` and `tests/review/`.
+
+### Outcome
+
+The four blocking findings from the original Checkpoint 2 review are resolved. ADR-025/026 now govern the revised implementations, v1 remains reproducible beside v2, the generated report is committed evidence, and the publication-gate prose correction satisfies ADR-026 Amendment 2. The still-missed PII recall target is disclosed as a standing limitation rather than hidden or moved. No blocking finding remains.
+
+Commit topology matters here. `fbcfcf593552` is the separately committed presentation-prose correction required by ADR-026 Amendment 2(a); it is not by itself the four-ruling/re-measurement bundle. The relevant chain is `6d37fb0` (v2 + frozen v1) → `babdd58` (four rulings) → `7c8261d` (dual-column harness/held report state) → `fbcfcf593552` (prose-only correction) → `91045b2` (corrected report, identity proof, README, and ledger closures).
+
+### Revision independence and ADR-026
+
+- **Pattern provenance — PASS.** The v2 international phone pattern is bounded by ITU-T E.164's leading `+` and 15-digit maximum; the new North American rows encode NANP `NPA-NXX-XXXX` and the `N in [2-9]` constraint; JWT detection cites RFC 7519/7515 and the corrected base64 arithmetic; 32/64-character hex strings require a credential cue in their own sentence. No new pattern is fixture-shaped.
+- **`eyJ` correction — PASS.** ADR-026 preserves the original false claim verbatim, refutes it (`base64url('{"') == eyI=`, not `eyJ`), derives the third character from the following byte, and documents the whitespace/non-letter bound. The paired executable check asserts the original literal claim as false and the registered-header-name property as true.
+- **Fixture independence — PASS.** Mechanical exact-string comparison found no strings copied from `eval/dataset/*.jsonl` into the new detector tests. The reviewer-owned `REVIEW_TEXTS` non-overlap assertion now also covers the `(115) 555-0123` ruling probe.
+- **Frozen v1 permanence — PASS.** Independently read both files as bytes and verified that `_v1_numeric_claims.py` and `_v1_tier1_patterns.py` each end with the exact corresponding source bytes from `4b056e869ce4892bbd848d259336f166dfcd5795`; only the explicit DO-NOT-EDIT provenance banner precedes that verbatim suffix.
+- **Dual-column method — PASS.** `reports/eval_report.md` contains v1 and v2 in the same table, including precision, recall, F1, TP, FP, FN, and deltas. `docs/06-evaluation-plan.md` §3.2 and the report both contain the disclosed-revision methodology. v1 is recomputed, not transcribed.
+- **Scope exclusions — PASS.** Both bare 7-digit local numbers and bare 32/64-hex strings without a credential cue are expressly documented as precision-grounded exclusions with known recall cost in ADR-026, 04 §2.5, the report, and README.
+
+### ADR-025 conformance
+
+- **Quantity shapes — PASS.** The implementation and tests cover currency, percent, magnitude words/suffixes, comma-grouped thousands, and attached units. The bare large-digit-run rule is deleted and its absence is asserted.
+- **Identifier pre-filter — PASS.** It is internal to `numeric_claims`, computed before all quantity branches, absolute on overlap, and structurally duplicates identifier shapes without importing, invoking, or consuming signals from `tier1_pii`; Tier-1 coupling is zero.
+- **Q-18 markers — PASS.** The lexical list matches 04 §2.4.2, including all three attribution-only `per` forms: `as per`, determiner form, and capitalized proper-noun form. Rate uses continue to fire. The documented sentence-initial `Per company filings, ...` edge is an executable expected false positive, and the capitalized-unit converse is also pinned.
+- **Config extension — PASS.** `detector_params` accepts scalar or list-of-scalar values in both `DetectorContext` and policy schema tests, preserves scalar types, and still rejects nested mappings.
+
+### Ruling verification
+
+- **NANP shadowing — PASS.** 04 §2.5, ADR-026 Amendment 1, the report, ledger SL-2, and README honestly state that retained v1 `_PHONE` shadows the constrained NANP rows and that those rows add zero recall on this corpus. The reviewer adversarial suite now encodes `(115) 555-0123` firing as expected v1-superset behavior.
+- **Security guard — PASS.** The resurrected `numeric_claims` NFR-SEC-001 test first asserts a non-empty signal list, so its evidence checks cannot pass vacuously after deletion of the bare-number rule. Signal-model and Tier-1 evidence guards remain intact.
+- **Report provenance — PASS.** `reports/eval_report.md` has no `+ uncommitted changes` marker and stamps `fbcfcf593552`, the clean code commit that generated the corrected numbers, as required by 06 §8. The later `91045b2` commit records the artifact and therefore correctly is not the code stamp.
+- **Freeze gate — PASS.** The independent clean-environment validator loaded 280 cases and matched digest prefix `6a3ecbbe75fd020b` at `f162959`. The shortened digest in the re-review request, `6a3ecbe75fd020b`, omits one `b`; repository contract, validator, and committed report consistently use prefix `6a3ecbbe75fd020b`.
+
+### Publication-gate ruling
+
+- **ADR-026 Amendment 2 — PASS.** §5 contains conditions (a)-(d): separate commit, committed figure-identity proof, independent reviewer verification, and ledger logging. `fbcfcf593552` changes only ADR prose and the rendered `note` string; no matching, scoring, dataset, or metric path changes in that commit.
+- **Independent figure identity — PASS.** Reports were regenerated independently from exact archived source states `7c8261d` (held) and `fbcfcf593552` (corrected), using the same frozen dataset and interpreter. All 32 measurement/result table rows were byte-identical, as were the NFR-EVAL-001 values: v2 recall 0.8852 over 61 occurrences and v1 baseline 0.8361. There is no numeric delta. Differences are limited to expected timestamp/commit metadata and the corrected prose.
+- **Publishability note — PASS.** The corrected report states that ADR-025 closed Q-18 and that figures are publishable when labelled v1/v2 under 06 §3.2.
+- **Standing Limitations — PASS.** The register exists with four seeded entries: SL-1 unmet PII recall, SL-2 v1-superset phone behavior, SL-3 secondary-source Groq pricing, and SL-4 no genuinely local fallback model. D3's closure cross-references SL-1.
+- **README residual misses — PASS.** Both the detector discussion and claims-table v2 row state that all 7 residual misses are the documented bare-7-digit exclusion and retain the missed-target disclosure.
+
+### Baseline spot-confirmations
+
+- The original Checkpoint 2 pass-list remains undisturbed: detector signal contract, exact spans/multi-signal behavior, registered NFR-P-002 budgets and timeout path, and NFR-SEC-001 evidence surfaces all remain covered and green.
+- The `44f9a20` reports ruling remains in force: reports are tracked evidence, README citations resolve to committed report headings, dirty reports are non-citable, and the code-commit stamp names the producing code revision.
+- The v2 report preserves the v1 values verbatim in meaning and recomputes them: `tier1_pii` precision 1.000, recall 0.836, F1 0.911, TP/FP/FN 51/0/10; `numeric_claims` precision 0.267, recall 0.750, F1 0.393, TP/FP/FN 12/33/4.
+
+### Clean-environment validation
+
+- Fresh `/tmp` Python 3.14 virtual environment installed the pinned `.[dev]` dependencies from `pyproject.toml`.
+- `python -m eval.validate_dataset --freeze`: PASS, 280 cases, digest prefix `6a3ecbbe75fd020b`.
+- Full suite: **464 passed, 2 expected xfailed, 1 skipped** out of 467 collected; no failures or flaky reruns. The skip is the git-history suffix test because the archived clean source intentionally has no `.git`; its exact invariant was independently verified against `4b056e8` in the real checkout.
+- Reviewer adversarial file: **9 passed, 2 expected xfailed**. The retained xfails are the documented full-width-at-sign and zero-width email evasions. The comma-grouped-card observation legitimately flipped from xfail under v1 to a live passing v2 regression assertion, with the reason recorded in its docstring.
+
+### Ledger and gate
+
+The deviation ledger closes D3, D8, and all four ruling slugs (`D2-detector-params-cannot-hold-list-values`, `D1-citation-marker-per-matches-the-rate-preposition`, `D2-nanp-n-constraint-rejects-nothing-as-composed`, and `D2-adr-026-eyj-derivation-is-arithmetically-wrong`) against ADR-025/026. It also closes the later report-note slug against ADR-026 Amendment 2. ADR numbering runs continuously from 001 through 026 with no holes.
+
+**Open deviations: 0.** The four Standing Limitations remain visible but are decided/unmet constraints, not open deviations.
+
+### Checkpoint 2 (re-review) gate
+
+**PASS (Phase 2 closes).** No blocking findings. The detector revision is spec-derived and disclosed, v1 remains reproducible beside v2, ADR-025/026 rulings are implemented and tested, the single corrected re-measurement is clean and figure-identical to the held state, the publication-gate amendment is satisfied, and all deviations are closed without moving the missed NFR target.
