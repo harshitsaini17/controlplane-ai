@@ -7,6 +7,14 @@ source and re-run the renderer; never hand-edit an SVG.
 docs/diagrams/render.sh          # all 10 diagrams -> images/*.svg + images/*.png
 ```
 
+**Two diagrams intentionally have no tracked render**: `07-cascade-mechanics` and
+`10-audit-data-model`. Their sources were updated for the ADR-018 tier/model split and the
+ADR-027 Amendment 1 columns, and the previous renders named the retired `model_requested`
+column. A tracked render showing a retired schema is worse than no render — a reader trusts
+the picture over the DDL — so the renders were deleted rather than regenerated. Regeneration
+happens once, at submission packaging, if at all. Absence here is a decision, not an
+oversight; `render.sh` reproduces them at any time.
+
 Each source's header comment names the doc sections it was derived from, so a diagram
 that drifts from the spec is auditable. If a doc changes, the diagram is stale — treat it
 like code, not decoration.

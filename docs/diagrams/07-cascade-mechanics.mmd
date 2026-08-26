@@ -22,7 +22,7 @@ flowchart TB
 
   PIPE["<b>SENTENCE PIPELINE</b><br/>same checks either way<br/>routing does not exempt a response"]
 
-  AUDIT[("audit fields (05 &sect;4)<br/><b>model_requested</b> &middot; <b>model_used</b><br/><b>cascade_escalated</b>")]
+  AUDIT[("audit fields (05 &sect;4)<br/><b>tier_requested</b> &middot; <b>model_used</b><br/><b>cascade_escalated</b>")]
 
   FORBID["<b>✗ NEVER: mid-stream re-dispatch</b><br/>if the small tier streamed first, its early<br/>sentences would already be released &mdash; and<br/>released sentences cannot be recalled (ADR-002).<br/><i>Buffering the probe is what makes the<br/>cost mechanism compatible with the<br/>interception guarantee.</i>"]
 

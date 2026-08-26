@@ -15,7 +15,7 @@ OpenAI-compatible request body, passed through with these gateway extensions:
 | header `X-ControlPlane-Use-Case` | yes* | pipeline id, must match a loaded policy (*or resolved from API-key→use-case map in `config/keys.yaml`) |
 | header `X-ControlPlane-Conversation-Id` | no | enables conv_tracker (FR-GW-005) |
 | body `controlplane.context: [str]` | no | source documents → enables `rag_grounding` |
-| body `stream: true|false` | no | must be compatible with policy `streaming` flag, else `ERR-CFG-002` |
+| body `stream: true\|false` | no | must be compatible with policy `streaming` flag, else `ERR-CFG-002` |
 
 **Responses**
 - PASS/EDIT: standard OpenAI-shaped response / SSE stream. Edited responses include header `X-ControlPlane-Actions: edit` and, non-streaming, `controlplane.actions: [...]` metadata block.
@@ -38,7 +38,7 @@ Error body: `{error:{code, message, request_id}}`. Never include prompt/response
 | Endpoint | Purpose |
 |---|---|
 | `GET /admin/review?status=pending` | list review items (quarantined responses; PII spans pre-redacted in the *listing view*); each item carries `escalation_cause` per ADR-027 — see below |
-| `POST /admin/review/{review_id}` body `{decision: approve|reject, note}` | HITL override (FR-AUD-002); approve releases stored response via `GET /admin/review/{id}/released` |
+| `POST /admin/review/{review_id}` body `{decision: approve\|reject, note}` | HITL override (FR-AUD-002); approve releases stored response via `GET /admin/review/{id}/released` |
 | `POST /admin/policies/reload` | hot-reload YAML (FR-CFG-002); returns loaded versions |
 | `GET /admin/policies` | active policies + versions |
 | `GET /metrics` | metrics snapshot JSON (dashboard + doc-07 reveals read this) |
