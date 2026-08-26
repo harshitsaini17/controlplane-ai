@@ -97,7 +97,7 @@ ENRICHED_LABELS = frozenset({"privacy.person"})
 #: promotion is currently unobservable through them.
 SPAN_LESS_LABELS = frozenset(
     {"hallucination.low_confidence", "conversation.cumulative_risk",
-     "cost.budget_exceeded", "cost.runaway_loop"}
+     "cost.budget_exceeded", "cost.loop_detected"}
 )
 
 #: File stem -> the case-id prefix its cases must use. A case filed under the wrong stem

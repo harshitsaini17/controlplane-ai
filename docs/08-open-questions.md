@@ -115,11 +115,19 @@ not whether it exists.
 | M-3 | ADR-027 names `fail_mode_applied` as part of the `DetectorFailureRecord` shape, but the mode applied is unknowable at fault time — no policy has been consulted when the gateway synthesizes the record | The field is emitted by **`FailureOutcome.audit_entry()`**, at resolution, so the documented six-key shape (`failure_id, detector, error_class, stage, fail_mode_applied, ts`) exists at the **audit boundary** where 05 §3/§4 consumes it. `DetectorFailureRecord` carries the five facts known at fault time | Placement, not content: every ruled key reaches `detector_failures_json` exactly as ADR-027 specifies. Storing it on the record could only have held a placeholder until resolution overwrote it — a field whose value is a lie for part of its life. Pinned by `test_adr027_audit_entry_has_the_documented_shape_and_no_content` |
 | M-4 | `failure_id`/`ts` are minted by the record, yet FR-POL-001 requires `evaluate()` to be a pure function of (signals, policy) with no clock and no randomness | Minted **at construction by the gateway**, exactly as `Signal.signal_id` already is (`default_factory`), and never read by the verdict computation | Determinism is a property of `evaluate()`, not of its inputs. Pinned by `test_adr027_record_mints_identity_without_making_the_engine_impure`, which asserts the guarantee that matters — two records for the same fault differ in id and yield identical verdicts — rather than merely that the fields exist |
 
-**Flagged, not fixed** (AGENTS.md §11, one line): `SPAN_LESS_LABELS` in `eval/validate_dataset.py`
-contains `cost.runaway_loop`, which is **not in the taxonomy** — the real label is
-`cost.loop_detected`. The member is dead (no corpus cases, so it changes no number today) and the
-file is freeze-adjacent, so it is reported rather than edited. `eval/policy_matrix._SPAN_LESS`
-uses the correct label, so the two lists now differ by that one dead entry.
+**Resolved 2026-08-26 under the Phase-4 ruling** (was: flagged, not fixed):
+`SPAN_LESS_LABELS` in `eval/validate_dataset.py` contained `cost.runaway_loop`, which is **not in
+the taxonomy** — the real label is `cost.loop_detected`. Corrected on instruction. The member was
+provably dead: zero corpus cases carry it, and the validator's output is **byte-identical**
+before and after (280/280, freeze digest `6a3ecbbe75fd020b…` still matching), so the edit to a
+freeze-adjacent file moved no number.
+
+**Flagged, not fixed** (AGENTS.md §11, one line): the two span-less lists still differ, but now by
+a **real** label rather than a typo — `eval/policy_matrix._SPAN_LESS` includes
+`cost.request_too_large` and the validator's does not. It is dead today (zero corpus cases), and
+adding a member to a freeze-adjacent file is outside the ruled scope, so it is reported rather
+than edited; if a `cost.request_too_large` case is ever labelled EDIT, the validator would skip
+the ADR-015 promotion the matrix applies.
 
 ## Standing Limitations
 
@@ -145,7 +153,7 @@ before measuring".
 
 | # | Date | What was corrected | Figure-identity proof | Verified |
 |---|---|---|---|---|
-| 1 | 2026-08-26 | `eval/run_all.py` `numeric_claims` note claimed a **Q-18 publication gate that ADR-025 had already lifted** — stale prose sitting directly above the figures it disclaimed | `reports/eval_report_prose_fix.diff` — **PROVEN**: 3 of 151 lines differ (run timestamp; `Code commit` stamp, which 06 §8 *requires* to change; the note itself). 276 numeric tokens on the 93 measurement-bearing lines identical in sequence; normalized SHA-256 identical; all 5 metric rows byte-identical; all 6 measurement inputs identical | pending reviewer (clause (c)) |
+| 1 | 2026-08-26 | `eval/run_all.py` `numeric_claims` note claimed a **Q-18 publication gate that ADR-025 had already lifted** — stale prose sitting directly above the figures it disclaimed | `reports/eval_report_prose_fix.diff` — **PROVEN**: 3 of 151 lines differ (run timestamp; `Code commit` stamp, which 06 §8 *requires* to change; the note itself). 276 numeric tokens on the 93 measurement-bearing lines identical in sequence; normalized SHA-256 identical; all 5 metric rows byte-identical; all 6 measurement inputs identical | **VERIFIED** 2026-08-26 (clause (c)) — `reviews/phase2-review.md` § *Publication-gate ruling* (committed as `554e0d0`, "review: record checkpoint 2 re-review"): the reviewer regenerated both reports independently from the archived source states `7c8261d` and `fbcfcf593552` and found **all 32 measurement/result rows byte-identical**, with no numeric delta. Clause (c) is satisfied because that is a second party's **reproduction from source**, not the executor's own identity check on its own artifact |
 
 Note recorded against entry 1: the first identity check was written over *every* digit in the file
 and **failed** — first divergence `18 → 04`, which is `Q-18` becoming `04 §2.4.2` inside the
