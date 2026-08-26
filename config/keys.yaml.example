@@ -1,0 +1,21 @@
+# api_key -> use_case map (05 §1.1, §6). Copy to config/keys.yaml and fill in locally.
+#
+# config/keys.yaml is GITIGNORED — 05 §6 calls these "demo keys only" and a committed
+# key is an NFR-SEC-002 violation even for a demo. This .example file is the tracked
+# half, mirroring the .env.example convention.
+#
+# An ABSENT keys.yaml is an empty map, not an error: the X-ControlPlane-Use-Case header
+# is 05 §1.1's primary resolution path and the gateway boots without this file. A
+# MALFORMED keys.yaml *is* an error — a silently empty map would make every key-authed
+# request look like a missing header instead of a broken config.
+#
+# Resolution order: the header wins when both are present. The header is an explicit
+# per-request statement; the key is an ambient default.
+#
+# NOTE: v1 has no authorization (05 §2 states this limitation). This map is ROUTING,
+# not authz — a key does not restrict which pipelines its bearer may name by header.
+
+keys:
+  demo-support-key: support_bot
+  demo-hr-key: hr_copilot
+  demo-finance-key: finance_advisor
