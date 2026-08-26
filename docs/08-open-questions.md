@@ -66,32 +66,38 @@ slugs lived scattered across doc prose, YAML comments, docstrings and test notes
 | `[D2-report-emits-a-q18-publication-gate-adr-025-lifted]` | **MAJOR** | ADR-026 §5 run | **CLOSED** — ruled by **ADR-026 Amendment 2**: the §5 no-touch rule binds measurement-affecting code, not presentation prose, subject to four conditions. Note corrected; figure identity **PROVEN** and committed as `reports/eval_report_prose_fix.diff`. Logged under *Prose-fix log* below (clause (d)) |
 | `[D5-detector-failure-signal-is-unconstructible]` | **MAJOR** | Phase 3 | **CLOSED** — ruled by **ADR-027**, Option B: a detector fault is an **operational event, not a content risk** (no span, no plane, not detector-emitted, not policy-mapped), so the closed 04 §1.1 taxonomy is right to reject it and `Signal` is right to refuse to construct it. 04 §5 rewritten around `DetectorFailureRecord`; `detector_failures_json` added to 05 §3/§4; the §4.3 step-5 stamp now names contributing signal_ids **+ failure_record_ids**; review-queue `escalation_cause` added to 05 §2; 06 §5 reads the new field. Resolution semantics unchanged — `fail_closed` is an **ESCALATE floor**, never an override, so a genuine content BLOCK still wins |
 | `[D1-usage-canary-has-no-independent-count-on-the-measured-class]` | **BLOCKER** | Phase 4 | **OPEN** — FR-GW-006's canary compares `count_tokens` against the provider's reported prompt-token count, but `count_tokens` is a **provider endpoint**, present on `kiro-local` (**dev** class → warn) and absent on `groq` (**measured** class → fail boot). The invariant is implementable only where its consequence does not matter. Report below |
+| `[D5-adr-027-stamp-has-no-column-in-the-05-3-ddl]` | **BLOCKER** | Phase 4 | **OPEN** — 05 §4 lists `contributing_signal_ids`/`failure_record_ids` as canonical-view keys and 05 §2 derives `escalation_cause` from them, but 05 §3's `audit_records` DDL declares neither column, so `write_record` drops both at the write boundary. Not recoverable by derivation. Blocks 05 §2 `escalation_cause` and ADR-027 consequence 3 (report below) |
 
-**Open: one.** Of **15** filed deviations, **14** are ruled and closed and **one is OPEN**:
-`[D1-usage-canary-has-no-independent-count-on-the-measured-class]`, filed in Phase 4 against
-FR-GW-006 (report below). D5 was the last *closure*, by **ADR-027** at the start of Phase 4.
+**Open: two.** Of **16** filed deviations, **14** are ruled and closed and **two are OPEN**,
+both filed in Phase 4 and both BLOCKER: `[D1-usage-canary-has-no-independent-count-on-the-measured-class]` against FR-GW-006, and `[D5-adr-027-stamp-has-no-column-in-the-05-3-ddl]`
+against 05 §3 vs §4/§2 (reports below). D5-detector-failure was the last *closure*, by
+**ADR-027** at the start of Phase 4 — and the second open item is a gap in that same ruling's
+audit representation, found while wiring the write path it specified.
 
 The **eight** filed from Step 4 up to that closure account as: **two** measured-accuracy findings
 (D3, D8), **four** found while implementing the ADRs (`detector_params`, the `per` citation
 marker, the NANP constraint, the `eyJ` derivation), **one** report-prose gate found after the
-re-measurement, and **D5**. The Phase-4 filing is the **ninth** from Step 4 onward and the only
-one still open — 8 closed + 1 open = 9, and 6 pre-Step-4 closures bring the total to 15.
+re-measurement, and **D5**. The **two** Phase-4 filings are the **ninth and tenth** from Step 4
+onward and the only ones still open — 8 closed + 2 open = 10, and 6 pre-Step-4 closures bring the
+total to 16.
 **Three of those eight were found by writing the ADR-026 spec-derived tests**, which is the
 outcome that discipline exists to produce: tests authored from the specifications rather than
 from the fixtures caught two defects in the ruled specs themselves and one in the implementer's
 reading of them, *before* any number was computed. D5 was found the same way — by implementing
 04 §5 literally and discovering the object it describes cannot exist.
 
-⚠ **Zero open deviations is not zero open questions.** Six *questions* remain OPEN above —
-**Q-01, Q-05, Q-06, Q-07, Q-08, Q-10** — and the two counts are deliberately kept apart: a
-deviation is a contradiction awaiting a ruling, a question is a decision not yet needed.
-Reporting "nothing open" would conflate them. (The *gaps* left behind by closures are the
+⚠ **Open deviations and open questions are separate counts.** Six *questions* remain OPEN
+above — **Q-01, Q-05, Q-06, Q-07, Q-08, Q-10** — alongside the two open deviations, and the two
+registers are deliberately kept apart: a deviation is a contradiction awaiting a ruling, a
+question is a decision not yet needed. Collapsing them into one "open" number would hide which
+kind of answer is owed. (The *gaps* left behind by closures are the
 separate register below.)
 
-**"Open: zero" means zero undecided, not nothing missing.** Two of those closures leave real gaps
-behind — a decided gap is still a gap. Every such item is carried permanently in the **Standing
-Limitations** register immediately below, so the two numbers can never drift apart: a reader who
-sees an empty deviation ledger sees the standing limitations in the same breath.
+**A closed deviation can still leave a gap.** "Ruled" means nothing is undecided, not that
+nothing is missing: two of the closures above leave real gaps behind, and a decided gap is still a
+gap. Every such item is carried permanently in the **Standing Limitations** register immediately
+below, so the two numbers can never drift apart: a reader who reaches the end of the deviation
+ledger — whatever it happens to count — sees the standing limitations in the same breath.
 
 Also tracked as questions rather than deviations: **Q-10** (no genuinely local model installed —
 fallback and 2nd-sample duty unassigned, **SL-4**) and the Groq price-provenance caveat under
@@ -142,8 +148,8 @@ the ADR-015 promotion the matrix applies.
 
 **Purpose.** Permanent home for **decided-but-unmet** items: things ruled on, understood, and
 consciously accepted — not open questions and not open deviations. Without this register, closing
-a deviation whose gap survives would make the gap invisible, and `Open: zero` would read as
-"nothing missing" when it means "nothing undecided". An entry leaves only when the limitation
+a deviation whose gap survives would make the gap invisible, and a ledger reading `Open: zero`
+would look like "nothing missing" when it only ever means "nothing undecided". An entry leaves only when the limitation
 itself is gone, never because it stopped being newsworthy.
 
 | ID | Limitation | Measured / stated | Why it stands | Where it is visible |
@@ -520,3 +526,66 @@ No behavioural change; no ADR needed.
 **Q-04 — Tier-2 model picks (injection + toxicity classifiers)** — RESOLVED 2026-08-24 (deferred by decision).
 Ruling: **defer the checkpoint choice**; stub the detector interfaces now (`detectors/tier2_classifiers.py`), pick real checkpoints later via the NFR-P-002 latency spike. The interface stub carries `STUB(phase-1-scaffold, Q-04 deferred)`.
 ⚠ Doc-rot note: the original Q-04 said to record the eventual choice "as ADR-011", but ADR-011 is already the `privacy.person` producer decision. The spike result gets the **next free ADR number**, not ADR-011.
+
+## DEVIATION REPORT [D5-adr-027-stamp-has-no-column-in-the-05-3-ddl]
+Severity: BLOCKER
+Doc & section: 05 §3 (`audit_records` DDL) vs 05 §4 (canonical view) and 05 §2
+(`escalation_cause`); ADR-027 consequences 2 and 3
+The doc says: 05 §4's canonical JSON view carries `"contributing_signal_ids": ["…"],
+"failure_record_ids": ["…"]` as top-level keys, and 05 §2 states `escalation_cause` is
+"**derived, not stored**: it is computed from the referenced `audit_records.detector_failures_json`
+and the step-5 stamp (§4 `contributing_signal_ids` / `failure_record_ids`), so there is one source
+of truth for why a verdict happened." ADR-027 consequence 2: the stamp extends to "contributing
+signal_ids **+ failure_record_ids**, so an ESCALATE with zero content signals is self-explaining
+in the audit."
+Reality says: **05 §3's own `audit_records` DDL declares neither column** — it ends at
+`sampled_deep`, and `db.py` plus `write_record`'s 19-column `INSERT` are faithful to it. The two
+fields exist on the `AuditRecord` dataclass and are populated correctly from the verdict
+(`records.py:318-319`), then **silently dropped at the write boundary**. Verified by round-trip
+on a fresh DB: `PRAGMA table_info(audit_records)` returns 19 columns, neither list among them,
+and `canonical_view()` — which reads back via `SELECT * FROM audit_records` — emits neither key,
+despite its docstring calling itself "The 05 §4 canonical JSON view". No test asserts either list
+survives a write; the existing coverage
+(`test_audit_records.py:258-259`, `test_policy_engine.py:889-912`) stops at the in-memory build,
+which is why this reached the write path unnoticed.
+
+**Neither list is recoverable by derivation**, so this cannot be closed by computing them at read
+time:
+- `detector_failures_json` is populated on **fail_open** too (05 §3, "a dropped detector that left
+  no trace is indistinguishable from one that ran and found nothing"), so the presence of a
+  failure record does not mean it *contributed*. Filtering on `fail_mode_applied` also misreports:
+  ADR-027's floor "lifts a PASS or EDIT to ESCALATE but leaves a genuine content BLOCK standing",
+  so a fail_closed record can be present without having decided the verdict.
+- `contributing_signal_ids` is a strict subset of `signals_json` by design — pinned by
+  `test_contributing_signal_ids_name_only_the_deciding_signals` — so it cannot be reconstructed as
+  "all signal ids".
+- 05 §2 requires `both` to be "reported as `both` rather than collapsed to either side", which is
+  exactly the distinction that needs both lists present.
+Impact if we ignore it: 05 §2's `escalation_cause` is unimplementable, taking ADR-027
+consequence 3 with it — the reviewer sees "a bare quarantine" rather than "detector `tier2_toxicity`
+failed under fail_closed", which the doc calls "the difference between a decision they can action
+and one they must reverse-engineer". 05 §3's stated rationale ("Without the second list, that
+record and a content escalation are indistinguishable after the fact") describes the state the
+schema is currently in. Blocks Phase-4 item 7's review-queue listing. Item 8 (fault injection) is
+**not** blocked — ADR-027 consequence 4 reads `detector_failures_json`, which is stored.
+Options:
+  A) Add two `TEXT` columns to 05 §3's DDL (`contributing_signal_ids`, `failure_record_ids`),
+     JSON arrays, written by `write_record` and read by `canonical_view` — trade-off: a schema
+     change, and the ids also appear inside `signals_json`/`detector_failures_json`, so the columns
+     are a denormalized index. Mirrors the existing `*_json` convention and leaves 05 §4 and §2
+     exactly as written.
+  B) One `stamp_json` column holding both lists as an object — trade-off: fewer columns, but 05 §4
+     shows the two keys at top level, so the view assembly gains a remapping step, and a future
+     third id list would silently change the column's shape rather than the table's.
+  C) Mark contributing signals inline (a `contributed: true` flag inside `signals_json` and
+     `detector_failures_json`) and derive both lists at read time — trade-off: no new columns, but
+     it edits the two payloads ADR-027 deliberately keeps as "pure Signals" and pure operational
+     records, and the flag is a policy conclusion stored inside a detector's output.
+Recommendation: **A** — the smallest change that makes §3 consistent with §4 and §2, it needs no
+edit to either consumer's documented shape, and it keeps `signals_json` pure per ADR-027. The
+duplication is an index, not a second source of truth: both lists are computed by the engine, and
+the DDL is the only place they currently go missing.
+Blocked work: Phase-4 item 7's `GET /admin/review?status=pending` (`escalation_cause` +
+`failure_summary`). The audit write path itself is unblocked — records write correctly today, minus
+the stamp — so items 1, 3, 4 and 6 proceed, and any ESCALATE they record will be missing the stamp
+until this is ruled.
