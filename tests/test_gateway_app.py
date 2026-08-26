@@ -36,7 +36,14 @@ from fastapi.testclient import TestClient
 from controlplane.audit.records import canonical_view
 from controlplane.detectors.base import DetectorError, Stage
 from controlplane.gateway import pipeline
-from controlplane.gateway.app import HTTP_ESCALATE, Gateway, create_app
+from controlplane.gateway.app import (
+    HTTP_ESCALATE,
+    CanaryUnavailableWarning,
+    Gateway,
+    create_app,
+)
+from controlplane.gateway.canary import UsageSanityError, UsageSanityWarning
+from controlplane.gateway.config import load_gateway_config
 from controlplane.gateway.ingress import HEADER_REQUEST_ID, HEADER_USE_CASE, UpstreamError
 from controlplane.gateway.sse_proxy import UpstreamResponse
 from controlplane.telemetry.metrics import MetricsRegistry
@@ -824,3 +831,161 @@ def test_a_review_decision_is_one_shot(make_client) -> None:
     second = client.post(f"/admin/review/{review_id}",
                          json={"decision": "reject", "note": "changed my mind"})
     assert second.status_code >= 400
+
+
+# ---------------------------------------------------------------------------
+# FR-GW-006 startup canary wiring (ADR-028)
+#
+# `canary.py` and its 38 tests cover the invariant's arithmetic. What is tested here is
+# strictly the *wiring*: does it fire at boot, and which failures may stop one. The
+# division matters because the two halves fail differently — a wrong estimator is a wrong
+# number, a wrong hook is a gateway that will not start.
+#
+# The estimate for the shipped canary prompt is 64 tokens, so `prompt_tokens=64` passes and
+# the ADR-018-documented 5074 fails. Note that the default `Stub` reports 11, which *fails*
+# (outside the 2.0 band, and |11-64| = 53 clears the 50-token floor) — that is why every
+# test below sets the count explicitly rather than relying on the fixture's default.
+# ---------------------------------------------------------------------------
+
+
+class CanaryStub(Stub):
+    """A `Stub` whose usage block is what the canary reads (FR-GW-006).
+
+    Subclasses rather than reimplements, so the canary path and the request path exercise
+    the same duck-typed dispatcher — a fake that satisfied the canary but not `complete`'s
+    real signature would test the hook against an interface nothing else uses.
+    """
+
+    def __init__(self, prompt_tokens: int | None, **kw) -> None:
+        super().__init__(**kw)
+        self.prompt_tokens = prompt_tokens
+
+    async def complete(self, messages, *, tier="small", provider=None, extra=None):
+        self.calls += 1
+        if self.fail:
+            raise UpstreamError("stub refused")
+        return UpstreamResponse(
+            text=self.text, model_used="stub-model",
+            prompt_tokens=self.prompt_tokens, completion_tokens=22,
+        )
+
+
+def canary_app(tmp_path, prompt_tokens: int | None = 64, *, provider: str | None = None,
+               enabled: bool = True, fail: bool = False):
+    """An app whose upstream reports `prompt_tokens`, returning (app, gateway).
+
+    `provider` switches `active_provider`, which is how the dev/measured asymmetry is
+    reached: the shipped active provider is `kiro-local` (dev), so a measured-class test
+    must repoint the config rather than hand-build a `Provider`.
+    """
+    config = load_gateway_config().model_copy(deep=True)
+    if provider is not None:
+        config.active_provider = provider
+    config.usage_sanity.canary_on_startup = enabled
+    gateway = Gateway(
+        dispatcher=CanaryStub(prompt_tokens, fail=fail),
+        config=config,
+        metrics=MetricsRegistry(),
+        db_path=str(tmp_path / "audit.db"),
+        key_map={},
+    )
+    return create_app(gateway), gateway
+
+
+def test_the_canary_runs_at_boot_and_records_its_result(tmp_path) -> None:
+    """FR-GW-006: the check fires from the lifespan hook, not on first request."""
+    app, gateway = canary_app(tmp_path, prompt_tokens=64)
+    assert gateway.canary is None, "nothing should have run before startup"
+    with TestClient(app):
+        pass
+    assert gateway.canary is not None
+    assert gateway.canary.passed is True
+    assert gateway.canary_error is None
+
+
+def test_a_bare_testclient_does_not_run_the_canary(tmp_path) -> None:
+    """★ Pins WHY the pre-existing suite is unaffected by adding the hook.
+
+    Starlette runs `lifespan` only for a context-managed client. This is not a quirk being
+    tolerated — it is the reason 872 pre-existing tests, whose stub reports a count that
+    would *fail* the canary, kept passing when the hook was added. If this ever starts
+    running, those tests begin warning for a reason unrelated to their subject, and the
+    fixture default must be fixed rather than the warning silenced.
+    """
+    app, gateway = canary_app(tmp_path, prompt_tokens=64)
+    TestClient(app).get("/metrics")
+    assert gateway.canary is None
+    assert gateway.canary_error is None
+
+
+def test_a_measured_class_failure_refuses_boot(tmp_path) -> None:
+    """★ The documented consequence: bad accounting on a publishable provider stops boot.
+
+    `groq` is `upstream_class: measured`, so every cost figure derived from it is
+    judge-facing (ADR-018). Booting anyway would let a wrong number look like a measurement.
+    """
+    app, gateway = canary_app(tmp_path, prompt_tokens=5074, provider="groq")
+    with pytest.raises(UsageSanityError):
+        with TestClient(app):
+            pass
+
+
+def test_a_dev_class_failure_warns_but_boots(tmp_path) -> None:
+    """The shipped active provider's own inflation must not stop the demo.
+
+    `kiro-local` is dev-class and reports ~5000 tokens for a short prompt (ADR-018). Its
+    numbers are already barred from publication, so the correct behaviour is a loud warning
+    and a working gateway.
+    """
+    app, gateway = canary_app(tmp_path, prompt_tokens=5074)
+    with pytest.warns(UsageSanityWarning):
+        with TestClient(app) as client:
+            assert client.get("/metrics").status_code == 200
+    assert gateway.canary is not None and gateway.canary.passed is False
+
+
+def test_an_unreachable_provider_does_not_refuse_boot(tmp_path) -> None:
+    """★ ERR-UP-001 is not an accounting failure — the asymmetry this hook exists to keep.
+
+    `run_canary` deliberately propagates `UpstreamError`, so a hook that caught nothing
+    would refuse to start through any provider outage — and would do it citing an invariant
+    that was never evaluated. Even on a measured-class provider, an outage boots.
+    """
+    app, gateway = canary_app(tmp_path, prompt_tokens=64, provider="groq", fail=True)
+    with pytest.warns(CanaryUnavailableWarning):
+        with TestClient(app) as client:
+            assert client.get("/metrics").status_code == 200
+
+
+def test_an_unreachable_provider_is_recorded_as_unchecked_not_passed(tmp_path) -> None:
+    """★ Three states, not two: unverified must be distinguishable from verified.
+
+    `canary.py`'s rule is that a canary which always passes because it cannot run is worse
+    than an absent one. At the call site that means `canary` stays None while
+    `canary_error` says why — never a `CanaryResult` with `passed=True`.
+    """
+    app, gateway = canary_app(tmp_path, prompt_tokens=64, fail=True)
+    with pytest.warns(CanaryUnavailableWarning):
+        with TestClient(app):
+            pass
+    assert gateway.canary is None, "an outage must not be recorded as a passing check"
+    assert gateway.canary_error is not None
+
+
+def test_the_knob_off_leaves_both_states_empty(tmp_path) -> None:
+    """`canary_on_startup: false` means no verdict, which is not the same as a failure."""
+    app, gateway = canary_app(tmp_path, prompt_tokens=5074, enabled=False)
+    with TestClient(app):
+        pass
+    assert gateway.canary is None
+    assert gateway.canary_error is None
+
+
+def test_the_canary_error_carries_no_credential_material(tmp_path) -> None:
+    """NFR-SEC-002: the recorded reason is operator-facing text, not a provider body."""
+    app, gateway = canary_app(tmp_path, prompt_tokens=64, fail=True)
+    with pytest.warns(CanaryUnavailableWarning):
+        with TestClient(app):
+            pass
+    assert "sk-" not in (gateway.canary_error or "")
+    assert "Bearer" not in (gateway.canary_error or "")

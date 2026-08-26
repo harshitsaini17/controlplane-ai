@@ -34,7 +34,9 @@ import sqlite3
 import threading
 import time
 import uuid
+import warnings
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Request, Response
@@ -51,11 +53,13 @@ from controlplane.audit.records import (
 )
 from controlplane.detectors.base import Signal, Stage
 from controlplane.gateway import pipeline
+from controlplane.gateway.canary import CanaryResult, canary_on_startup
 from controlplane.gateway.config import GatewayConfig, load_gateway_config
 from controlplane.gateway.ingress import (
     HEADER_ACTIONS,
     HEADER_REQUEST_ID,
     GatewayError,
+    UpstreamError,
     ingest,
     load_key_map,
 )
@@ -82,6 +86,15 @@ STAGE_INPUT, STAGE_STREAMED, STAGE_COMPLETED = "input", "streamed", "completed"
 #: selection) is Phase 6, and recording a tier we did not choose would make
 #: `tier_requested` fiction. "small" is what `_dispatch` actually asks for.
 TIER = "small"
+
+
+class CanaryUnavailableWarning(UserWarning):
+    """The FR-GW-006 canary could not be evaluated this boot.
+
+    Distinct from `UsageSanityWarning`, which means the invariant ran and FAILED on a
+    dev-class provider. This one means it never ran, so the boot carries no verdict
+    either way — a state the operator must be able to tell from a pass.
+    """
 
 
 def _sse(payload: dict[str, Any]) -> str:
@@ -164,6 +177,13 @@ class Gateway:
         # An empty key map is valid (header-only use-case resolution), so a `None` from the
         # loader is normalized once here rather than retried per request.
         self.key_map = key_map if key_map is not None else (load_key_map() or {})
+        # FR-GW-006 canary state, filled by the startup hook. THREE states, not two, and the
+        # third is the point: `canary` holds a result when the check actually ran,
+        # `canary_error` names why it could not, and both `None` means it never ran (the
+        # knob is off, or nothing started the app). A single boolean would make "verified"
+        # and "never checked" the same value — the M-10 mistake in a different column.
+        self.canary: CanaryResult | None = None
+        self.canary_error: str | None = None
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -272,10 +292,56 @@ class Gateway:
         )
 
 
+async def run_startup_canary(state: Gateway) -> None:
+    """Fire the FR-GW-006 canary once at boot, recording the outcome on `state`.
+
+    `canary_on_startup` owns the run/skip decision and the run-then-enforce ordering, so
+    this adds exactly one thing: which failures may stop a boot.
+
+    **`UsageSanityError` propagates and `UpstreamError` does not**, and the asymmetry is the
+    whole substance of this function. The first is the documented consequence — a
+    measured-class provider whose accounting is wrong would corrupt every judge-facing
+    number, so refusing to start is the point. The second is ERR-UP-001: the provider is
+    unreachable, which says nothing about how it counts. Conflating them would make the
+    gateway refuse to boot through any provider outage, and would do it in the name of an
+    invariant that was never evaluated.
+
+    An unreachable provider is therefore recorded as **unchecked, not passed** —
+    `canary.py`'s own rule that "a canary that always passes because it cannot run is worse
+    than an absent one", applied at the call site. Anything other than those two exceptions
+    is a genuine defect in the check and is left to propagate: swallowing it would hide a
+    broken canary behind a clean boot log, which is the same failure in a quieter form.
+    """
+    try:
+        state.canary = await canary_on_startup(state.dispatcher, config=state.config)
+    except UpstreamError as exc:
+        state.canary = None
+        state.canary_error = str(exc)
+        warnings.warn(
+            f"usage-sanity canary could not run: {exc}. The gateway is starting anyway — "
+            "an unreachable provider is ERR-UP-001, not an accounting failure (FR-GW-006) "
+            "— but the invariant is UNVERIFIED for this boot, not satisfied.",
+            CanaryUnavailableWarning,
+            stacklevel=2,
+        )
+
+
 def create_app(gateway: Gateway | None = None) -> FastAPI:
-    """Build the ASGI app. `gateway` is injectable so tests need no real upstream."""
-    app = FastAPI(title="ControlPlane.ai", version="1")
+    """Build the ASGI app. `gateway` is injectable so tests need no real upstream.
+
+    The canary runs from a `lifespan` hook, which means it fires under `with TestClient(app)`
+    and not under a bare `TestClient(app)` call — Starlette only runs lifespan for the
+    former. That is the behaviour a test asserting boot refusal depends on, and the reason
+    the existing suite is unaffected by adding it.
+    """
     state = gateway or Gateway()
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        await run_startup_canary(state)
+        yield
+
+    app = FastAPI(title="ControlPlane.ai", version="1", lifespan=lifespan)
     app.state.gateway = state
 
     @app.exception_handler(GatewayError)
