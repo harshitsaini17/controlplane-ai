@@ -202,7 +202,9 @@ Freeze gate:  .venv/bin/python -m eval.validate_dataset            # consistency
 Run gateway:  [Phase 2+] .venv/bin/uvicorn controlplane.gateway.app:app --reload
 Eval suite:   [Phase 2+] .venv/bin/python -m eval.run_all         → reports/eval_report.md
               [Phase 2+] .venv/bin/python -m eval.bench_latency   → reports/latency_report.md
-              [Phase 2+] .venv/bin/python -m eval.fault_injection | .cost_simulation | .pii_leak_scan
+              .venv/bin/python -m eval.fault_injection            → reports/fault_injection_report.md
+                         (06 §5; nonzero exit on any failed 04 §5 invariant)
+              [Phase 2+] .venv/bin/python -m eval.cost_simulation | .pii_leak_scan
 Demo:         [Phase 2+] .venv/bin/python -m demo.run_script      (07; nonzero exit on beat failure)
 Dashboard:    [Phase 2+] .venv/bin/streamlit run dashboard/app.py (ADR-007)
 

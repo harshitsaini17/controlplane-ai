@@ -534,9 +534,12 @@ def test_a_detector_fault_does_not_break_the_request(make_client, monkeypatch) -
     support_bot sets `fail_mode.tier1: fail_closed`, which 04 §5 resolves to ESCALATE — so
     202 is the *correct* status here, not a broken request. "Does not break" means no 5xx
     and no leaked exception: the client gets a documented verdict, and the fault itself is
-    visible in the audit rather than in the response. The fail_open counterpart is not
-    exercisable this phase — the only fail_open classes are tier2/performance/cost, and no
-    detector in those classes is live yet.
+    visible in the audit rather than in the response.
+
+    The fail_open counterpart **is** exercisable — `numeric_claims` is live and its 04 §2
+    class is `performance`, which support_bot sets to `fail_open`. It lives in
+    `tests/test_fault_injection.py` alongside the 06 §5 harness, where both halves of the
+    SC-3 contrast can be asserted side by side rather than split across two files.
     """
 
     class Broken:
