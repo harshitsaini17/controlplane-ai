@@ -1,6 +1,8 @@
 %%{init: {"theme":"base","themeVariables":{"fontFamily":"Inter, Segoe UI, Helvetica, Arial, sans-serif","fontSize":"13px","primaryTextColor":"#111827","lineColor":"#374151"}}}%%
-%% Source: docs/05-api-and-data-contracts.md 3 (SQLite schema) + ADR-006 + NFR-SEC-001.
+%% Source: docs/05-api-and-data-contracts.md 3 (SQLite schema) + ADR-006 + NFR-SEC-001
+%% + ADR-018 (tier/model split, upstream_class) + ADR-027 Amendment 1 (the step-5 stamp).
 %% Claim: exactly one column may hold verbatim model output, and it is masked before it is written.
+%% Claim: a tier name never masquerades as a model id, and the step-5 stamp is stored, not derived.
 erDiagram
   audit_records {
     TEXT request_id PK "one record per request, append-only"
@@ -12,9 +14,12 @@ erDiagram
     TEXT verdict "CHECK: pass | edit | block | escalate"
     TEXT signals_json "list[Signal] - evidence fields only, NO raw PII. PURE Signals"
     TEXT detector_failures_json "ADR-027: list[DetectorFailureRecord] - operational events, never Signals. No span/plane/label/text"
+    TEXT contributing_signal_ids "04 section 4.3 step-5 stamp: which signals drove the verdict. [] not NULL when none"
+    TEXT failure_record_ids "04 section 4.3 step-5 stamp: which faults forced a floor. STORED, never derived"
     TEXT actions_json "transforms applied, spans, fallback used"
-    TEXT model_requested "tier chosen pre-dispatch"
-    TEXT model_used "tier that actually answered"
+    TEXT tier_requested "CHECK: small | frontier - the routing decision, pre-dispatch"
+    TEXT model_used "the CONCRETE provider model id that answered - never a tier name"
+    TEXT upstream_class "CHECK: dev | measured - ADR-018 provenance travels with the row"
     INTEGER cascade_escalated "probe rejected, went frontier"
     INTEGER tokens_in
     INTEGER tokens_out
