@@ -1,0 +1,119 @@
+FIGURE-IDENTITY PROOF — ADR-026 Amendment 2 clause (b)
+==============================================================================
+
+WHAT THIS PROVES, AND WHY IT EXISTS
+------------------------------------------------------------------------------
+ADR-026 §5 permits ONE re-measurement and forbids touching the harness afterwards.
+Amendment 2 clarifies that the rule binds measurement-affecting code, not
+presentation prose — but only if the prose fix ships a proof that no measured
+number moved, because the judgment that a change 'provably cannot' move a figure
+is never the executor's alone. This file is that proof, committed so a reviewer
+can CHECK it rather than take it on trust (clause (c)).
+
+  pre-fix  report: generated at code commit 7c8261d7a834 (the single §5 run)
+  post-fix report: generated at code commit fbcfcf593552 (prose fix only)
+  change under proof: eval/run_all.py `numeric_claims` DetectorUnderTest.note
+
+The `note` field is read at run_all.py:286 (copied into DetectorResult) and
+:385-386 (rendered to markdown). It is on no scoring path. That is the structural
+claim; everything below is the empirical check of it.
+
+RESULT: FIGURE IDENTITY PROVEN
+
+EVERY DIFFERING LINE (3 of 151), EXHAUSTIVELY CLASSIFIED
+------------------------------------------------------------------------------
+Enumerated in full — a proof that showed only the lines it considered harmless
+would be worthless.
+
+  L17 — run metadata (expected to differ)
+    - | Generated (UTC) | 2026-08-25T23:06:14+00:00 |
+    + | Generated (UTC) | 2026-08-26T05:02:27+00:00 |
+
+  L21 — run metadata (expected to differ)
+    - | Code commit | `7c8261d7a834` |
+    + | Code commit | `fbcfcf593552` |
+
+  L64 — presentation prose (the correction itself)
+    - > The definition of a 'citation marker' this detector turns on is **not in the spec** — it is provisional and tracked as **Q-18**, which gates publication of the figures below (AGENTS.md §7).
+    + > The 'citation marker' list this detector suppresses on is **normative** in 04 §2.4.2 — ADR-025 closed **Q-18**, and its Amendment 1 restricts `per` to attribution forms. It is lexical only, searched in the numeral's own sentence: judging whether a citation *supports* a figure is `rag_grounding`'s job, not this detector's. The figures below are publishable provided they are labelled v1 or v2 (06 §3.2) — see *Disclosed revision* below.
+
+On L21 specifically: the Code commit stamp is REQUIRED to change. 06 §8 defines it
+as naming the commit whose code produced the numbers, so a regenerated report that
+kept the old stamp would be the actual integrity error.
+
+FOUR INDEPENDENT CHECKS
+------------------------------------------------------------------------------
+1. Line alignment           : held=151 new=151 lines, 3 differ, 0 unexplained
+2. Normalized byte identity : PASS
+     sha256 (measurement-bearing lines only, pre-fix ) = 7ac08f3c5f6d1509c5afd0faf01ad70cccc035167a4d987776f0a8c4f5f302dc
+     sha256 (measurement-bearing lines only, post-fix) = 7ac08f3c5f6d1509c5afd0faf01ad70cccc035167a4d987776f0a8c4f5f302dc
+3. Numeric-token sequence   : PASS — 276 tokens vs 276, in identical order,
+     over the 93 measurement-bearing lines (run metadata and blockquote prose
+     excluded: their digits are timestamps, commit hashes and section
+     cross-references, none of which is a measurement)
+4. Metric rows byte-identical: PASS (all per-label and micro rows)
+
+MEASUREMENT INPUTS — must be identical, or the runs are not comparable at all
+------------------------------------------------------------------------------
+  Dataset digest   IDENTICAL
+  Frozen at        IDENTICAL
+  Cases loaded     IDENTICAL
+  Python           IDENTICAL
+  Platform         IDENTICAL
+  Command          IDENTICAL
+
+SCOPE CORRECTION, DISCLOSED
+------------------------------------------------------------------------------
+Check 3 was first written over every digit in the file and FAILED, first divergence
+'18' -> '04'. Those are the digits inside the rewritten sentence — 'Q-18' became
+'04 §2.4.2'. The check was comparing document cross-references as if they were
+measurements; its scope was wrong, not the artifact. It was corrected to the
+measurement-bearing scope and re-run, and the failure is recorded here rather than
+quietly dropped: a check that is narrowed after it fails has to show its working,
+or narrowing it is indistinguishable from evading it.
+
+HEADLINE FIGURES, UNCHANGED ACROSS THE FIX
+------------------------------------------------------------------------------
+  tier1_pii      recall    v1 0.836 -> v2 0.885   (NFR-EVAL-001 target 0.95: MISSED)
+  tier1_pii      precision v1 1.000 -> v2 1.000
+  numeric_claims precision v1 0.267 -> v2 0.857
+  numeric_claims recall    v1 0.750 -> v2 0.750
+
+REPRODUCE
+------------------------------------------------------------------------------
+  git show 7c8261d7a834:reports/eval_report.md > /tmp/pre.md   # pre-fix run output
+  git show HEAD:reports/eval_report.md          > /tmp/post.md
+  diff -u /tmp/pre.md /tmp/post.md                              # expect the 3 lines above
+
+NOTE: the pre-fix report was NEVER committed (it was held pending this
+adjudication), so the first command resolves to the PREVIOUS report at that commit,
+not the held one. The held pre-fix output is reproduced verbatim by the unified diff
+below, which is why that diff is included rather than merely referenced.
+
+UNIFIED DIFF (verbatim, complete)
+==============================================================================
+--- reports/eval_report.md (pre-fix, code 7c8261d7a834)
++++ reports/eval_report.md (post-fix, code fbcfcf593552)
+@@ -14,11 +14,11 @@
+ 
+ | Field | Value |
+ |---|---|
+-| Generated (UTC) | 2026-08-25T23:06:14+00:00 |
++| Generated (UTC) | 2026-08-26T05:02:27+00:00 |
+ | Dataset digest | `6a3ecbbe75fd020bf806bf647d572c85ee187198fb9828eaac5e1c6e00737fbd` |
+ | Frozen at | `f162959f7d29` — MATCHES |
+ | Cases loaded | 280 (derived from the files, never asserted) |
+-| Code commit | `7c8261d7a834` |
++| Code commit | `fbcfcf593552` |
+ | Python | 3.14.6 |
+ | Platform | Linux 7.1.2-arch3-1 · x86_64 |
+ | Command | `python -m eval.run_all` |
+@@ -61,7 +61,7 @@
+ 
+ Cases scored: **220** (out-of-stage, not scored: 50)
+ 
+-> The definition of a 'citation marker' this detector turns on is **not in the spec** — it is provisional and tracked as **Q-18**, which gates publication of the figures below (AGENTS.md §7).
++> The 'citation marker' list this detector suppresses on is **normative** in 04 §2.4.2 — ADR-025 closed **Q-18**, and its Amendment 1 restricts `per` to attribution forms. It is lexical only, searched in the numeral's own sentence: judging whether a citation *supports* a figure is `rag_grounding`'s job, not this detector's. The figures below are publishable provided they are labelled v1 or v2 (06 §3.2) — see *Disclosed revision* below.
+ 
+ | Label | Support | TP | FP | FN | Precision | Recall | F1 |
+ |---|---:|---:|---:|---:|---:|---:|---:|

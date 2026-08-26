@@ -40,9 +40,6 @@ Assumption: **(a)**, gated on the assertion actually passing — the entry stays
 Deadline: before the consistency detector sprint (it needs the 2nd sample) — earlier if the cost plane is demoed. Status: **OPEN**
 
 
-⚠ A marker is **not** a verification. It suppresses only this detector, whose question is "was this figure attributed?" — never "is the attribution true?", which is `rag_grounding`'s independent question. The two are *meant* to disagree on a plausible citation for a figure the context never states; 06 keeps that pair as a control and `test_a_citation_is_not_a_verification` pins it.
-Deadline: before any `numeric_claims` number reaches a report, the README, the proposal or the video. Status: **OPEN**
-
 ---
 
 ## Deviation ledger
@@ -60,33 +57,64 @@ slugs lived scattered across doc prose, YAML comments, docstrings and test notes
 | `[D2-nonstreaming-token-counts-inflated]` | MAJOR | Step 1 | **CLOSED** — ADR-018 root-caused it as a provenance problem; the dev/measured split is the structural answer and FR-GW-006's canary catches recurrences at boot |
 | `[D2-upstream-price-table-absent]` | MINOR | Step 1 | **CLOSED** — ADR-022 makes `pricing: null` a legitimate, documented state meaning UNKNOWN (distinct from `unmetered`, which is an affirmative zero) |
 | `[D2-price-table-cannot-express-per-tier-cost]` | MAJOR | Step 2 | **CLOSED** — ADR-022 (prices keyed by concrete model id) |
-| `[D3-tier1-pii-recall-below-target]` | **MAJOR** | Step 4 | **OPEN** — measured micro recall **0.8361** vs NFR-EVAL-001 target 0.95. Precision 1.000 (zero FPs). 10 misses, all pattern-coverage gaps: 8 `pii.phone`, 2 `pii.api_key` |
-| `[D8-numeric-claims-treats-identifiers-as-statistics]` | **MAJOR** | Step 4 | **OPEN** — measured precision **0.267** (33 FPs, 30 of them `PII-*` cases). The documented "large-number" clause matches digit runs inside SSNs, cards and phone numbers |
-| `[D2-detector-params-cannot-hold-list-values]` | MINOR | ADR-025 | **OPEN** — ADR-025 makes `units`/`citation_markers` overridable via `detector_params`, but the schema types it `dict[str, dict[str, float]]`, which cannot hold a list of strings. No work blocked: 04 §2.4 lists are normative meanwhile |
-| `[D1-citation-marker-per-matches-the-rate-preposition]` | **BLOCKER** | ADR-025 impl | **OPEN** — the ruled marker list contains the bare token `per `, which is the ordinary English *rate* preposition, so `$4 million per year` emits nothing. 2 corpus cases labelled `unsourced_numeric` are suppressed. **Gates the single permitted re-measurement** |
-| `[D2-nanp-n-constraint-rejects-nothing-as-composed]` | **MAJOR** | ADR-026 impl | **OPEN** — 04 §2.5 claims the NANP `N ∈ [2-9]` narrowing "rejects the digit runs that would otherwise false-positive"; v1's retained `_PHONE` runs first and claims the same extent, so the constraint rejects nothing in the composed detector |
-| `[D2-adr-026-eyj-derivation-is-arithmetically-wrong]` | MINOR | ADR-026 impl | **OPEN** — ADR-026 justifies the `eyJ` anchor as "the base64url encoding of `{\"`". It is not: that encodes to `eyI=`. The anchor is still spec-derived, by a different derivation. Conclusion survives; stated reason does not |
+| `[D3-tier1-pii-recall-below-target]` | **MAJOR** | Step 4 | **CLOSED** — ruled by ADR-026 (disclosed revision), patterns re-derived from named published specs, re-measured **once**: recall **0.8361 → 0.8852**, precision 1.000 both. **NFR-EVAL-001 remains UNMET and the target was not moved.** The residual 7 misses are **7/7 the documented bare-7-digit scope exclusion** (ADR-026 §3), verified programmatically. Closing this deviation closes the *decision*, not the gap — the gap is tracked permanently as **SL-1** below |
+| `[D8-numeric-claims-treats-identifiers-as-statistics]` | **MAJOR** | Step 4 | **CLOSED** — ruled by ADR-025: the 04 §2 bare large-digit-run clause was **deleted**, not tuned. Precision **0.2667 → 0.8571** with recall **unchanged at 0.750**, so nothing was traded for the gain. The deletion is asserted positively in `tests/test_numeric_claims.py`, so re-introducing the rule fails the suite |
+| `[D2-detector-params-cannot-hold-list-values]` | MINOR | ADR-025 | **CLOSED** — ruled: `detector_params` widened to `dict[str, dict[str, ParamValue]]` where `ParamValue = str|int|float|bool | list[...]`. pydantic v2 smart mode preserves `1` as int and `True` as bool across the union; validation test added; 04 §3 records it |
+| `[D1-citation-marker-per-matches-the-rate-preposition]` | **BLOCKER** | ADR-025 impl | **CLOSED** — ruled by ADR-025 Amendment 1 **before** the single permitted re-measurement, so ADR-026 §5 was not strained. Bare `per ` removed; three attribution forms added (`as per`, determiner, proper-noun). Verified on the corpus pre-measurement: HAL-049/052 no longer suppressed, CLN-062 still correctly suppressed |
+| `[D2-nanp-n-constraint-rejects-nothing-as-composed]` | **MAJOR** | ADR-026 impl | **CLOSED** — ruled: keep the composition, correct the description (ADR-026 Amendment 1). v1's `_PHONE` is deliberately retained and shadows both NANP rows, which therefore add **zero recall**; the whole v2 phone gain is E.164 + the spaced-parenthesis variant. Narrowing `_PHONE` would break v2's superset property and orphan the permanent v1 baseline. Precision hardening → **SL-2** |
+| `[D2-adr-026-eyj-derivation-is-arithmetically-wrong]` | MINOR | ADR-026 impl | **CLOSED** — correction ratified (the error was the adjudicator's). ADR-026 carries a dated Correction block **preserving the original false claim verbatim** before refuting it with the arithmetic. The test pair asserting the false literal *as false* is retained as the artifact |
+| `[D2-report-emits-a-q18-publication-gate-adr-025-lifted]` | **MAJOR** | ADR-026 §5 run | **CLOSED** — ruled by **ADR-026 Amendment 2**: the §5 no-touch rule binds measurement-affecting code, not presentation prose, subject to four conditions. Note corrected; figure identity **PROVEN** and committed as `reports/eval_report_prose_fix.diff`. Logged under *Prose-fix log* below (clause (d)) |
 
-**Open: six.** Two are the Step-4 measured findings (D3, D8), **both ruled** (ADR-025/026) and
-awaiting the re-measurement that closes them per ADR-026 §5. One is the `detector_params`
-schema-type mismatch found while applying ADR-025. The remaining **three were found by writing
-the ADR-026 spec-derived tests** — which is the outcome that discipline exists to produce: tests
-authored from the specifications rather than from the fixtures caught two defects in the ruled
-specs themselves and one in my own reading of them, before any number was computed.
+**Open: zero.** All seven deviations ever filed against this workstream are ruled and closed —
+the four Step-4/ADR-impl findings, the `detector_params` schema mismatch, and the report-prose
+gate found after the re-measurement. **Three of the seven were found by writing the ADR-026
+spec-derived tests**, which is the outcome that discipline exists to produce: tests authored from
+the specifications rather than from the fixtures caught two defects in the ruled specs themselves
+and one in the implementer's reading of them, *before* any number was computed.
 
-**One of the three, `[D1-citation-marker-per-matches-the-rate-preposition]`, gates the
-re-measurement and is why it has not been run.** ADR-026 §5 permits exactly one re-measurement
-and forbids touching the harness afterwards, so running it against a marker list with a known
-false-negative hole would bake two guaranteed misses into a permanent number. Halting is
-cheaper than a number nobody can revise. The Step-4 findings were **measured, not predicted** —
-they are the eval harness doing its job on its first real run. Full reports below.
+**"Open: zero" means zero undecided, not nothing missing.** Two of those closures leave real gaps
+behind — a decided gap is still a gap. Every such item is carried permanently in the **Standing
+Limitations** register immediately below, so the two numbers can never drift apart: a reader who
+sees an empty deviation ledger sees the standing limitations in the same breath.
 
-Also still gating, tracked as questions rather than deviations: **Q-10** (no genuinely local
-model installed — fallback and 2nd-sample duty unassigned) and the Groq price-provenance caveat
-under Q-02, which constrains what the cost simulation may publish rather than blocking it.
+Also tracked as questions rather than deviations: **Q-10** (no genuinely local model installed —
+fallback and 2nd-sample duty unassigned, **SL-4**) and the Groq price-provenance caveat under
+**Q-02**, which constrains what the cost simulation may publish rather than blocking it (**SL-3**).
 **Q-18's publication gate is lifted** — ADR-025 made the citation-marker list normative in
 04 §2.4.2, so a `numeric_claims` figure may now be published if labelled v1 or v2 (06 §3.2).
 
+## Standing Limitations
+
+**Purpose.** Permanent home for **decided-but-unmet** items: things ruled on, understood, and
+consciously accepted — not open questions and not open deviations. Without this register, closing
+a deviation whose gap survives would make the gap invisible, and `Open: zero` would read as
+"nothing missing" when it means "nothing undecided". An entry leaves only when the limitation
+itself is gone, never because it stopped being newsworthy.
+
+| ID | Limitation | Measured / stated | Why it stands | Where it is visible |
+|---|---|---|---|---|
+| **SL-1** | **NFR-EVAL-001 unmet** — `tier1_pii` recall below the 0.95 target | **0.8852** vs 0.95 (precision 1.000, so no over-firing). v1 baseline **0.8361** | **100% of the residual misses are the documented bare-7-digit scope exclusion** (ADR-026 §3) — 7/7, verified programmatically by stripping co-occurring SSN/card/email spans and measuring the phone candidates' digit length (all 7, none ≥10). A bare `NNN-NNNN` is indistinguishable from an order or ticket id, so matching it would trade the perfect precision away. **The target was not moved** (ADR-026 §5) | `reports/eval_report.md` §NFR-EVAL-001 + §Disclosed revision; README claims row *Tier-1 PII recall*; closed deviation `D3-tier1-pii-recall-below-target` |
+| **SL-2** | **v1-superset phone behaviour**: an invalid NANP area code still fires — e.g. `(115) 555-0123` | Documented v1-superset behaviour, **not a bug** | v1's `_PHONE` is retained deliberately and evaluated first, so it shadows the NANP `N ∈ [2–9]` rows. Narrowing it would change v1-derived behaviour and the permanent precision-1.000 baseline would no longer describe code that ships. Precision hardening is a **later freeze cycle** and must not ride along with a measurement | ADR-026 Amendment 1; 04 §2.5; `tests/test_tier1_detectors.py::test_nanp_n_constraint_rejects_leading_0_and_1` (asserts at pattern level, docstring records the shadowing) |
+| **SL-3** | **Groq prices are secondary-source only** — no first-party table exists | `groq.com/pricing` → 308 to a price-free homepage; `console.groq.com/docs/pricing` → 404; per-model pages carry zero dollar figures. Figures rest on four converging aggregators + a stale Dec-2024 blog post | **Relative deltas are publishable, absolute dollar figures are not.** A proportional error in both tiers cancels in a ratio and does not in an absolute figure. `source_url` deliberately points at a page that *contains* the numbers rather than the canonical-but-empty one | `config/gateway.yaml` (provider `groq`, STUB block); ADR-022; Q-02 |
+| **SL-4** | **No genuinely local fallback model installed** | Ollama on `:11434` serves exactly one model, `minimax-m2.7:cloud`, whose `remote_host` is `https://ollama.com:443` — a **cloud** model behind a local daemon | It fails the no-`remote_host` assertion, so it cannot be the local fallback; binding it would also falsify the `unmetered` claim, since its tokens are billed to someone. `ollama pull <a-real-local-model>` unblocks it. **owner-decision-needed** | `config/gateway.yaml` (provider `ollama-local`, both tiers `null` + STUB); Q-10 |
+
+### Prose-fix log — ADR-026 Amendment 2 clause (d)
+
+Every post-measurement presentation-prose correction, logged on use. Amendment 2 requires the log
+precisely so that uses **accumulate visibly**: a register with several entries is itself evidence
+that report prose is being written carelessly, and the cheap path stays "get the prose right
+before measuring".
+
+| # | Date | What was corrected | Figure-identity proof | Verified |
+|---|---|---|---|---|
+| 1 | 2026-08-26 | `eval/run_all.py` `numeric_claims` note claimed a **Q-18 publication gate that ADR-025 had already lifted** — stale prose sitting directly above the figures it disclaimed | `reports/eval_report_prose_fix.diff` — **PROVEN**: 3 of 151 lines differ (run timestamp; `Code commit` stamp, which 06 §8 *requires* to change; the note itself). 276 numeric tokens on the 93 measurement-bearing lines identical in sequence; normalized SHA-256 identical; all 5 metric rows byte-identical; all 6 measurement inputs identical | pending reviewer (clause (c)) |
+
+Note recorded against entry 1: the first identity check was written over *every* digit in the file
+and **failed** — first divergence `18 → 04`, which is `Q-18` becoming `04 §2.4.2` inside the
+rewritten sentence. The check was comparing document cross-references as if they were
+measurements; its scope was wrong, not the artifact. The failure is disclosed in the proof itself
+rather than dropped, because a check narrowed *after* it fails must show its working or the
+narrowing is indistinguishable from evading it.
 ---
 
 ## DEVIATION REPORT [D2-detector-params-cannot-hold-list-values]
@@ -310,6 +338,10 @@ Ruling: **(c)** — written into 04 §2.4.2 as normative, so it is no longer an 
 - **Dropped** (stop suppressing → can only raise FP): bracketed author-year `[Smith 2024]`; structural pointers (`section 4`, `clause 12`, `§ 4`, `table 3`); named regulatory documents (`10-K`, `prospectus`, `filing`); the `ref:` / `reference:` / `see:` leaders; `as stated/noted in`.
 - **Added** (start suppressing → can only lower FP): `as per`, `cited by`, `based on`, `study by`, `survey by`, `data from`, `figures from`.
 The publication gate this question carried is **lifted**: a `numeric_claims` FP/FN figure may now be published, provided it is labelled v1 or v2 per 06 §3.2.
+
+⚠ A marker is **not** a verification. It suppresses only this detector, whose question is "was this figure attributed?" — never "is the attribution true?", which is `rag_grounding`'s independent question. The two are *meant* to disagree on a plausible citation for a figure the context never states; 06 keeps that pair as a control and `test_a_citation_is_not_a_verification` pins it.
+
+*Housekeeping, 2026-08-26:* the caveat above and a `Status: **OPEN**` deadline line reading "before any `numeric_claims` number reaches a report, the README…" were left stranded under **Q-10**'s heading when this question moved to *Resolved*. That line asserted the very gate ADR-025 lifted — the **same stale-gate defect** as `[D2-report-emits-a-q18-publication-gate-adr-025-lifted]`, from the same root cause (a question moved; its dependents did not), in a second file. It is removed under that deviation's ruling rather than filed again, and the caveat it was stranded with is **relocated here, not deleted** — it is unique in the repo and `tests/test_numeric_claims.py::test_a_citation_is_not_a_verification` pins it. Amendment 2's proof machinery is not engaged: this is a markdown doc read by no code, so it cannot move a figure.
 
 **Q-17 — 04 §2 names "Aho-Corasick keyword sets"; the implementation uses a compiled regex alternation.** — RESOLVED 2026-08-26 (MINOR gap, AGENTS.md §6; agent-resolved).
 Why: `pyahocorasick` is not a declared dependency, and the documented term source (`blocklist_extra`) ships **empty** in all three policies — so the structure would be carrying zero terms.

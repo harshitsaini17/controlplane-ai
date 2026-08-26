@@ -14,16 +14,18 @@ Every number below is reproducible from this state (NFR-INT-001).
 
 | Field | Value |
 |---|---|
-| Generated (UTC) | 2026-08-25T21:23:25+00:00 |
-| Dataset digest | `3b3931365a3c29187d111266fffe45071717de48ba9b55688e60556c492b9996` |
-| Frozen at | `b37d1909f5fb` — MATCHES |
+| Generated (UTC) | 2026-08-26T05:02:27+00:00 |
+| Dataset digest | `6a3ecbbe75fd020bf806bf647d572c85ee187198fb9828eaac5e1c6e00737fbd` |
+| Frozen at | `f162959f7d29` — MATCHES |
 | Cases loaded | 280 (derived from the files, never asserted) |
-| Code commit | `70eeaa4fdd9d` |
+| Code commit | `fbcfcf593552` |
 | Python | 3.14.6 |
 | Platform | Linux 7.1.2-arch3-1 · x86_64 |
 | Command | `python -m eval.run_all` |
 
 ## Detectors (06 §3)
+
+These are the **shipping** implementations. The two detectors revised under ADR-026 also carry a frozen v1 baseline, re-measured every run and tabulated against these figures in *Disclosed revision* below.
 
 Precision / recall / F1 per label, case-level, scored **only against each detector's own slice of the 04 §1.1 taxonomy** — a toxicity case is not a miss for `tier1_pii`. `n/a` means the denominator was empty: undefined, never 1.0.
 
@@ -35,14 +37,14 @@ Cases scored: **270** (out-of-stage, not scored: 0)
 
 | Label | Support | TP | FP | FN | Precision | Recall | F1 |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `pii.api_key` | 7 | 5 | 0 | 2 | 1.000 | 0.714 | 0.833 |
+| `pii.api_key` | 7 | 7 | 0 | 0 | 1.000 | 1.000 | 1.000 |
 | `pii.credit_card` | 11 | 11 | 0 | 0 | 1.000 | 1.000 | 1.000 |
 | `pii.email` | 15 | 15 | 0 | 0 | 1.000 | 1.000 | 1.000 |
-| `pii.phone` | 14 | 6 | 0 | 8 | 1.000 | 0.429 | 0.600 |
+| `pii.phone` | 14 | 7 | 0 | 7 | 1.000 | 0.500 | 0.667 |
 | `pii.ssn` | 14 | 14 | 0 | 0 | 1.000 | 1.000 | 1.000 |
-| **micro** | 61 | 51 | 0 | 10 | 1.000 | 0.836 | 0.911 |
+| **micro** | 61 | 54 | 0 | 7 | 1.000 | 0.885 | 0.939 |
 
-**Missed (10):** PII-028 (`pii.phone`), PII-029 (`pii.phone`), PII-030 (`pii.phone`), PII-038 (`pii.api_key`), PII-040 (`pii.api_key`), PII-042 (`pii.phone`), PII-044 (`pii.phone`), PII-047 (`pii.phone`), PII-051 (`pii.phone`), PII-053 (`pii.phone`)
+**Missed (7):** PII-028 (`pii.phone`), PII-030 (`pii.phone`), PII-042 (`pii.phone`), PII-044 (`pii.phone`), PII-047 (`pii.phone`), PII-051 (`pii.phone`), PII-053 (`pii.phone`)
 
 ### `tier1_blocklist`
 
@@ -59,16 +61,50 @@ Cases scored: **270** (out-of-stage, not scored: 0)
 
 Cases scored: **220** (out-of-stage, not scored: 50)
 
-> The definition of a 'citation marker' this detector turns on is **not in the spec** — it is provisional and tracked as **Q-18**, which gates publication of the figures below (AGENTS.md §7).
+> The 'citation marker' list this detector suppresses on is **normative** in 04 §2.4.2 — ADR-025 closed **Q-18**, and its Amendment 1 restricts `per` to attribution forms. It is lexical only, searched in the numeral's own sentence: judging whether a citation *supports* a figure is `rag_grounding`'s job, not this detector's. The figures below are publishable provided they are labelled v1 or v2 (06 §3.2) — see *Disclosed revision* below.
 
 | Label | Support | TP | FP | FN | Precision | Recall | F1 |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `hallucination.unsourced_numeric` | 16 | 12 | 33 | 4 | 0.267 | 0.750 | 0.393 |
-| **micro** | 16 | 12 | 33 | 4 | 0.267 | 0.750 | 0.393 |
+| `hallucination.unsourced_numeric` | 16 | 12 | 2 | 4 | 0.857 | 0.750 | 0.800 |
+| **micro** | 16 | 12 | 2 | 4 | 0.857 | 0.750 | 0.800 |
 
 **Missed (4):** HAL-047 (`hallucination.unsourced_numeric`), HAL-051 (`hallucination.unsourced_numeric`), HAL-054 (`hallucination.unsourced_numeric`), HAL-058 (`hallucination.unsourced_numeric`)
 
-**False positives (33):** CLN-012 (`hallucination.unsourced_numeric`), PII-001 (`hallucination.unsourced_numeric`), PII-002 (`hallucination.unsourced_numeric`), PII-003 (`hallucination.unsourced_numeric`), PII-004 (`hallucination.unsourced_numeric`), PII-005 (`hallucination.unsourced_numeric`), PII-006 (`hallucination.unsourced_numeric`), PII-007 (`hallucination.unsourced_numeric`), PII-008 (`hallucination.unsourced_numeric`), PII-009 (`hallucination.unsourced_numeric`), PII-010 (`hallucination.unsourced_numeric`), PII-011 (`hallucination.unsourced_numeric`), PII-012 (`hallucination.unsourced_numeric`), PII-013 (`hallucination.unsourced_numeric`), PII-014 (`hallucination.unsourced_numeric`), PII-015 (`hallucination.unsourced_numeric`), PII-016 (`hallucination.unsourced_numeric`), PII-027 (`hallucination.unsourced_numeric`), PII-028 (`hallucination.unsourced_numeric`), PII-029 (`hallucination.unsourced_numeric`), PII-030 (`hallucination.unsourced_numeric`), PII-031 (`hallucination.unsourced_numeric`), PII-032 (`hallucination.unsourced_numeric`), PII-033 (`hallucination.unsourced_numeric`), PII-034 (`hallucination.unsourced_numeric`) … +8 more
+**False positives (2):** HAL-021 (`hallucination.unsourced_numeric`), PII-014 (`hallucination.unsourced_numeric`)
+
+## Disclosed revision — v1 vs v2 (ADR-026, 06 §3.2)
+
+A detector revised **after** its failures were measured produces weaker evidence than one measured blind, however carefully the revision was derived. So the v1 figures are not overwritten and not deleted — they are re-measured here alongside v2, every run.
+
+**The v1 columns are computed, not transcribed.** `controlplane/detectors/_v1_*.py` hold the original implementations, byte-identical to the commit that produced the blind measurement and carrying a DO-NOT-EDIT banner. A v1 number quoted from an older report would be unverifiable, and AGENTS.md §7 requires every judge-facing number to be reproducible by a command in this repo — so the baseline is re-derived on every run instead.
+
+| Detector | Metric | v1 (blind first contact) | v2 (post-revision, disclosed) | Δ |
+|---|---|---:|---:|---:|
+| `tier1_pii` | precision | 1.000 | 1.000 | ±0.000 |
+|  | recall | 0.836 | 0.885 | +0.049 |
+|  | F1 | 0.911 | 0.939 | +0.028 |
+|  | TP | 51 | 54 | +3 |
+|  | FP | 0 | 0 | +0 |
+|  | FN | 10 | 7 | -3 |
+| `numeric_claims` | precision | 0.267 | 0.857 | +0.590 |
+|  | recall | 0.750 | 0.750 | ±0.000 |
+|  | F1 | 0.393 | 0.800 | +0.407 |
+|  | TP | 12 | 12 | +0 |
+|  | FP | 33 | 2 | -31 |
+|  | FN | 4 | 4 | +0 |
+
+**Precision movement is shown next to recall on purpose** (06 §3.2): a revision that buys recall with precision has to show both halves, or the table flatters it.
+
+### Derivation and scope exclusions, restated with their cost
+
+- **`tier1_pii` v2** derives every pattern from a named published specification, cited   in 04 §2.5: ITU-T E.164, NANP conventions, RFC 7519/7515. Two scope exclusions are   deliberate precision-grounded DLP trade-offs, and **both cost recall**: bare 7-digit   local numbers (indistinguishable from order and ticket ids) and bare 32/64-hex   without a credential cue (collides with git SHAs, digests, dashless UUIDs). An   exclusion that quietly removed hard cases would be indistinguishable from tuning,   which is why they are named here rather than only in the ADR.
+- **The NANP `N ∈ [2–9]` constraint adds no recall on this corpus** (ADR-026   Amendment 1). v1's broader phone pattern is deliberately retained and evaluated   first, so it shadows both NANP rows at equal extent. The entire v2 phone gain is   **E.164 plus the spaced-parenthesis variant**. v2 is kept a strict *superset* of v1   because that is what makes the permanent v1 baseline describe code that still ships.
+- **`numeric_claims` v2** deletes the bare large-digit-run rule (ADR-025): measured   blind it scored precision 0.267, with 30 of 33 false positives on `PII-*` cases,   because an SSN, a card and a phone number are all runs of digits. A numeral now   fires only on a quantity shape, and an identifier pre-filter runs first and absolute.
+- **One re-measurement.** ADR-026 §5 permits exactly one, and forbids touching the   harness afterwards. If v2 misses a target the miss stands and **the target does not   move**.
+
+### v1 metric validity across the freeze bump
+
+ADR-024 bumped the freeze after v1 was first measured. Its seven changed cases altered `action_expected` only — **no `labels_expected`** — so per-detector precision, recall and F1, which are computed against labels, remain valid over an identical label set (freeze history in 06 §1). A bump touching a label would have invalidated them.
 
 ## Not measured (rule 1: measured or absent)
 
@@ -103,9 +139,11 @@ Calibration quantiles need non-conformity scores from the confidence-kind detect
 
 ## NFR-EVAL-001 — Tier-1 PII recall ≥ 0.95
 
-Measured micro recall: **0.8361** over 61 positive label occurrences. Target 0.95 → **MISSED**.
+Measured micro recall: **0.8852** over 61 positive label occurrences. Target 0.95 → **MISSED**.
 
-A missed target is reported as missed and raised as a **D3 deviation** (AGENTS.md §5.1, 06 §1) — never tuned away by editing the detector against these cases.
+The permanent v1 baseline is **0.8361** (blind first contact, ADR-026 §1), re-measured on this run rather than quoted. Both numbers stand in the record.
+
+A missed target is reported as missed and raised as a **D3 deviation** (AGENTS.md §5.1, 06 §1) — never tuned away by editing the detector against these cases. Under ADR-026 §5 this is the single permitted re-measurement: the target does not move and the harness is not touched.
 
 ---
 
