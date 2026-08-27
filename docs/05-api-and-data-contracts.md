@@ -84,7 +84,10 @@ CREATE TABLE audit_records (
   upstream_class TEXT CHECK(upstream_class IN ('dev','measured')),    -- ADR-018 provenance
   cascade_escalated INTEGER,
   tokens_in INTEGER, tokens_out INTEGER, est_cost_usd REAL,
-  latency_json TEXT,            -- per-detector ms + gateway_overhead_ms + upstream_ms
+  latency_json TEXT,            -- per-detector ms + total_attributable_overhead_ms +
+                                --   upstream_ms + input_hold_ms + sentence_holds_ms[] +
+                                --   added_time_to_last_byte_ms   (ADR-030; last three
+                                --   NOT YET EMITTED — M-20)
   -- Coverage: which detectors RAN for this request, and which were expected and did not
   -- (M-10). Absence of coverage is a fact a reader must be able to see, not infer from a
   -- short `signals_json`. `{}` means "coverage not recorded" and is distinct from
@@ -161,7 +164,9 @@ The proposal/README show this shape (assembled from `audit_records`):
   "model": {"tier_requested":"small","used":"openai/gpt-oss-120b",
             "upstream_class":"measured","cascade_escalated":true},
   "cost": {"tokens_in":812,"tokens_out":344,"est_usd":0.0041},
-  "latency": {"gateway_overhead_ms":46.1,"upstream_ms":1240.0},
+  "latency": {"total_attributable_overhead_ms":46.1,"upstream_ms":1240.0,
+              "input_hold_ms":12.4,"sentence_holds_ms":[18.9,14.8],
+              "added_time_to_last_byte_ms":51.7},
   "detectors": {"ran":["tier1_pii","numeric_claims"],
                 "not_run":[{"detector":"fast_consistency","reason":"not_implemented"}]},
   "record_status": "complete",
@@ -230,7 +235,9 @@ cp_consistency_lagged_total{use_case}     cp_probe_rejections_total{use_case}
 cp_fallback_engaged_total{from_provider,to_provider,reason}      # FR-GW-006
 cp_pricing_missing_total{provider,model}                        # ADR-022
 ```
-The definition of `cp_gateway_overhead_ms` / `latency_json.gateway_overhead_ms` is **normative in 06 §4** — implementations and dashboards must use that formula, not an ad-hoc one.
+The definition of `cp_gateway_overhead_ms` / `latency_json.total_attributable_overhead_ms` is **normative in 06 §4** — implementations and dashboards must use that formula, not an ad-hoc one.
+
+**ADR-030 renamed that key** (`gateway_overhead_ms` → `total_attributable_overhead_ms`; same formula, no longer the targeted figure) and added three series: `input_hold_ms`, `sentence_holds_ms` (a **list**, one entry per sentence — the only non-scalar in this vocabulary, because NFR-P-001 now takes percentiles over holds rather than over requests) and `added_time_to_last_byte_ms`. This vocabulary is **enforced at the audit write path** by `check_latency_keys`, so all four are the contract here and the last three are **not yet emitted** — the intervals exist in `app.py` but are accumulated rather than recorded (M-20). The metric name `cp_gateway_overhead_ms` is **unchanged**: renaming a metric would orphan history for a figure whose definition did not change.
 
 ## 6. Config files
 

@@ -88,7 +88,26 @@ LIVE_REQUESTS = 30
 DEFAULT_CADENCE_MS = 0.5
 
 #: NFR-P-001, streaming pipelines only, on demo hardware.
-NFR_P_001: dict[str, float] = {"p50": 40.0, "p99": 100.0}
+#: NFR-P-001 as **re-scoped by ADR-030**: the targets attach to the two holds a user actually
+#: waits through, not to the per-request sum. Derived in ADR-030 from the 04 §2 budgets under the
+#: parallel-at-Tier-2 execution model — `input_hold` P99 50 ms covers its 25 ms worst case,
+#: `sentence_hold` P99 100 ms covers the 60 ms `on_sampled` composition.
+NFR_P_001: dict[str, dict[str, float]] = {
+    "input_hold_ms": {"p50": 40.0, "p99": 50.0},
+    "sentence_holds_ms": {"p50": 40.0, "p99": 100.0},
+}
+
+#: Why NFR-P-001 currently has no verdict. Printed rather than inferred: the old per-request
+#: target is withdrawn and the per-hold series are not emitted yet (M-20), which is the third
+#: state — neither "met" nor "failed" (M-10 / ADR-027 Amendment 1).
+NFR_P_001_NOT_MEASURED = (
+    "**NFR-P-001: `not measured`.** ADR-030 re-scoped it onto `input_hold_ms` and "
+    "`sentence_holds_ms`, and neither series is emitted yet (**M-20**) — the intervals exist in "
+    "`app.py` but are accumulated into one figure rather than recorded per hold. The previous "
+    "per-request target is **withdrawn**, so this run neither meets nor fails NFR-P-001. "
+    "`--check` therefore returns no NFR-P-001 verdict, which 06 §4 requires be stated in these "
+    "words rather than left to read as a pass."
+)
 
 #: 01 §3 pipeline labels, so the report speaks the docs' vocabulary.
 UC_LABEL: dict[str, str] = {
@@ -206,6 +225,12 @@ class Sample:
     wall_ms: float
     http_status: int
     verdict: str
+    #: The ADR-030 per-hold series, read back from `latency_json` — empty until M-20 lands.
+    #: Empty means "not recorded", never "zero holds": a streaming request that released a
+    #: sentence necessarily held it, so a zero-length series here is an absent measurement.
+    hold_series: tuple[float, ...] = ()
+    #: The ADR-030 input-lane hold. `None` for the same reason, kept distinct from 0.0.
+    input_hold_ms: float | None = None
 
     @property
     def reference_delta_ms(self) -> float:
@@ -316,6 +341,16 @@ def run_batch(
                     wall_ms=wall_ms,
                     http_status=response.status_code,
                     verdict=view["verdict"],
+                    # Forward-compatible read-back. Absent today (M-20), so these stay empty
+                    # rather than defaulting to a number: `nfr_p001_measurable()` then reports
+                    # honestly, and flips the day `app.py` records the holds — no edit here.
+                    hold_series=tuple(
+                        float(v) for v in (view["latency"].get("sentence_holds_ms") or ())
+                    ),
+                    input_hold_ms=(
+                        float(view["latency"]["input_hold_ms"])
+                        if view["latency"].get("input_hold_ms") is not None else None
+                    ),
                 )
             )
     return batch
@@ -382,29 +417,33 @@ class Violation:
 
 
 def check_nfr_p001(batch: Batch) -> list[Violation]:
-    """NFR-P-001 against the **streaming** table only (06 §4 scope).
+    """No NFR-P-001 verdict is possible yet, and an empty list here is **not a pass**.
 
-    Checked per use case *and* over the pooled streaming sample. Per use case because a policy
-    with heavier detector work could breach while the pool stays under; pooled because
-    NFR-P-001 is stated as one gateway-wide figure, not as a per-pipeline one.
+    Before ADR-030 this gated the per-request `gateway_overhead_ms` sum against P50 40 / P99
+    100 ms. ADR-030 removed that quantity from NFR-P-001's scope — it is still published, as
+    `total_attributable_overhead_ms`, but untargeted — and re-scoped the requirement onto the
+    per-hold series. Those are not emitted yet (M-20).
+
+    So this returns nothing for a reason 06 §4 names explicitly: continuing to gate the sum
+    would assert a requirement the docs no longer contain, and gating nothing *silently* would
+    render as "no violation" and read as a pass. The report prints
+    `NFR_P_001_NOT_MEASURED` instead, and `nfr_p001_measurable()` is what will flip when the
+    instrumentation lands.
+
+    `batch` is kept in the signature deliberately: the call site does not change when M-20
+    lands, only this body does.
     """
-    violations: list[Violation] = []
-    subjects: list[tuple[str, list[float]]] = [
-        (f"{UC_LABEL[uc]} {uc}", batch.overheads(uc, streaming=True)) for uc in USE_CASES
-    ]
-    subjects.append(("all streaming pipelines", batch.overheads(streaming=True)))
+    return []
 
-    for subject, values in subjects:
-        stats = Stats.of(values)
-        if stats is None:
-            continue
-        for metric, target in NFR_P_001.items():
-            measured = getattr(stats, metric)
-            if measured >= target:
-                violations.append(
-                    Violation("NFR-P-001", subject, metric.upper(), target, measured)
-                )
-    return violations
+
+def nfr_p001_measurable(batch: Batch) -> bool:
+    """Whether this run carries the series ADR-030 targets.
+
+    Reads the audit records rather than trusting a flag, so the day `app.py` starts emitting
+    the holds this returns True without an edit here — and until then no amount of sample
+    volume can make the report claim a verdict it has no series for.
+    """
+    return any(s.hold_series for s in batch.samples)
 
 
 def detector_stats(batch: Batch) -> dict[str, Stats]:
@@ -530,9 +569,19 @@ def project_tier2(cases: Sequence[dict[str, Any]]) -> dict[str, Any]:
             "sentence_ms": sen,
             "live_input_ms": cost(live_inp, mode),
             "live_sentence_ms": cost(live_sen, mode),
+            #: The ADR-030 verdicts: each hold against its own P99, which is the comparison
+            #: NFR-P-001 now makes. Derived from the same budgets as the sum above, so the
+            #: respecification changes which number is judged, never the arithmetic.
+            "input_within": inp < NFR_P_001["input_hold_ms"]["p99"],
+            "sentence_within": sen < NFR_P_001["sentence_holds_ms"]["p99"],
             "points": [
+                # `over_withdrawn_sum`, not `breach`. The per-request sum is exactly what
+                # ADR-030 removed from NFR-P-001's scope, so comparing it to 100 ms no longer
+                # yields a verdict — the number is retained and published, the comparison is
+                # not. Renamed rather than reinterpreted so nothing reading this key keeps a
+                # meaning it lost.
                 {"pct": name, "sentences": n, "total_ms": inp + n * sen,
-                 "breach": (inp + n * sen) >= NFR_P_001["p99"]}
+                 "over_withdrawn_sum": (inp + n * sen) >= 100.0}
                 for name, n in (("P50", int(percentile(counts, 50))),
                                 ("P95", int(percentile(counts, 95))),
                                 ("P99", int(percentile(counts, 99))),
@@ -639,14 +688,18 @@ def render(
         "non-streaming are tabulated separately because they are different quantities** — "
         "streaming sums measured hold intervals, non-streaming subtracts the upstream call "
         "from wall-clock (06 §4).",
-        "4. NFR-P-001 gates the **streaming** table only, per its own wording. The "
-        "non-streaming table is reported in full and gated by NFR-P-002 alone; applying a "
-        "streaming threshold to a subtraction-derived figure would invent a requirement.",
+        "4. **ADR-030 re-scoped NFR-P-001 onto the per-hold series, so the tables below carry "
+        "no NFR-P-001 verdict.** The per-request sum is retained and published under its new "
+        "name, untargeted; the requirement's own targets now attach to `input_hold_ms` and each "
+        "`sentence_holds_ms` entry, neither of which is emitted yet (M-20). Gating these tables "
+        "on a withdrawn target would assert a requirement the docs no longer contain.",
         "",
-        "## `gateway_overhead_ms` — streaming pipelines (NFR-P-001 scope)",
+        "## `total_attributable_overhead_ms` — streaming pipelines (published, no target)",
         "",
-        f"Target: **P50 < {NFR_P_001['p50']:.0f} ms, P99 < {NFR_P_001['p99']:.0f} ms** "
-        "on demo hardware.",
+        "Renamed by **ADR-030** from `gateway_overhead_ms`; **the 06 §4 formula is unchanged**, so "
+        "these figures are comparable to every previously published run. What changed is its "
+        "standing: it is no longer the quantity NFR-P-001 targets, and it keeps being published "
+        "precisely so the respecification withdraws a target without withdrawing a number.",
         "",
         "| Pipeline | n | P50 | P95 | P99 | min | max |",
         "|---|---|---|---|---|---|---|",
@@ -658,7 +711,7 @@ def render(
 
     lines += [
         "",
-        "## `gateway_overhead_ms` — non-streaming pipelines",
+        "## `total_attributable_overhead_ms` — non-streaming pipelines",
         "",
         "Reported separately and **not** gated by NFR-P-001, whose scope is streaming "
         "pipelines. `total wall-clock − upstream duration` per 06 §4.",
@@ -740,9 +793,17 @@ def render(
             )
     else:
         lines.append(
-            "**No violation.** Every gated figure is inside its documented target. `--check` "
-            "exits zero on this state and nonzero on any row above appearing."
+            "**No violation of any requirement this run can evaluate.** `--check` exits zero on "
+            "this state and nonzero on any row above appearing. That covers NFR-P-002 only — see "
+            "the NFR-P-001 note below, which is a *third* state and not a pass."
         )
+    lines += ["", NFR_P_001_NOT_MEASURED]
+    if nfr_p001_measurable(batch):
+        lines += [
+            "",
+            "⚠ **This run carries per-hold series, so the note above is stale** — M-20 has landed "
+            "and `check_nfr_p001` still returns no verdict. Wire the gate to the emitted series.",
+        ]
 
     if batch.errors:
         lines += [
@@ -771,13 +832,20 @@ def render(
         "are unimplemented, so nothing here has been run. It is derived from `LANES` and "
         "`BUDGETS_MS` rather than written down, so a budget or lane change moves it.",
         "",
+        "This section is also **the evidence that motivated ADR-030**, which re-scoped NFR-P-001 "
+        "onto the per-hold series after this arithmetic showed the old per-request target could "
+        "not survive the documented detector set. It is kept here, unshortened, so the ruling's "
+        "basis stays visible in the artefact that produced it.",
+        "",
         f"Pending detectors on the hot-path lanes: "
         f"{', '.join(f'`{d}`' for d in projection['pending']) or 'none'}. `rag_grounding` "
         "(30 ms/sentence) is **excluded** — `expected_for` skips it without context docs and no "
         "dataset case carries any; with them, add that per sentence.",
         "",
-        "The multiplier matters more than the per-detector cost. 06 §4's streaming figure is a "
-        "**sum over per-sentence holds**, so a per-sentence budget is paid once per sentence. "
+        "The multiplier matters more than the per-detector cost. "
+        "`total_attributable_overhead_ms` is a **sum over per-sentence holds**, so a per-sentence "
+        "budget is paid once per sentence — which is precisely why ADR-030 stopped targeting the "
+        "sum and started targeting the hold. "
         "Segment counts measured over the frozen corpus with the real `Segmentation` "
         f"(n={projection['counts']['n']}): P50 **{projection['counts']['p50']:.0f}**, "
         f"P95 **{projection['counts']['p95']:.0f}**, P99 **{projection['counts']['p99']:.0f}**, "
@@ -790,12 +858,19 @@ def render(
             f"{row['sentence_ms']:.0f} ms per sentence "
             f"(today: {row['live_input_ms']:.0f} ms / {row['live_sentence_ms']:.0f} ms).",
             "",
-            "| Segments | Projected streaming overhead | vs 100 ms P99 target |",
+            f"NFR-P-001 as ADR-030 scopes it: input-lane hold "
+            f"**{'within' if row['input_within'] else 'OVER'}** its "
+            f"{NFR_P_001['input_hold_ms']['p99']:.0f} ms P99, per-sentence hold "
+            f"**{'within' if row['sentence_within'] else 'OVER'}** its "
+            f"{NFR_P_001['sentence_holds_ms']['p99']:.0f} ms P99.",
+            "",
+            "| Segments | Projected `total_attributable_overhead_ms` | vs the **withdrawn** "
+            "100 ms per-request target |",
             "|---|---|---|",
         ]
         for pt in row["points"]:
-            verdict = "**BREACH**" if pt["breach"] else "under"
-            lines.append(f"| {pt['pct']} — {pt['sentences']} | {pt['total_ms']:.0f} ms | {verdict} |")
+            note = "would have breached" if pt["over_withdrawn_sum"] else "would have been under"
+            lines.append(f"| {pt['pct']} — {pt['sentences']} | {pt['total_ms']:.0f} ms | {note} |")
         lines.append("")
 
     # Derived, never written down. The first version of this sentence asserted "three orders of
@@ -804,37 +879,53 @@ def render(
     # streaming table above reports. Absent and unresolvable are named rather than collapsed into
     # a number (M-10 / ADR-027 Amendment 1: "measured", "not measured" and "too small to resolve"
     # are three states).
+    # Derived, never written down. An earlier version of this sentence asserted "three orders of
+    # magnitude" and was wrong by more than one, and a prose constant describes only the machine
+    # that produced it. It no longer quotes a *factor*, because ADR-030 withdrew the target this
+    # series was compared against and a ratio against a withdrawn target would be arithmetic
+    # about nothing. Absent and unresolvable stay named rather than collapsed into a number
+    # (M-10: "measured", "not measured" and "too small to resolve" are three states).
     if stream_stats is None:
-        headroom = "no streaming series was measured in this run, so the margin is unstated"
+        headroom = "no streaming series was measured in this run, so there is nothing to compare"
     elif stream_stats.p99 <= 0.0:
         headroom = (
-            f"measured streaming P99 rounds to 0.00 ms over {stream_stats.n} samples, so the "
-            "margin is wider than this run can resolve"
+            f"the measured sum rounds to 0.00 ms P99 over {stream_stats.n} samples — smaller than "
+            "this run can resolve, let alone than any projected figure above"
         )
     else:
         headroom = (
-            f"measured streaming P99 is {stream_stats.p99:.2f} ms over {stream_stats.n} samples "
-            f"against the {NFR_P_001['p99']:.0f} ms target, a factor of "
-            f"{NFR_P_001['p99'] / stream_stats.p99:.0f}x"
+            f"the measured sum is {stream_stats.p99:.2f} ms P99 over {stream_stats.n} samples, "
+            f"against a smallest projected figure of "
+            f"{min(pt['total_ms'] for r in projection['rows'] for pt in r['points']):.0f} ms"
         )
 
     lines += [
-        "**The projection does not clear the target, and it fails under both readings.** At the "
-        "measured P99 segment count the projected overhead exceeds 100 ms even under the "
-        "*favourable* parallel reading — so the conclusion does not rest on `run_lane` being "
-        "sequential today. A single-sentence response stays inside budget; a multi-sentence one "
-        "does not.",
+        "**Under ADR-030's scope the composition fits, under both readings; under the withdrawn "
+        "per-request target it did not, under either.** That is the whole content of the "
+        "respecification: the arithmetic is unchanged and every budget is unchanged — what "
+        "changed is which quantity NFR-P-001 judges. The per-request sum still grows with the "
+        "segment count exactly as tabulated above, and is still published, so the trade-off is "
+        "legible rather than hidden.",
+        "",
+        "**The trade-off ADR-030 accepted, stated plainly:** a long response can hold "
+        f"~{max(pt['total_ms'] for r in projection['rows'] for pt in r['points']):.0f} ms in "
+        "total while *every individual sentence* passes its target. A per-hold guarantee is "
+        "genuinely weaker than a per-request one. It is the guarantee that matches what "
+        "sentence-level interception promises — each hold is the delay before *that* sentence "
+        "appears — and the total is published untargeted beside it so a reader can see both.",
+        "",
+        "**The fit is conditional, not unconditional (M-18).** `entity_enricher` is budgeted "
+        "per *span*, not per sentence, so a heavily-enriched sentence composes to `60 + 10k` and "
+        "crosses the 100 ms per-sentence P99 at **k = 4**. No doc bounds `k`. ADR-030 records "
+        "this against its own target rather than assuming it away, and inventing a cap to make "
+        "the target fit is exactly the move AGENTS.md §5.4 forbids.",
         "",
         "Three things this does **not** say. It is not a measurement, so it is not a D3 — a D3 "
-        f"needs an observed breach, and today's figures pass: {headroom}. "
+        f"needs an observed breach, and nothing here was observed: {headroom}. "
         "It is not a claim that the budgets are wrong: 04 §2 declares "
         "them and `run_with_budget` enforces them, so a detector at budget is a detector "
         "behaving as specified. And it is not a prediction that tier2 will actually cost its "
-        "full budget — a fast classifier well inside 25 ms changes the arithmetic entirely. "
-        "What it does say is that **NFR-P-001 and the 04 §2 budget set cannot both hold at the "
-        "measured segment distribution once the documented detector set is complete**, which is "
-        "a contradiction between two documents rather than a defect in either. Raised for a "
-        "ruling rather than resolved here (AGENTS.md §5.4).",
+        "full budget — a fast classifier well inside 25 ms changes the arithmetic entirely.",
         "",
         "## Scope and limitations",
         "",

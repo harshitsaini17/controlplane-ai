@@ -707,3 +707,152 @@ The shipped ratio is **2.0×**, and it is **exactly** 2.0× on input *and* on ou
 - **F6:** Cost plane gets a live enforcement moment — demo beat 7b added (budget-exhaustion BLOCK, SC-2 now covered live).
 - **F7:** Calibration n grown: `halluc.jsonl` 35→60, `borderline.jsonl` 10→20 (dataset ~265); 06 §3 now mandates printing calibration n + variance caveat next to the exchangeability caveat.
 - **F8:** `gateway_overhead_ms` given a normative definition in 06 §4 (streaming: ingress+input lane + Σ per-sentence hold + finalization, upstream wait excluded; non-streaming: wall-clock − upstream duration; TTFB delta reported as a separate reference row).
+
+## ADR-030 — NFR-P-001 is re-scoped to the user-perceived hold; the per-request sum is reported, not targeted (resolves `[D1-tier2-budgets-cannot-coexist-with-nfr-p-001]`)
+
+**Status:** Accepted 2026-08-27. Front-door respecification of NFR-P-001, ruled after the
+deviation was filed and before any Tier-2 measurement exists.
+
+**Context.** `eval/bench_latency`'s forward projection showed that NFR-P-001 (streaming P50 < 40 /
+P99 < 100 ms) and the 04 §2 per-sentence budget set cannot both hold once the documented detector
+set is complete. 06 §4 defines the streaming figure as a **sum over per-sentence holds**, so a
+per-sentence budget is paid once per sentence and the segment count multiplies it. Measured over
+the frozen corpus with the shipped `Segmentation` (n=280): P50 **1** segment, P95 **3**, P99 **6**,
+max **10**.
+
+The motivating evidence, preserved verbatim from the deviation rather than re-derived:
+
+| Segments | Sequential (as implemented) | Parallel (02 §3 intent) |
+|---|---|---|
+| P50 — 1 | 65 ms — under | 50 ms — under |
+| P95 — 3 | 133 ms — **breach** | 100 ms — **breach** |
+| P99 — 6 | 235 ms — **breach** | 175 ms — **breach** |
+| max — 10 | 371 ms — **breach** | 275 ms — **breach** |
+
+It breached under **both** readings, so the finding never rested on the sequential implementation.
+
+**Decision.**
+
+1. **NFR-P-001 is re-scoped to the user-perceived unit.** The targets attach to the two holds a
+   user actually waits through — the **input-lane hold** (before dispatch) and each
+   **per-sentence hold** (boundary arrival → release). A hold is the delay before *that* sentence
+   appears, which is what ADR-002's sentence-level interception buys and therefore the unit a
+   latency guarantee can honestly cover.
+2. **The per-request sum keeps being published, and loses only its target.** It is renamed
+   `total_attributable_overhead_ms` — same normative formula as `gateway_overhead_ms` (06 §4),
+   new name because the old one read as *the* headline figure and it is no longer the targeted
+   one. It appears in every latency report and in `latency_json`. **Nothing is withdrawn from
+   publication by this ADR.**
+3. **`added_time_to_last_byte_ms` is added as a measured, untargeted row** — the honest
+   end-to-end quantity, and the one a user's stopwatch would agree with. Untargeted because it
+   contains upstream token cadence, which the gateway does not control.
+4. **The per-sentence lane goes parallel when Tier-2 lands** (below), not before.
+
+### Derivation of the targets — from the documented budgets, not from convenience
+
+Composed from `BUDGETS_MS` and `LANES` under the parallel execution model of (4). Every figure
+below is arithmetic over 04 §2; none is measured, because the detectors it turns on do not exist.
+
+| Hold | Documented composition | Worst case |
+|---|---|---|
+| Input lane | `max(tier1_pii 2, tier1_blocklist 2, tier2_injection 25, cost_budget 1, loop_guard 1)` | **25 ms** |
+| Per-sentence, typical | `max(tier1_pii 2, tier1_blocklist 2, tier2_toxicity 25, numeric_claims 5)` — `rag_grounding` skipped without context docs | **25 ms** |
+| Per-sentence, with context docs | `+ rag_grounding 30` into the same `max` | **30 ms** |
+| Per-sentence, `on_sampled` boundary compare | `max(30, fast_consistency 60)` | **60 ms** |
+| Per-sentence, `+ k` enriched spans | `60 + 10k` (`entity_enricher` is **per span**, 04 §2.2) | **60 + 10k ms** |
+
+**Targets:** input-lane hold **P50 < 40 ms, P99 < 50 ms**; per-sentence hold **P50 < 40 ms,
+P99 < 100 ms**. Streaming pipelines only, as before.
+
+Why these and not others. The input lane's worst case is 25 ms and `tier2_injection` runs on
+*every* request, so its P50 cannot be set below 25 — 40/50 clears the documented composition with
+headroom for the unbudgeted policy+action step (below) without being loose enough to hide a
+regression. The per-sentence P50 of 40 ms covers the typical 25–30 ms composition; the P99 of
+100 ms covers the `on_sampled` worst case of 60 ms.
+
+**Two gaps this derivation surfaces rather than papers over**, per the ruling's own instruction
+that an unfittable composition is a budget problem and not a target to inflate:
+
+- **`entity_enricher` is unbounded per sentence.** At 10 ms per enriched span, `60 + 10k` crosses
+  the 100 ms P99 at **k = 4**. The per-sentence target is therefore satisfiable *only* under an
+  enrichment bound that no doc currently states. Logged as **M-18**; 04 §2.2 needs either a cap
+  or an explicit exclusion of enrichment from the hold. Not resolved here — inventing a cap to
+  make my own target fit is the move §5.4 exists to forbid.
+- **Policy evaluate + action apply are unbudgeted.** 06 §4 puts them inside the hold ("detector
+  wait + policy + action") but 04 §2 budgets only detectors. Measured today at well under 1 ms
+  for the whole step, so the targets above absorb it; stated because an unbudgeted term inside a
+  targeted quantity is a gap whether or not it currently matters. Logged as **M-19**.
+
+### Sampled consistency (04 §2.3) — explicitly bounded, not assumed away
+
+`consistency: on_sampled` is the only mode that puts `fast_consistency` inside a per-sentence
+hold, and its own **skip-on-lag** semantics bound it: the comparison happens *only if* sample-2
+has ≥ 70% of the primary's released+buffered length, and otherwise the sentence proceeds without
+the signal, audited `meta.consistency:"lagged"` and counted in `cp_consistency_lagged_total`. So
+the 60 ms term is **paid only when the sample is actually ready** — a lagging sample costs the
+alignment check, not the comparison. This is why the P99 target is set at the 60 ms composition
+rather than at some multiple of it: the mode cannot queue up compares, it drops them.
+
+`consistency: on` (UC-3, `streaming: false`) is untouched — it compares once, pre-delivery, in a
+non-streaming pipeline that NFR-P-001 never covered.
+
+### Execution model: sequential now, parallel at Tier-2
+
+02 §3 has always said per-sentence detectors run concurrently (`asyncio.gather`).
+`pipeline.run_lane` is sequential, and that was a *measurement* decision documented at
+`pipeline.py:212`: with three regex detectors at ~0.2 ms each, `gather` cannot overlap CPU-bound
+work on one event loop and would only make each detector's recorded `latency_ms` include the
+others'.
+
+**Ruling — the trigger is the first Tier-2 detector landing.** At that point composition becomes
+`~max` instead of `sum`, the concurrency is real (a transformer forward pass releases the loop),
+and per-detector spans stay honest because `gather` preserves per-task timing. Until then the
+sequential implementation **stays as-is**: switching now would change the conditions under which
+the shipped measurement was taken, for no benefit at 0.2 ms per detector.
+
+### Anti-laundering record (verbatim, as ruled)
+
+This amendment moves a target, so the reasons it is not target-gaming are recorded rather than
+left to inference:
+
+- **It lands BEFORE any Tier-2 measurement exists.** `tier2_toxicity` and `tier2_injection` are
+  unimplemented; nothing has been run against the old target and missed it.
+- **The motivating evidence is a projection, preserved above in full** — including the rows that
+  breach, and under both execution models rather than only the unfavourable one.
+- **The old per-request quantity continues to be published** in every latency report as
+  `total_attributable_overhead_ms`. It loses its target, not its visibility.
+- **This is categorically distinct from ADR-026 §5**, which bars moving a target that a
+  measurement has already missed. That bar is **untouched**: SL-1 (`tier1_pii` recall 0.8852 vs
+  the 0.95 target) remains **unmet and unmoved**, and ADR-026 §5's single re-measurement stays
+  consumed. The distinction is *when the number arrives* — a target respecified before any
+  measurement is a specification decision; one respecified after a miss is laundering.
+
+**Trade-off accepted.** A per-request guarantee is genuinely weaker: a 10-segment response may
+hold ~600 ms in total while every individual sentence passes its target. That total is published
+untargeted precisely so the weakening is legible rather than hidden, and
+`added_time_to_last_byte_ms` gives the end-to-end figure alongside it.
+
+### Implementation status — the contract lands now, the instrumentation with it
+
+This ADR settles the **contract**; three of its quantities are not yet emitted, and saying so is
+load-bearing rather than a caveat. `input_hold_ms`, `sentence_holds_ms` and
+`added_time_to_last_byte_ms` are new `latency_json` series: the intervals already exist in the
+code (`app.py:414` is the input-lane hold, `app.py:698`'s `unit_ms` is the per-sentence hold) but
+they are **accumulated into one figure and never recorded separately**, so the re-scoped targets
+cannot be evaluated until the write path carries them.
+
+Consequence, stated rather than glossed: **NFR-P-001 is `not measured` from this ADR until that
+instrumentation lands.** The old per-request target is withdrawn and the new per-hold targets have
+no series yet, which is the third state M-10 / ADR-027 Amendment 1 insists on — not "met", not
+"failed". The latency report must say exactly that, and `--check` must not gate NFR-P-001 on a
+quantity that is no longer its subject. A benchmark that kept gating the sum would be reporting
+a target the docs no longer contain; one that silently gated nothing would read as a pass.
+
+This is the ordinary spec-first order in this repo (docs precede code by design, AGENTS.md §2), so
+the doc is not "ahead of" the code in a way that needs reconciling — but the **05 §5 vocabulary is
+enforced at the write path** by `check_latency_keys`, so the new keys are documented as the
+contract and marked not-yet-emitted until `app.py` writes them. Tracked as **M-20**.
+
+**Docs touched:** 01 (NFR-P-001 row), 02 §3 (parallel-at-Tier-2 trigger), 05 §3/§5 (`latency_json`
+vocabulary: the rename plus the two new series), 06 §4 (formula gains the per-hold series and the
+last-byte row; the sum retained under its new name), 08 (deviation closed; M-18/M-19 logged).

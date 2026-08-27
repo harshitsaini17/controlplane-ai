@@ -194,41 +194,60 @@ def test_both_tables_are_populated_by_the_default_mix(batch):
     assert batch.by_stream_mode(False), "no buffered samples — 06 §4's second table is empty"
 
 
-def test_nfr_p001_gates_streaming_only():
-    """A slow non-streaming sample must not produce an NFR-P-001 violation.
+def test_nfr_p001_yields_no_verdict_because_adr_030_rescoped_it():
+    """The per-request sum is out of NFR-P-001's scope, so no sum can breach it.
 
-    NFR-P-001's own wording scopes it to streaming pipelines. Gating the subtraction-derived
-    non-streaming figure on the same threshold would invent a requirement the docs do not
-    state — and would do it in the direction that manufactures a D3.
+    Before ADR-030 this asserted the opposite: a 5-second streaming sum *had* to breach. That
+    assertion encoded the target ADR-030 withdrew, so it is re-authored rather than deleted —
+    the property worth pinning is that the harness stops asserting a requirement the docs no
+    longer contain. An absurd sum is used deliberately: if any threshold were still wired to
+    this series, 5 seconds would trip it.
     """
-    slow_buffered = bl.Batch(
-        samples=[_sample(use_case="finance_advisor", streaming=False, overhead_ms=5_000.0)],
-        store=PolicyStore(),
-    )
-    assert bl.check_nfr_p001(slow_buffered) == []
-
-    slow_streamed = bl.Batch(
+    absurd = bl.Batch(
         samples=[_sample(use_case="support_bot", streaming=True, overhead_ms=5_000.0)],
         store=PolicyStore(),
     )
-    violations = bl.check_nfr_p001(slow_streamed)
-    assert violations, "a 5-second streaming overhead must breach NFR-P-001"
-    assert {v.requirement for v in violations} == {"NFR-P-001"}
-    assert {v.metric for v in violations} == {"P50", "P99"}
-
-
-def test_nfr_p001_reports_the_pool_as_well_as_each_pipeline():
-    """One breaching pipeline must surface both as itself and in the pooled row.
-
-    NFR-P-001 is stated as one gateway-wide figure; reporting only the per-use-case rows would
-    let a reader think the gateway as a whole was inside budget.
-    """
-    batch = bl.Batch(
-        samples=[_sample(use_case="support_bot", overhead_ms=5_000.0)], store=PolicyStore()
+    assert bl.check_nfr_p001(absurd) == []
+    # And non-streaming likewise — the scope narrowing did not silently widen.
+    buffered = bl.Batch(
+        samples=[_sample(use_case="finance_advisor", streaming=False, overhead_ms=5_000.0)],
+        store=PolicyStore(),
     )
-    subjects = {v.subject for v in bl.check_nfr_p001(batch)}
-    assert "all streaming pipelines" in subjects
-    assert any("support_bot" in s for s in subjects)
+    assert bl.check_nfr_p001(buffered) == []
+
+
+def test_an_empty_nfr_p001_verdict_never_renders_as_a_pass(batch):
+    """Returning no violations must not read as "met". This is the whole M-20 risk.
+
+    A gate that silently checks nothing produces the same empty list as a gate that checked and
+    found nothing wrong. The report therefore has to *say* which of the two happened, and this
+    pins that it says the honest one (M-10 / ADR-027 Amendment 1: three states, not two).
+    """
+    body = bl.render(batch, dataset_dir=bl.DATASET_DIR, provenance_note="", cadence_ms=0.5,
+                     violations=[], live_note="")
+    assert "**NFR-P-001: `not measured`.**" in body
+    assert "neither meets nor fails NFR-P-001" in body
+    # The withdrawn target must not appear as a live claim anywhere.
+    assert "NFR-P-001 met" not in body
+    assert "(NFR-P-001 scope)" not in body
+
+
+def test_the_not_measured_note_goes_stale_loudly_when_the_series_arrive(batch, store):
+    """When M-20 lands, the report must flag its own note rather than keep printing it.
+
+    Without this the instrumentation could land and the report would go on saying "not
+    measured" — an untrue claim that looks conservative, which is the failure mode hardest to
+    notice.
+    """
+    assert not bl.nfr_p001_measurable(batch), "no run emits the series yet"
+
+    future = bl.Batch(
+        samples=[_sample(hold_series=(18.9, 14.8), input_hold_ms=12.4)], store=store
+    )
+    assert bl.nfr_p001_measurable(future)
+    body = bl.render(future, dataset_dir=bl.DATASET_DIR, provenance_note="", cadence_ms=0.5,
+                     violations=[], live_note="")
+    assert "the note above is stale" in body
 
 
 # ---------------------------------------------------------------------------
@@ -444,7 +463,7 @@ def test_the_reference_row_is_labelled_as_not_the_headline(batch):
                      cadence_ms=0.5, violations=[], live_note="")
     assert "never as the headline number" in body
     assert "upper bound" in body
-    headline_at = body.index("streaming pipelines (NFR-P-001 scope)")
+    headline_at = body.index("`total_attributable_overhead_ms` — streaming pipelines")
     reference_at = body.index("Reference row")
     assert headline_at < reference_at, "the reference row must not precede the headline table"
 
@@ -495,9 +514,18 @@ def test_the_freeze_gate_runs_before_any_measurement(tmp_path, capsys):
 
 
 def test_a_clean_run_exits_zero_and_writes_the_report(tmp_path):
+    """Assert on the SECTION HEADING, not the bare series name.
+
+    The old form of this test asserted `"gateway_overhead_ms" in body`, which after
+    ADR-030's rename passes on the Method section's prose *about* the rename — so it
+    would have stayed green with the series itself gone. The heading is the structural
+    thing: it exists only if the series was actually tabulated.
+    """
     out = tmp_path / "latency.md"
     assert bl.main(["--requests", "6", "--out", str(out)]) == 0
-    assert "gateway_overhead_ms" in out.read_text()
+    body = out.read_text()
+    assert "## `total_attributable_overhead_ms` — streaming pipelines" in body
+    assert "## `total_attributable_overhead_ms` — non-streaming pipelines" in body
 
 
 def test_check_exits_nonzero_on_a_violation(tmp_path, monkeypatch):
@@ -510,13 +538,22 @@ def test_check_exits_nonzero_on_a_violation(tmp_path, monkeypatch):
 
     def slow(mix, *, cadence_ms=bl.DEFAULT_CADENCE_MS):
         batch = real(mix, cadence_ms=cadence_ms)
-        batch.samples.append(_sample(overhead_ms=5_000.0))
+        # NFR-P-002, not NFR-P-001. ADR-030 left NFR-P-001 with no gateable series (M-20), so
+        # a slow *sum* can no longer trip anything — a tripwire test built on it would pass by
+        # asserting nothing. Overshooting `tier1_pii`'s 2 ms budget exercises the same
+        # exit-code path against a requirement that is still live.
+        batch.metrics.observe("cp_detector_latency_ms", 5_000.0, detector="tier1_pii")
         return batch
 
     monkeypatch.setattr(bl, "run_batch", slow)
     out = tmp_path / "latency.md"
     assert bl.main(["--requests", "6", "--out", str(out), "--check"]) == 1
-    assert "NFR-P-001" in out.read_text()
+    # Asserted against the violation TABLE, not the bare string "NFR-P-002": that name also
+    # appears in the report's opening line, so a substring check would pass on a harness that
+    # had stopped detecting anything at all.
+    body = out.read_text()
+    assert "| NFR-P-002 | tier1_pii | P99 | 2.0 ms |" in body
+    assert "never a relaxed threshold" in body
 
 
 def test_without_check_a_violation_still_exits_zero(tmp_path, monkeypatch):
@@ -529,13 +566,18 @@ def test_without_check_a_violation_still_exits_zero(tmp_path, monkeypatch):
 
     def slow(mix, *, cadence_ms=bl.DEFAULT_CADENCE_MS):
         batch = real(mix, cadence_ms=cadence_ms)
-        batch.samples.append(_sample(overhead_ms=5_000.0))
+        batch.metrics.observe("cp_detector_latency_ms", 5_000.0, detector="tier1_pii")
         return batch
 
     monkeypatch.setattr(bl, "run_batch", slow)
     out = tmp_path / "latency.md"
     assert bl.main(["--requests", "6", "--out", str(out)]) == 0
-    assert "violation" in out.read_text().lower()
+    body = out.read_text()
+    # The row, not the requirement name, and not the injected 5000.0 either: P99 is
+    # linear-interpolated over the observations already in the registry, so the breach renders
+    # at the interpolated value rather than at the number handed in.
+    assert "| NFR-P-002 | tier1_pii | P99 | 2.0 ms |" in body
+    assert "never a relaxed threshold" in body
 
 
 def test_the_command_stamp_reproduces_the_actual_invocation(tmp_path):
@@ -714,7 +756,12 @@ def test_a_single_segment_response_stays_inside_the_target(corpus):
     for row in rows:
         first = row["points"][0]
         assert first["sentences"] == 1
-        assert not first["breach"], "a one-sentence response is projected inside the target"
+        assert not first["over_withdrawn_sum"], "one sentence was inside even the old target"
+        # The quantities NFR-P-001 actually targets after ADR-030. These hold for every segment
+        # count, not just one, because a per-hold target does not accumulate — which is the
+        # substance of the respecification and the reason it resolves the contradiction.
+        assert row["input_within"], "input-lane hold must fit its derived P99"
+        assert row["sentence_within"], "per-sentence hold must fit its derived P99"
 
 
 def test_the_headroom_factor_is_derived_from_the_measured_series(batch, corpus):
@@ -731,11 +778,16 @@ def test_the_headroom_factor_is_derived_from_the_measured_series(batch, corpus):
 
     stats = bl.Stats.of(batch.overheads(streaming=True))
     assert stats is not None and stats.p99 > 0.0, "fixture must produce a resolvable series"
-    expected = f"{bl.NFR_P_001['p99'] / stats.p99:.0f}x"
-    assert f"a factor of {expected}" in section
-    assert f"{stats.p99:.2f} ms over {stats.n} samples" in section
-    # And the claim it replaced must not survive anywhere in the report.
+    assert f"the measured sum is {stats.p99:.2f} ms P99 over {stats.n} samples" in section
+    # Compared against the smallest PROJECTED figure, not against a target: ADR-030 withdrew
+    # the 100 ms per-request threshold, and a ratio against a withdrawn target is arithmetic
+    # about nothing.
+    smallest = min(pt["total_ms"] for r in bl.project_tier2(corpus[:20])["rows"]
+                   for pt in r["points"])
+    assert f"smallest projected figure of {smallest:.0f} ms" in section
+    # Neither claim this sentence has already got wrong may survive anywhere in the report.
     assert "orders of magnitude" not in body
+    assert "a factor of" not in body
 
 
 def test_an_unmeasured_streaming_series_states_that_rather_than_a_factor(store, corpus):
