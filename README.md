@@ -124,7 +124,7 @@ the business proposal, or the demo video unless it has a row here.
 | Claim | Command | Report | Status |
 |---|---|---|---|
 | Gateway overhead P50/P95/P99 (`total_attributable_overhead_ms`) | `python -m eval.bench_latency` | `reports/latency_report.md` | **Measured, and deliberately not a verdict.** Streaming: P50 **0.25 ms** · P95 **0.48 ms** · P99 **1.46 ms** over 200 samples; non-streaming is a *different quantity*, tabulated apart at P99 **0.42 ms** (n=100). **ADR-030 withdrew this quantity's target**, so these figures carry no pass/fail — they are published exactly so a withdrawn target does not become a withdrawn number (the 06 §4 formula is unchanged, so they stay comparable to earlier runs). Client wall-clock − upstream (**4.14 ms** P99) is an upper bound only — it includes `TestClient` transport, which 06 §4 bars as the headline. **Measured with 3 of 11 detectors live** |
-| Per-sentence and input-lane hold vs NFR-P-001 | `python -m eval.bench_latency` | `reports/latency_report.md` | **`not measured`** — the third state, neither met nor missed. ADR-030 re-scoped NFR-P-001 onto `input_hold_ms` (P50 < 40 / P99 < 50 ms) and each `sentence_holds_ms` entry (P50 < 40 / P99 < 100 ms); **neither series is emitted yet (M-20)**, so the harness returns no verdict rather than letting the withdrawn per-request figure read as a pass. Targets were *derived* from the 04 §2 budgets, not fitted — arithmetic in ADR-030 |
+| Per-sentence and input-lane hold vs NFR-P-001 | `python -m eval.bench_latency` | `reports/latency_report.md` | **Met.** `input_hold_ms` P50 **0.13** / P99 **0.26** ms against < 40 / < 50 (n=200); `sentence_holds_ms` P50 **0.14** / P99 **0.77** ms against < 40 / < 100 (**n=238 holds**, not requests — a 10-segment response contributes 10 samples). ADR-030 re-scoped NFR-P-001 onto these two series and *derived* the targets from the 04 §2 budgets rather than fitting them. The margin is large because **only the Tier-1 regex detectors exist**: the same table's forward projection is what the figure becomes when Tier-2 lands, and it is arithmetic, not a measurement |
 | Per-detector latency vs budget | `python -m eval.bench_latency` | `reports/latency_report.md` | **NFR-P-002 met for the 3 detectors that exist**, all with **0 timeout faults**: `tier1_pii` P99 **0.126 ms**/2 ms · `tier1_blocklist` **0.020 ms**/2 ms · `numeric_claims` **0.205 ms**/5 ms. The other **8 are not exercised** and their budgets are **untested, not met** — the report names them rather than showing zeros |
 | Tier-1 PII recall | `python -m eval.run_all` | `reports/eval_report.md` §NFR-EVAL-001 | v1 **0.8361** → v2 **0.8852** — target 0.95 **MISSED**, target unmoved (ADR-026 §5). Residual misses: 7/7 are the documented bare-7-digit scope exclusion (ADR-026 §3), verified programmatically — no unexplained failure. Standing Limitation, `docs/08` |
 | Per-detector precision / recall / F1 | `python -m eval.run_all` | `reports/eval_report.md` §Detectors | **measured for 3 of 11 detectors**; 8 absent, reported as skipped. 136 of 218 labelled positives are unscored because their detector does not exist yet |
@@ -151,14 +151,18 @@ corrected *after* the single permitted re-measurement. The proof enumerates ever
 differing lines out of 151 and shows all 276 numeric tokens on measurement-bearing lines
 identical, so a reader can verify no figure moved instead of taking it on trust.
 
-**9 of the 14 rows above carry a measured figure; the remaining 5 are blank on purpose, and
-they are blank for three different reasons that this table keeps apart.** A placeholder number
+**10 of the 14 rows above carry a measured figure; the remaining 4 are blank on purpose, and
+they are blank for different reasons that this table keeps apart.** A placeholder number
 is worse than a blank, so a row flips only when a report actually produces it, carrying its
 method and sample size. `not yet measured` means the harness does not exist yet (3 rows);
-`not computed` means the inputs do not exist yet (τ needs the confidence-kind detectors);
-`not measured` is the third state proper — the harness runs and deliberately returns **no
-verdict**, which is where NFR-P-001 sits until the per-hold series are emitted (M-20). Reading
-any of the three as a pass is the specific failure this table is built to prevent.
+`not computed` means the inputs do not exist yet (τ needs the confidence-kind detectors).
+
+The third state proper — `not measured`, where the harness **runs** and deliberately returns
+**no verdict** — currently occupies **no row**: NFR-P-001 vacated it when the per-hold series
+landed. It stays reachable rather than retired, which is the point of building it: a benchmark
+run carrying no streaming traffic still renders `not measured` for NFR-P-001 instead of
+reporting a pass over an empty population. Reading any blank as a pass is the specific failure
+this table is built to prevent.
 
 The detector rows above were produced against the frozen 280-case dataset at **freeze 2** —
 commit `f162959f7d29ead32342fd8744bd10ed244369af`, digest `6a3ecbbe75fd020b…` — whose hash

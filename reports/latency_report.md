@@ -6,18 +6,18 @@ NFR-P-001 (gateway hot-path overhead, **streaming pipelines**) and NFR-P-002 (pe
 
 | Field | Value |
 |---|---|
-| Generated (UTC) | 2026-08-27T11:55:55+00:00 |
+| Generated (UTC) | 2026-08-27T13:38:40+00:00 |
 | Dataset digest | `6a3ecbbe75fd020bf806bf647d572c85ee187198fb9828eaac5e1c6e00737fbd` |
 | Frozen at | `f162959f7d29` — MATCHES |
 | Requests attempted | 300 |
 | Samples recorded | 300 |
 | Stub cadence | 0.5 ms/token |
-| Code commit | `149b00fd4191` |
+| Code commit | `505c82dfc13d` |
 | Python | 3.14.6 |
 | Platform | Linux 7.1.2-arch3-1 · x86_64 |
 | CPU | unreported |
 | Percentile method | linear-interpolated (`telemetry.metrics.percentile`) |
-| Command | `python -m eval.bench_latency` |
+| Command | `python -m eval.bench_latency --check` |
 
 > **Upstream provenance:** the active provider `kiro-local` is **dev-class**, which `require_measured_upstream()` refuses for judge-facing output (ADR-018). **The stub-upstream tables are unaffected:** they involve no provider call at all — that is the point of a stub, and 06 §4 chose one so gateway overhead is isolated from provider variance. The gate binds only the end-to-end sanity row, which is reported as not-run below.
 
@@ -26,7 +26,16 @@ NFR-P-001 (gateway hot-path overhead, **streaming pipelines**) and NFR-P-002 (pe
 1. 300 requests replayed from the frozen corpus, balanced across the three pipelines and cycling deterministically — two runs on one freeze issue the identical sequence, so a change in these numbers is drift rather than noise.
 2. Upstream is a **stub** emitting canned SSE word-by-word at the cadence above, so gateway overhead is isolated from provider variance (06 §4). Word-by-word matters: a single-chunk response would collapse every per-sentence hold into one and report the overhead of a pipeline nobody runs.
 3. `gateway_overhead_ms` is read from each request's audit record. **Streaming and non-streaming are tabulated separately because they are different quantities** — streaming sums measured hold intervals, non-streaming subtracts the upstream call from wall-clock (06 §4).
-4. **ADR-030 re-scoped NFR-P-001 onto the per-hold series, so the tables below carry no NFR-P-001 verdict.** The per-request sum is retained and published under its new name, untargeted; the requirement's own targets now attach to `input_hold_ms` and each `sentence_holds_ms` entry, neither of which is emitted yet (M-20). Gating these tables on a withdrawn target would assert a requirement the docs no longer contain.
+4. **ADR-030 re-scoped NFR-P-001 onto the per-hold series**, so the requirement is gated on `input_hold_ms` and `sentence_holds_ms` — the two holds a user actually waits through — and **not** on the per-request sum, which is retained and published under its new name, untargeted. The per-sentence population is **holds, not requests**: a percentile over per-request means would let one slow hold hide behind a long response's fast ones.
+
+## NFR-P-001 — the targeted per-hold series (streaming)
+
+These two series are what NFR-P-001 targets after ADR-030, whose targets were *derived* from the 04 §2 budgets rather than fitted to a measurement. `sentence_holds_ms` is tabulated **over holds**, so `n` is the number of sentences held, not the number of requests. Non-streaming pipelines record one buffered hold each and are published below but never gated here — 01's NFR-P-001 row scopes to streaming.
+
+| Series | Target P50 | Target P99 | n | P50 | P95 | P99 | min | max |
+|---|---|---|---|---|---|---|---|---|
+| `input_hold_ms` | < 40 ms | < 50 ms | 200 | 0.13 | 0.18 | 0.26 | 0.10 | 0.33 |
+| `sentence_holds_ms` (per hold) | < 40 ms | < 100 ms | 238 | 0.14 | 0.31 | 0.77 | 0.08 | 1.88 |
 
 ## `total_attributable_overhead_ms` — streaming pipelines (published, no target)
 
@@ -34,9 +43,9 @@ Renamed by **ADR-030** from `gateway_overhead_ms`; **the 06 §4 formula is uncha
 
 | Pipeline | n | P50 | P95 | P99 | min | max |
 |---|---|---|---|---|---|---|
-| UC-1 `support_bot` | 100 | 0.25 | 0.43 | 0.94 | 0.19 | 1.46 |
-| UC-2 `hr_copilot` | 100 | 0.25 | 0.86 | 1.85 | 0.18 | 2.04 |
-| **all streaming** | 200 | 0.25 | 0.48 | 1.46 | 0.18 | 2.04 |
+| UC-1 `support_bot` | 100 | 0.28 | 0.43 | 0.68 | 0.22 | 1.05 |
+| UC-2 `hr_copilot` | 100 | 0.30 | 0.88 | 1.68 | 0.20 | 2.01 |
+| **all streaming** | 200 | 0.29 | 0.57 | 1.13 | 0.20 | 2.01 |
 
 ## `total_attributable_overhead_ms` — non-streaming pipelines
 
@@ -44,8 +53,8 @@ Reported separately and **not** gated by NFR-P-001, whose scope is streaming pip
 
 | Pipeline | n | P50 | P95 | P99 | min | max |
 |---|---|---|---|---|---|---|
-| UC-3 `finance_advisor` | 100 | 0.27 | 0.39 | 0.42 | 0.16 | 0.45 |
-| **all non-streaming** | 100 | 0.27 | 0.39 | 0.42 | 0.16 | 0.45 |
+| UC-3 `finance_advisor` | 100 | 0.28 | 0.38 | 0.43 | 0.16 | 0.52 |
+| **all non-streaming** | 100 | 0.28 | 0.38 | 0.43 | 0.16 | 0.52 |
 
 ### Reference row — client wall-clock − upstream (streaming)
 
@@ -53,7 +62,7 @@ Reported separately and **not** gated by NFR-P-001, whose scope is streaming pip
 
 | Series | n | P50 | P95 | P99 | min | max |
 |---|---|---|---|---|---|---|
-| wall − upstream (upper bound) | 200 | 2.32 | 3.00 | 4.14 | 1.86 | 9.25 |
+| wall − upstream (upper bound) | 200 | 2.30 | 3.11 | 4.11 | 1.89 | 10.44 |
 
 ## Per-detector latency vs NFR-P-002 budgets
 
@@ -61,17 +70,15 @@ Budgets are also enforced at runtime: `run_with_budget` cancels past budget and 
 
 | Detector | Budget | n | P50 | P95 | P99 | max | Faults | Within budget (P99) |
 |---|---|---|---|---|---|---|---|---|
-| `numeric_claims` | 5 ms | 290 | 0.044 | 0.141 | 0.205 | 0.712 | 0 | yes |
-| `tier1_blocklist` | 2 ms | 590 | 0.011 | 0.014 | 0.020 | 0.032 | 0 | yes |
-| `tier1_pii` | 2 ms | 590 | 0.039 | 0.081 | 0.126 | 1.716 | 0 | yes |
+| `numeric_claims` | 5 ms | 290 | 0.043 | 0.141 | 0.235 | 1.766 | 0 | yes |
+| `tier1_blocklist` | 2 ms | 590 | 0.011 | 0.014 | 0.021 | 0.043 | 0 | yes |
+| `tier1_pii` | 2 ms | 590 | 0.038 | 0.079 | 0.121 | 1.383 | 0 | yes |
 
 **Not exercised in this run:** `conv_tracker`, `cost_budget`, `entity_enricher`, `fast_consistency`, `loop_guard`, `rag_grounding`, `tier2_injection`, `tier2_toxicity`. These are unimplemented or policy-gated detectors, so their budgets are untested rather than met — the distinction M-10 draws between "checked, clean" and "never checked", applied to a benchmark.
 
 ## NFR verdict
 
-**No violation of any requirement this run can evaluate.** `--check` exits zero on this state and nonzero on any row above appearing. That covers NFR-P-002 only — see the NFR-P-001 note below, which is a *third* state and not a pass.
-
-**NFR-P-001: `not measured`.** ADR-030 re-scoped it onto `input_hold_ms` and `sentence_holds_ms`, and neither series is emitted yet (**M-20**) — the intervals exist in `app.py` but are accumulated into one figure rather than recorded per hold. The previous per-request target is **withdrawn**, so this run neither meets nor fails NFR-P-001. `--check` therefore returns no NFR-P-001 verdict, which 06 §4 requires be stated in these words rather than left to read as a pass.
+**No violation.** Both requirements were evaluated against emitted series: NFR-P-001 on the two per-hold series above (ADR-030 scope), NFR-P-002 on the per-detector budgets. `--check` exits zero on this state and nonzero on any row above appearing. **Coverage is what bounds this, not the verdict:** the budgets the projection below composes belong to detectors that do not exist yet, so this is a pass at the current detector set, not a pass at the documented one.
 
 ## End-to-end sanity row (real provider)
 
@@ -113,9 +120,11 @@ NFR-P-001 as ADR-030 scopes it: input-lane hold **within** its 50 ms P99, per-se
 
 **The trade-off ADR-030 accepted, stated plainly:** a long response can hold ~371 ms in total while *every individual sentence* passes its target. A per-hold guarantee is genuinely weaker than a per-request one. It is the guarantee that matches what sentence-level interception promises — each hold is the delay before *that* sentence appears — and the total is published untargeted beside it so a reader can see both.
 
-**The fit is conditional, not unconditional (M-18).** `entity_enricher` is budgeted per *span*, not per sentence, so a heavily-enriched sentence composes to `60 + 10k` and crosses the 100 ms per-sentence P99 at **k = 4**. No doc bounds `k`. ADR-030 records this against its own target rather than assuming it away, and inventing a cap to make the target fit is exactly the move AGENTS.md §5.4 forbids.
+**The fit is now unconditional (M-18 / M-19 closed).** It was conditional when ADR-030 was accepted: `entity_enricher` was budgeted per *span*, so a heavily-enriched sentence composed to `60 + 10k` and crossed the 100 ms per-sentence P99 at **k = 4**, with no doc bounding `k`. 04 §2.2 now caps enrichment at **10 ms aggregate per sentence**, so `k` leaves the arithmetic entirely, and the policy+action step carries a **combined 5 ms budget** instead of sitting untracked inside a targeted quantity. Worst cases become 30 / 40 / 45 / 75 ms and every row fits. Both caps were ruled where the budget lives (04 §2.2) rather than inside the target that needed them — inventing a bound to make one's own target fit is the move AGENTS.md §5.4 forbids.
 
-Three things this does **not** say. It is not a measurement, so it is not a D3 — a D3 needs an observed breach, and nothing here was observed: the measured sum is 1.46 ms P99 over 200 samples, against a smallest projected figure of 50 ms. It is not a claim that the budgets are wrong: 04 §2 declares them and `run_with_budget` enforces them, so a detector at budget is a detector behaving as specified. And it is not a prediction that tier2 will actually cost its full budget — a fast classifier well inside 25 ms changes the arithmetic entirely.
+One adjacency ADR-030 records rather than rounds away: the **enriched typical** row lands at exactly **40.0 ms** against a strict `< 40` P50. It is not a breach, because the P50 judges the *median* hold and a median sentence is unenriched — enrichment requires a span-bearing `hallucination.*` signal, so a median enriched sentence would mean over half of all traffic is hallucination-flagged. It is written down because it is the first place a future budget change would break the derivation.
+
+Three things this does **not** say. It is not a measurement, so it is not a D3 — a D3 needs an observed breach, and nothing here was observed: the measured sum is 1.13 ms P99 over 200 samples, against a smallest projected figure of 50 ms. It is not a claim that the budgets are wrong: 04 §2 declares them and `run_with_budget` enforces them, so a detector at budget is a detector behaving as specified. And it is not a prediction that tier2 will actually cost its full budget — a fast classifier well inside 25 ms changes the arithmetic entirely.
 
 ## Scope and limitations
 
