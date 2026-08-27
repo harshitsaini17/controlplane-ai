@@ -1,0 +1,419 @@
+{
+  "spike": "Q-04 crossover \u2014 budget-break length for the selected picks",
+  "budget_ms": 25.0,
+  "models": {
+    "tier2_injection": "madhurjindal/Jailbreak-Detector",
+    "tier2_toxicity": "martin-ha/toxic-comment-model"
+  },
+  "chars_ladder": [
+    240,
+    400,
+    600,
+    800,
+    1000,
+    1400,
+    2000,
+    4000
+  ],
+  "platform": "Linux 7.1.2-arch3-1 \u00b7 x86_64",
+  "cpu_count": 12,
+  "python": "3.14.6",
+  "runs": [
+    {
+      "threads": 6,
+      "reps": 30,
+      "backend": "onnx_int8",
+      "torch": "2.13.0+cpu",
+      "roles": {
+        "tier2_injection": {
+          "model_id": "madhurjindal/Jailbreak-Detector",
+          "params_m": 65.8,
+          "labels": [
+            "benign",
+            "jailbreak"
+          ],
+          "export_s": 5.92,
+          "quantize_s": 3.24,
+          "graph_mb": 66.2,
+          "buckets": {
+            "c240": {
+              "chars": 240,
+              "tokens": 68,
+              "n": 30,
+              "cold_ms": 15.22,
+              "p50": 8.82,
+              "p95": 13.52,
+              "p99": 14.84,
+              "max": 15.13
+            },
+            "c400": {
+              "chars": 400,
+              "tokens": 104,
+              "n": 30,
+              "cold_ms": 13.37,
+              "p50": 14.27,
+              "p95": 22.78,
+              "p99": 22.8,
+              "max": 23.41
+            },
+            "c600": {
+              "chars": 600,
+              "tokens": 158,
+              "n": 30,
+              "cold_ms": 19.17,
+              "p50": 23.51,
+              "p95": 33.36,
+              "p99": 33.57,
+              "max": 34.4
+            },
+            "c800": {
+              "chars": 800,
+              "tokens": 201,
+              "n": 30,
+              "cold_ms": 35.65,
+              "p50": 34.25,
+              "p95": 41.59,
+              "p99": 43.29,
+              "max": 46.11
+            },
+            "c1000": {
+              "chars": 1000,
+              "tokens": 247,
+              "n": 30,
+              "cold_ms": 52.87,
+              "p50": 46.88,
+              "p95": 50.79,
+              "p99": 54.82,
+              "max": 62.38
+            },
+            "c1400": {
+              "chars": 1400,
+              "tokens": 335,
+              "n": 30,
+              "cold_ms": 60.66,
+              "p50": 63.32,
+              "p95": 70.51,
+              "p99": 71.95,
+              "max": 72.26
+            },
+            "c2000": {
+              "chars": 2000,
+              "tokens": 464,
+              "n": 30,
+              "cold_ms": 94.79,
+              "p50": 81.76,
+              "p95": 96.97,
+              "p99": 103.6,
+              "max": 117.15
+            },
+            "c4000": {
+              "chars": 4000,
+              "tokens": 512,
+              "n": 30,
+              "cold_ms": 97.69,
+              "p50": 95.31,
+              "p95": 99.57,
+              "p99": 99.72,
+              "max": 118.64
+            }
+          },
+          "backend": "onnx_int8",
+          "stage_capped_at_chars": null
+        },
+        "tier2_toxicity": {
+          "model_id": "martin-ha/toxic-comment-model",
+          "params_m": 67.0,
+          "labels": [
+            "non-toxic",
+            "toxic"
+          ],
+          "export_s": 3.81,
+          "quantize_s": 4.37,
+          "graph_mb": 67.3,
+          "buckets": {
+            "c240": {
+              "chars": 240,
+              "tokens": 54,
+              "n": 30,
+              "cold_ms": 9.97,
+              "p50": 8.11,
+              "p95": 8.42,
+              "p99": 8.58,
+              "max": 9.19
+            },
+            "c400": {
+              "chars": 400,
+              "tokens": 89,
+              "n": 30,
+              "cold_ms": 11.98,
+              "p50": 11.29,
+              "p95": 12.58,
+              "p99": 12.63,
+              "max": 13.99
+            },
+            "c600": {
+              "chars": 600,
+              "tokens": 134,
+              "n": 30,
+              "cold_ms": 16.03,
+              "p50": 16.67,
+              "p95": 19.94,
+              "p99": 21.36,
+              "max": 23.11
+            },
+            "c800": {
+              "chars": 799,
+              "tokens": 172,
+              "n": 30,
+              "cold_ms": 22.03,
+              "p50": 21.01,
+              "p95": 23.74,
+              "p99": 24.16,
+              "max": 24.54
+            },
+            "c1000": {
+              "chars": 1000,
+              "tokens": 211,
+              "n": 30,
+              "cold_ms": 27.85,
+              "p50": 27.11,
+              "p95": 31.05,
+              "p99": 31.23,
+              "max": 31.46
+            },
+            "c1400": {
+              "chars": 1399,
+              "tokens": 297,
+              "n": 30,
+              "cold_ms": 41.67,
+              "p50": 41.08,
+              "p95": 44.26,
+              "p99": 44.85,
+              "max": 45.3
+            },
+            "c2000": {
+              "chars": 2000,
+              "tokens": 436,
+              "n": 30,
+              "cold_ms": 87.88,
+              "p50": 83.67,
+              "p95": 92.03,
+              "p99": 92.11,
+              "max": 94.05
+            },
+            "c4000": {
+              "chars": 4000,
+              "tokens": 512,
+              "n": 30,
+              "cold_ms": 113.64,
+              "p50": 101.87,
+              "p95": 114.86,
+              "p99": 115.21,
+              "max": 115.88
+            }
+          },
+          "backend": "onnx_int8",
+          "stage_capped_at_chars": 240
+        }
+      }
+    },
+    {
+      "threads": 1,
+      "reps": 30,
+      "backend": "onnx_int8",
+      "torch": "2.13.0+cpu",
+      "roles": {
+        "tier2_injection": {
+          "model_id": "madhurjindal/Jailbreak-Detector",
+          "params_m": 65.8,
+          "labels": [
+            "benign",
+            "jailbreak"
+          ],
+          "export_s": 4.49,
+          "quantize_s": 3.21,
+          "graph_mb": 66.2,
+          "buckets": {
+            "c240": {
+              "chars": 240,
+              "tokens": 68,
+              "n": 30,
+              "cold_ms": 36.26,
+              "p50": 38.92,
+              "p95": 48.11,
+              "p99": 48.29,
+              "max": 52.26
+            },
+            "c400": {
+              "chars": 400,
+              "tokens": 104,
+              "n": 30,
+              "cold_ms": 57.42,
+              "p50": 59.55,
+              "p95": 79.5,
+              "p99": 84.67,
+              "max": 105.86
+            },
+            "c600": {
+              "chars": 600,
+              "tokens": 158,
+              "n": 30,
+              "cold_ms": 83.56,
+              "p50": 85.82,
+              "p95": 106.1,
+              "p99": 108.52,
+              "max": 127.27
+            },
+            "c800": {
+              "chars": 800,
+              "tokens": 201,
+              "n": 30,
+              "cold_ms": 108.68,
+              "p50": 105.02,
+              "p95": 117.86,
+              "p99": 122.16,
+              "max": 122.72
+            },
+            "c1000": {
+              "chars": 1000,
+              "tokens": 247,
+              "n": 30,
+              "cold_ms": 123.77,
+              "p50": 125.42,
+              "p95": 130.23,
+              "p99": 135.5,
+              "max": 136.32
+            },
+            "c1400": {
+              "chars": 1400,
+              "tokens": 335,
+              "n": 30,
+              "cold_ms": 180.95,
+              "p50": 211.33,
+              "p95": 246.84,
+              "p99": 255.33,
+              "max": 280.94
+            },
+            "c2000": {
+              "chars": 2000,
+              "tokens": 464,
+              "n": 30,
+              "cold_ms": 284.53,
+              "p50": 302.09,
+              "p95": 338.56,
+              "p99": 349.32,
+              "max": 360.98
+            },
+            "c4000": {
+              "chars": 4000,
+              "tokens": 512,
+              "n": 30,
+              "cold_ms": 333.08,
+              "p50": 365.38,
+              "p95": 426.51,
+              "p99": 437.3,
+              "max": 462.05
+            }
+          },
+          "backend": "onnx_int8",
+          "stage_capped_at_chars": null
+        },
+        "tier2_toxicity": {
+          "model_id": "martin-ha/toxic-comment-model",
+          "params_m": 67.0,
+          "labels": [
+            "non-toxic",
+            "toxic"
+          ],
+          "export_s": 2.4,
+          "quantize_s": 3.25,
+          "graph_mb": 67.3,
+          "buckets": {
+            "c240": {
+              "chars": 240,
+              "tokens": 54,
+              "n": 30,
+              "cold_ms": 33.07,
+              "p50": 32.3,
+              "p95": 41.44,
+              "p99": 42.3,
+              "max": 52.71
+            },
+            "c400": {
+              "chars": 400,
+              "tokens": 89,
+              "n": 30,
+              "cold_ms": 53.84,
+              "p50": 50.22,
+              "p95": 54.02,
+              "p99": 54.18,
+              "max": 60.83
+            },
+            "c600": {
+              "chars": 600,
+              "tokens": 134,
+              "n": 30,
+              "cold_ms": 75.42,
+              "p50": 78.37,
+              "p95": 83.48,
+              "p99": 83.99,
+              "max": 84.37
+            },
+            "c800": {
+              "chars": 799,
+              "tokens": 172,
+              "n": 30,
+              "cold_ms": 101.66,
+              "p50": 104.83,
+              "p95": 115.29,
+              "p99": 117.26,
+              "max": 122.23
+            },
+            "c1000": {
+              "chars": 1000,
+              "tokens": 211,
+              "n": 30,
+              "cold_ms": 127.15,
+              "p50": 135.66,
+              "p95": 153.45,
+              "p99": 162.15,
+              "max": 168.06
+            },
+            "c1400": {
+              "chars": 1399,
+              "tokens": 297,
+              "n": 30,
+              "cold_ms": 204.15,
+              "p50": 196.39,
+              "p95": 214.32,
+              "p99": 214.66,
+              "max": 217.6
+            },
+            "c2000": {
+              "chars": 2000,
+              "tokens": 436,
+              "n": 30,
+              "cold_ms": 310.97,
+              "p50": 273.0,
+              "p95": 302.1,
+              "p99": 309.09,
+              "max": 312.54
+            },
+            "c4000": {
+              "chars": 4000,
+              "tokens": 512,
+              "n": 30,
+              "cold_ms": 329.26,
+              "p50": 335.91,
+              "p95": 355.05,
+              "p99": 356.02,
+              "max": 356.05
+            }
+          },
+          "backend": "onnx_int8",
+          "stage_capped_at_chars": 240
+        }
+      }
+    }
+  ]
+}
