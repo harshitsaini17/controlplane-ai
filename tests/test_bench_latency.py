@@ -25,7 +25,8 @@ from pathlib import Path
 
 import pytest
 
-from controlplane.detectors.base import BUDGETS_MS
+from controlplane.detectors.base import BUDGETS_MS, Stage
+from controlplane.gateway.pipeline import LANES, LIVE
 from controlplane.policy.store import PolicyStore
 from controlplane.telemetry.metrics import MetricsRegistry
 from controlplane.telemetry.spans import LATENCY_KEYS
@@ -601,3 +602,151 @@ def test_one_registry_aggregates_the_whole_batch(batch):
 def test_every_attempted_request_is_either_a_sample_or_an_error(batch):
     """No request may vanish: the two buckets must account for the attempt count."""
     assert len(batch.samples) + len(batch.errors) == batch.requests_attempted
+
+
+# ---------------------------------------------------------------------------
+# Forward projection (a projection, never a measurement)
+# ---------------------------------------------------------------------------
+
+
+def test_sentence_counts_use_the_real_segmentation(corpus):
+    """The multiplier must come from the shipped buffer, not a split on '.'.
+
+    06 §4's streaming figure sums per-sentence holds, so the segment count multiplies any
+    lane-cost projection. A local approximation would make the projection disagree with the
+    pipeline it is projecting.
+    """
+    counts = bl.sentence_counts(corpus[:40])
+    assert len(counts) == 40
+    assert all(c >= 1 for c in counts), "a case with no boundary still holds one segment"
+
+    from controlplane.gateway.sentence_buffer import Segmentation
+
+    seg = Segmentation()
+    expected = len(seg.feed("One. Two! Three? ")) + len(seg.flush())
+    assert bl.sentence_counts([{"text": "One. Two! Three? "}]) == [expected]
+
+
+def test_the_projection_is_derived_from_the_registry_not_written_down():
+    """Lane membership and every figure must come from `LANES` / `BUDGETS_MS`.
+
+    Pinned so a budget change moves the report instead of leaving a stale paragraph. The
+    guard is a real substitution: raising a budget must raise the projected total.
+    """
+    cases = [{"text": "One sentence only."}]
+    before = bl.project_tier2(cases)
+    seq = next(r for r in before["rows"] if r["mode_is_sum"])
+    assert seq["sentence_ms"] == sum(
+        BUDGETS_MS[d] for d in LANES[Stage.OUTPUT_SENTENCE] if d != "rag_grounding"
+    )
+    assert set(before["pending"]) == {
+        d for d in (*LANES[Stage.INPUT], *LANES[Stage.OUTPUT_SENTENCE])
+        if d not in LIVE and d != "rag_grounding"
+    }
+
+
+def test_rag_grounding_is_excluded_and_the_exclusion_is_stated(batch, corpus):
+    """Excluding a 30 ms/sentence detector improves the projection, so it must be disclosed.
+
+    `expected_for` skips `rag_grounding` without context docs and no dataset case carries any,
+    which makes the exclusion correct — but an undisclosed exclusion that flatters the number
+    is the shape AGENTS.md §7 exists to prevent.
+    """
+    projection = bl.project_tier2(corpus[:20])
+    assert "rag_grounding" not in projection["pending"]
+    body = bl.render(batch, dataset_dir=bl.DATASET_DIR, provenance_note="", cadence_ms=0.5,
+                     violations=[], live_note="", cases=corpus[:20])
+    assert "rag_grounding" in body
+    assert "excluded" in body
+
+
+def test_both_lane_readings_are_reported(corpus):
+    """Sequential and parallel are both shown, so the conclusion holds either way.
+
+    `run_lane` is sequential today by a documented measurement decision; 02 §4's parallelism
+    "becomes real when Tier-2 arrives". Reporting only one reading would make the finding
+    contingent on an implementation detail that is expected to change.
+    """
+    rows = bl.project_tier2(corpus[:20])["rows"]
+    assert len(rows) == 2
+    assert [r["mode_is_sum"] for r in rows] == [True, False]
+    seq, par = rows
+    assert seq["sentence_ms"] > par["sentence_ms"], "the sum must exceed the max"
+    assert par["sentence_ms"] == max(
+        BUDGETS_MS[d] for d in LANES[Stage.OUTPUT_SENTENCE] if d != "rag_grounding"
+    )
+
+
+def test_the_projection_is_labelled_a_projection_and_not_a_d3(batch, corpus):
+    """It must say it is not a measurement, and must not present itself as a breach.
+
+    Today's measured figures pass. A projected breach filed as a D3 would spend a human
+    decision on an event that has not happened, and would put an unobserved number next to
+    measured ones — AGENTS.md §7 in the other direction.
+    """
+    body = bl.render(batch, dataset_dir=bl.DATASET_DIR, provenance_note="", cadence_ms=0.5,
+                     violations=[], live_note="", cases=corpus[:20])
+    section = body[body.index("## Forward projection"):body.index("## Scope and limitations")]
+    assert "PROJECTION, not a measurement" in section
+    assert "not a D3" in section
+    assert "unimplemented" in section
+    # It must not claim the budgets are wrong, nor that tier2 will cost its full budget.
+    assert "not a claim that the budgets are wrong" in section
+    assert "not a prediction that tier2 will actually cost its full budget" in section
+
+
+def test_the_projection_states_the_measured_multiplier(batch, corpus):
+    """The segment distribution is the load-bearing input, so it must be printed."""
+    body = bl.render(batch, dataset_dir=bl.DATASET_DIR, provenance_note="", cadence_ms=0.5,
+                     violations=[], live_note="", cases=corpus)
+    section = body[body.index("## Forward projection"):body.index("## Scope and limitations")]
+    assert "Segment counts measured over the frozen corpus" in section
+    assert f"n={len(corpus)}" in section
+
+
+def test_a_single_segment_response_stays_inside_the_target(corpus):
+    """The projection must not overstate: one sentence is projected inside 100 ms.
+
+    Guards the finding against inflation. If every row breached, the section would read as
+    "tier2 is impossible", which the arithmetic does not support.
+    """
+    rows = bl.project_tier2([{"text": "One sentence only."}])["rows"]
+    for row in rows:
+        first = row["points"][0]
+        assert first["sentences"] == 1
+        assert not first["breach"], "a one-sentence response is projected inside the target"
+
+
+def test_the_headroom_factor_is_derived_from_the_measured_series(batch, corpus):
+    """The "today's figures pass" margin must track the streaming table, not a written number.
+
+    The first version of this sentence asserted "three orders of magnitude" and was wrong by
+    more than one. A prose constant is also machine-specific: it would read as measured while
+    describing someone else's hardware. So the factor is recomputed here from the same series
+    the streaming table reports, and must appear verbatim in the rendered section.
+    """
+    body = bl.render(batch, dataset_dir=bl.DATASET_DIR, provenance_note="", cadence_ms=0.5,
+                     violations=[], live_note="", cases=corpus[:20])
+    section = body[body.index("## Forward projection"):body.index("## Scope and limitations")]
+
+    stats = bl.Stats.of(batch.overheads(streaming=True))
+    assert stats is not None and stats.p99 > 0.0, "fixture must produce a resolvable series"
+    expected = f"{bl.NFR_P_001['p99'] / stats.p99:.0f}x"
+    assert f"a factor of {expected}" in section
+    assert f"{stats.p99:.2f} ms over {stats.n} samples" in section
+    # And the claim it replaced must not survive anywhere in the report.
+    assert "orders of magnitude" not in body
+
+
+def test_an_unmeasured_streaming_series_states_that_rather_than_a_factor(store, corpus):
+    """No samples is "not measured", never a margin of zero or infinity.
+
+    Third state, per M-10 / ADR-027 Amendment 1: a report that printed a factor here would be
+    asserting a comparison it never made.
+    """
+    empty = bl.Batch(store=store)
+    body = bl.render(empty, dataset_dir=bl.DATASET_DIR, provenance_note="", cadence_ms=0.5,
+                     violations=[], live_note="", cases=corpus[:20])
+    section = body[body.index("## Forward projection"):body.index("## Scope and limitations")]
+    assert "no streaming series was measured in this run" in section
+    assert "a factor of" not in section

@@ -251,7 +251,7 @@ it, with the coverage limit stated rather than implied.
 
 ## 5. Fault injection (`fault_injection`)
 
-For each detector class: monkeypatch to raise timeout → fire one canary request per use case → assert UC-1 tier2 fails **open** (pass, with the fault present in `detector_failures_json` — ADR-027) and UC-3 fails **closed** (escalate, with the same fault stamped in `failure_record_ids`). Output feeds demo beat SC-3.
+For each detector class: monkeypatch to raise timeout → fire one canary request per use case → assert UC-1 tier2 fails **open** (pass, with the fault present in `detector_failures_json` — ADR-027) and UC-3 fails **closed** (escalate, with the same fault stamped in `failure_record_ids`). Output: `reports/fault_injection_report.md` — feeds demo beat SC-3.
 
 ## 6. Cost simulation (`cost_simulation`)
 

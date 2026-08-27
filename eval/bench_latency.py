@@ -52,7 +52,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from controlplane.audit.records import canonical_view
-from controlplane.detectors.base import BUDGETS_MS
+from controlplane.detectors.base import BUDGETS_MS, Stage
 from controlplane.gateway.app import Gateway, create_app
 from controlplane.gateway.config import (
     TaintedDataError,
@@ -60,6 +60,8 @@ from controlplane.gateway.config import (
     require_measured_upstream,
 )
 from controlplane.gateway.ingress import HEADER_REQUEST_ID, HEADER_USE_CASE
+from controlplane.gateway.pipeline import LANES, LIVE
+from controlplane.gateway.sentence_buffer import Segmentation
 from controlplane.gateway.sse_proxy import UpstreamResponse
 from controlplane.policy.store import PolicyStore
 from controlplane.telemetry.metrics import MetricsRegistry, percentile
@@ -467,6 +469,84 @@ def check_nfr_p002(stats: dict[str, Stats]) -> list[Violation]:
 # ---------------------------------------------------------------------------
 
 
+def sentence_counts(cases: Sequence[dict[str, Any]]) -> list[int]:
+    """Segments per case, via the real `Segmentation` — the multiplier the projection needs.
+
+    Measured rather than assumed, because 06 §4's streaming formula is a **sum over
+    per-sentence holds**: a per-sentence budget is paid once per sentence, so the sentence
+    count is a multiplier on any lane-cost projection, not a footnote to it.
+    """
+    counts: list[int] = []
+    for case in cases:
+        seg = Segmentation()
+        n = 0
+        for word in str(case["text"]).split(" "):
+            n += len(seg.feed(word + " "))
+        n += len(seg.flush())
+        counts.append(max(n, 1))
+    return counts
+
+
+def project_tier2(cases: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Budget-based forward projection for the two unimplemented tier2 detectors.
+
+    **A projection, not a measurement**, and derived rather than written down: lane
+    membership comes from `LANES` and every figure from `BUDGETS_MS`, so a budget or lane
+    change moves this section instead of leaving a stale paragraph behind.
+
+    Both readings of lane cost are reported. `run_lane` is **sequential today** and says so
+    deliberately (CPU-bound regex passes cannot overlap on one event loop, and `gather` would
+    serialize them anyway while corrupting per-detector attribution), so the lane costs the
+    **sum**. 02 §4's "fast detectors (parallel)" is a statement about the budget model whose
+    parallelism, that same docstring says, "becomes real when Tier-2 arrives" — under which
+    the lane would cost the **max**. Reporting both is what makes the conclusion robust: it
+    does not depend on which way the implementation goes.
+
+    `rag_grounding` (30 ms/sentence) is excluded — `expected_for` skips it without context
+    docs, and no dataset case carries any. Its absence is stated in the rendered section
+    rather than silently improving the projection.
+    """
+    counts = sorted(sentence_counts(cases))
+    sen_lane = [d for d in LANES[Stage.OUTPUT_SENTENCE] if d != "rag_grounding"]
+    inp_lane = list(LANES[Stage.INPUT])
+    live_sen = [d for d in sen_lane if d in LIVE]
+    live_inp = [d for d in inp_lane if d in LIVE]
+
+    def cost(names: Sequence[str], mode: str) -> float:
+        budgets = [BUDGETS_MS[n] for n in names]
+        if not budgets:
+            return 0.0
+        return sum(budgets) if mode == "sum" else max(budgets)
+
+    rows: list[dict[str, Any]] = []
+    for label, mode in (("sequential (as implemented)", "sum"), ("parallel (02 §4 intent)", "max")):
+        inp, sen = cost(inp_lane, mode), cost(sen_lane, mode)
+        rows.append({
+            "label": label,
+            #: Which reading this row is, as data rather than a substring of `label`: a test
+            #: matching on prose would pass a renamed label that had changed meaning.
+            "mode_is_sum": mode == "sum",
+            "input_ms": inp,
+            "sentence_ms": sen,
+            "live_input_ms": cost(live_inp, mode),
+            "live_sentence_ms": cost(live_sen, mode),
+            "points": [
+                {"pct": name, "sentences": n, "total_ms": inp + n * sen,
+                 "breach": (inp + n * sen) >= NFR_P_001["p99"]}
+                for name, n in (("P50", int(percentile(counts, 50))),
+                                ("P95", int(percentile(counts, 95))),
+                                ("P99", int(percentile(counts, 99))),
+                                ("max", counts[-1]))
+            ],
+        })
+    return {
+        "counts": {"n": len(counts), "p50": percentile(counts, 50), "p95": percentile(counts, 95),
+                   "p99": percentile(counts, 99), "max": counts[-1]},
+        "pending": [d for d in inp_lane + sen_lane if d not in LIVE],
+        "rows": rows,
+    }
+
+
 def _git(*args: str) -> str:
     try:
         return subprocess.run(
@@ -493,6 +573,7 @@ def render(
     violations: Sequence[Violation],
     live_note: str,
     command: str = "python -m eval.bench_latency",
+    cases: Sequence[dict[str, Any]] | None = None,
 ) -> str:
     # Both halves of one guard. An unset store would make `render()` guess the policy set;
     # an EMPTY one is the same defect wearing a different shape — `PolicyStore()` is unloaded
@@ -508,6 +589,8 @@ def render(
             "were evaluated against"
         )
     dstats = detector_stats(batch)
+    stream_stats = Stats.of(batch.overheads(streaming=True))
+    projection = project_tier2(cases if cases is not None else load_corpus(dataset_dir))
     head = _git("rev-parse", "HEAD")
     dirty = _git("status", "--porcelain")
 
@@ -681,6 +764,78 @@ def render(
         "",
         live_note,
         "",
+        "## Forward projection — what happens when the remaining hot-path detectors land",
+        "",
+        "**This section is a PROJECTION, not a measurement.** Every figure is arithmetic over "
+        "the 04 §2 declared budgets, not an observation: `tier2_toxicity` and `tier2_injection` "
+        "are unimplemented, so nothing here has been run. It is derived from `LANES` and "
+        "`BUDGETS_MS` rather than written down, so a budget or lane change moves it.",
+        "",
+        f"Pending detectors on the hot-path lanes: "
+        f"{', '.join(f'`{d}`' for d in projection['pending']) or 'none'}. `rag_grounding` "
+        "(30 ms/sentence) is **excluded** — `expected_for` skips it without context docs and no "
+        "dataset case carries any; with them, add that per sentence.",
+        "",
+        "The multiplier matters more than the per-detector cost. 06 §4's streaming figure is a "
+        "**sum over per-sentence holds**, so a per-sentence budget is paid once per sentence. "
+        "Segment counts measured over the frozen corpus with the real `Segmentation` "
+        f"(n={projection['counts']['n']}): P50 **{projection['counts']['p50']:.0f}**, "
+        f"P95 **{projection['counts']['p95']:.0f}**, P99 **{projection['counts']['p99']:.0f}**, "
+        f"max **{projection['counts']['max']}**.",
+        "",
+    ]
+    for row in projection["rows"]:
+        lines += [
+            f"**Lane cost, {row['label']}** — input {row['input_ms']:.0f} ms once, "
+            f"{row['sentence_ms']:.0f} ms per sentence "
+            f"(today: {row['live_input_ms']:.0f} ms / {row['live_sentence_ms']:.0f} ms).",
+            "",
+            "| Segments | Projected streaming overhead | vs 100 ms P99 target |",
+            "|---|---|---|",
+        ]
+        for pt in row["points"]:
+            verdict = "**BREACH**" if pt["breach"] else "under"
+            lines.append(f"| {pt['pct']} — {pt['sentences']} | {pt['total_ms']:.0f} ms | {verdict} |")
+        lines.append("")
+
+    # Derived, never written down. The first version of this sentence asserted "three orders of
+    # magnitude" and was wrong by more than one — 100 ms against a ~1.5 ms P99 is ~66x. A prose
+    # constant would also rot on the next machine, so the factor tracks the same series the
+    # streaming table above reports. Absent and unresolvable are named rather than collapsed into
+    # a number (M-10 / ADR-027 Amendment 1: "measured", "not measured" and "too small to resolve"
+    # are three states).
+    if stream_stats is None:
+        headroom = "no streaming series was measured in this run, so the margin is unstated"
+    elif stream_stats.p99 <= 0.0:
+        headroom = (
+            f"measured streaming P99 rounds to 0.00 ms over {stream_stats.n} samples, so the "
+            "margin is wider than this run can resolve"
+        )
+    else:
+        headroom = (
+            f"measured streaming P99 is {stream_stats.p99:.2f} ms over {stream_stats.n} samples "
+            f"against the {NFR_P_001['p99']:.0f} ms target, a factor of "
+            f"{NFR_P_001['p99'] / stream_stats.p99:.0f}x"
+        )
+
+    lines += [
+        "**The projection does not clear the target, and it fails under both readings.** At the "
+        "measured P99 segment count the projected overhead exceeds 100 ms even under the "
+        "*favourable* parallel reading — so the conclusion does not rest on `run_lane` being "
+        "sequential today. A single-sentence response stays inside budget; a multi-sentence one "
+        "does not.",
+        "",
+        "Three things this does **not** say. It is not a measurement, so it is not a D3 — a D3 "
+        f"needs an observed breach, and today's figures pass: {headroom}. "
+        "It is not a claim that the budgets are wrong: 04 §2 declares "
+        "them and `run_with_budget` enforces them, so a detector at budget is a detector "
+        "behaving as specified. And it is not a prediction that tier2 will actually cost its "
+        "full budget — a fast classifier well inside 25 ms changes the arithmetic entirely. "
+        "What it does say is that **NFR-P-001 and the 04 §2 budget set cannot both hold at the "
+        "measured segment distribution once the documented detector set is complete**, which is "
+        "a contradiction between two documents rather than a defect in either. Raised for a "
+        "ruling rather than resolved here (AGENTS.md §5.4).",
+        "",
         "## Scope and limitations",
         "",
         "**The headline figure is cadence-independent by construction**, because 06 §4 excludes "
@@ -804,7 +959,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args.out.write_text(render(
         batch, dataset_dir=args.dataset_dir, provenance_note=provenance_note,
         cadence_ms=args.cadence_ms, violations=violations, live_note=live_note,
-        command=" ".join(invocation),
+        command=" ".join(invocation), cases=cases,
     ))
 
     stream_stats = Stats.of(batch.overheads(streaming=True))
