@@ -257,6 +257,12 @@ For each detector class: monkeypatch to raise timeout → fire one canary reques
 
 Replay demo traffic pricing both paths: (a) all-frontier baseline, (b) cascade per ADR-009. Report absolute $ + % delta with the label **"simulation on synthetic demo traffic — not a production claim."** Also reports cascade quality proxy: fraction of small-tier answers whose fast-confidence cleared τ_route.
 
+**Ratio-parametric reporting (ADR-029).** ADR-009's premise is no longer a fixed ~12× gap, so a savings figure is meaningless without the ratio that produced it. Every cost report must therefore carry:
+
+1. **The deployment's measured tier ratio, printed next to the savings figure** — `2.0×` on the shipped pair (`openai/gpt-oss-120b` / `openai/gpt-oss-20b`), which is exact on input *and* output, so the ratio is blend-independent and cannot be moved by the input/output mix chosen to compute it. Savings scale with (ratio × routing fraction).
+2. **One contextualizing line, explicitly labelled context and not our measurement** — published flagship-vs-cheapest gaps at other vendors, cited to their own price pages with the retrieval date, so a reader can see that this deployment's 2.0× sits at the low end of the industry range rather than being representative of it. Retrieved 2026-08-27: OpenAI `gpt-5.6-sol` vs `gpt-5-nano` = **80× input / 50× output**; Anthropic Claude Opus 5 vs Haiku 4.5 = **5.0×** on both. The observed cross-vendor range is therefore roughly **5×–50×+**, and it is wide because it depends entirely on which pair is chosen — Opus 5 vs Sonnet 5 is only 2.5×, close to ours. That spread *is* the ratio-parametric point, not a caveat to it.
+3. **Absolute dollar figures are permitted for the two bound gpt-oss ids only** (first-party prices, SL-3 as downgraded). A comparison priced on the retired llama pair remains barred.
+
 ## 7. Feedback-loop evaluation (charter S4)
 
 Scripted sequence: run borderline cases through UC-3 → generate escalations → apply scripted reviewer decisions → `override_report` → `suggest_thresholds` proposes diff → apply → re-run borderline set → report before/after action distribution. Output: `reports/feedback_loop_report.md` (used directly in proposal + video).

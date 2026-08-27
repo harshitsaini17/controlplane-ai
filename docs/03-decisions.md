@@ -62,6 +62,8 @@ New behavioral changes (including approved deviations per AGENTS.md §5.5) appen
 **Decision:** Two-tier cascade (small/cheap model first; escalate to frontier model when fast-confidence < τ_route or policy demands it), plus per-use-case budgets and a loop guard. Router is embedding-similarity intent matching against a small labeled intent set (semantic-router pattern), no training.
 **Trade-offs:** Cost-savings numbers come from a *simulation over demo traffic* (both paths priced), labeled as simulation — not a production claim.
 
+> **Amended 2026-08-27 by ADR-029 — the premise is RATIO-PARAMETRIC.** This ADR was recorded when the two tiers differed ~12x, and that figure was inherited elsewhere as though it were architectural. It never was: ~12x was llama-era vendor pricing. The mechanism is *route cheap, escalate on low confidence* and does not depend on the ratio; measured savings scale with **(tier ratio x routing fraction)** and are reported beside the deployment's own measured ratio (**2.0x** on the pair shipped since ADR-029, exact on input and output, so blend-independent). See ADR-029 for the ruling and the amended test.
+
 ## ADR-010 — Escalation review UX: minimal admin endpoints + CLI, no review web app
 
 **Context:** HITL loop is judged (charter S4) but a full reviewer UI is expensive.
@@ -131,6 +133,16 @@ Required, with no default: a silent default would decide borderline behaviour fo
 **Trade-offs:** every provider entry grows three keys, and a second env var (`GROQ_API_KEY`) enters `.env.example`. Groq model ids were verified against Groq's own docs as *production* models (`llama-3.1-8b-instant`, `llama-3.3-70b-versatile`) — preview ids can be discontinued without notice, which would break the demo silently. **Price provenance is weaker than the ids:** Groq's pricing page returned 404, so the 70B figures rest on a first-party 2024 blog post and the 8B figures on secondary trackers only. Re-verify before any cost number is published.
 **Consequence:** a one-price-pair-per-provider schema cannot express a two-tier cascade whose premise is that the tiers cost ~12× differently — filed as `[D2-price-table-cannot-express-per-tier-cost]`, which blocks 06 §6 entirely.
 
+> **Note added 2026-08-27 (ADR-029) — the trade-off note above came true, verbatim.** It warned
+> that a discontinued id "would silently break the demo". Groq announced the deprecation of both
+> ids on 2026-06-17 and shut them down on **2026-08-16** for free and developer-tier keys. Probed
+> live on 2026-08-27, both return HTTP 404 `model_not_found` on this repo's key — so it is not on
+> the exempt committed-spend contract. **The prediction was right and the mitigation it named is
+> the standing answer:** FR-GW-006's boot canary (ADR-028) is what turns a dead upstream into a
+> refusal to start rather than a mid-demo fallback. The original text is left unedited above,
+> including the now-retired `~12×` figure and the two dead ids, because it is the record of what
+> was verified on 2026-08-25 and why. ADR-029 rebinds the tiers and amends ADR-009's ratio.
+
 ## ADR-019 — Enriched-label survival: two branches, and the band never applies (resolves D4-enriched-label-survival-semantics)
 
 **Context:** ADR-017 ruled band adjustment per-label with a configurable `borderline_action`, but explicitly left clause 3 open. `entity_enricher` (ADR-011) appends `privacy.person` to a **host** `hallucination.*` signal whose score is a *grounding* confidence, so the appended label inherits a number that was never about it. Three readings were live: the enriched label (A) follows its host through the band, (B) bypasses the band entirely, or (C) is dropped with the host above `tau_high` but otherwise fires unadjusted. They agree everywhere except one cell — `hr_copilot` in-band, where `privacy.person: block` meets `borderline_action: pass` — and that cell carries demo beat 4b. The ambiguity also blocked every in-band person-bearing dataset case (06 §2 OVLP coverage) and the post-band half of the beat-4 test.
@@ -193,6 +205,8 @@ pricing:                         # or the literal `pricing: unmetered`
 `pricing: unmetered` stays valid and is an **affirmative claim** that no per-token charge exists (local compute) — it yields `est_cost_usd: 0.0`, which is a measurement. That is deliberately distinct from a *missing* entry, which yields `null` because the cost is unknown. Zero and unknown are different facts and the schema now keeps them apart.
 **Trade-offs:** `price_table_version` is retained as a coarse bump-on-change marker, but per-provider `retrieved` is now the finer-grained and more honest provenance. Adding a tier to a policy can now fail the boot rather than silently producing null costs — intended: a loud failure at start beats a quiet hole in a judge-facing number.
 **Docs touched:** 05 §6.1 (schema amended), 05 §5 (`cp_pricing_missing_total` added), `config/gateway.yaml`, 06 §6 (now implementable), 08 (item closed).
+
+> **Rationale corrected 2026-08-27 by ADR-029.** The reasoning above cites a ~12x tier gap as the motivation for keying price by concrete model id. **The decision stands unchanged and the key is still per-model** — but the justification is that the tiers cost *differently*, not that they differ by any particular factor. The shipped gap is 2.0x (ADR-029); the schema's necessity is unaffected by its size.
 
 ## ADR-023 — Dataset ground truth is causal, not literal; expectations are harness-derived (companion ruling to the Checkpoint-1 dispositions)
 
@@ -640,6 +654,53 @@ prompt estimates 64 tokens, which inverts the ordering and makes the ratio the b
 gross-vs-fine-grained scope statement), `config/gateway.yaml`,
 `controlplane/gateway/canary.py` (new), `controlplane/gateway/config.py` (`UsageSanity`),
 `tests/test_canary.py` (new, 38), `tests/test_gateway_config.py`, `docs/08` (D1 closed).
+
+## ADR-029 — Groq tiers rebind to the gpt-oss pair; ADR-009's cascade premise is **ratio-parametric** (resolves `[D2-groq-tier-ids-shut-down-no-production-qwen-exists]`)
+
+**Context:** both Groq ids bound by ADR-018 were **shut down on 2026-08-16** for free and developer-tier keys (announced 2026-06-17). ADR-018's own trade-off note predicted this exact failure mode — "preview ids can be discontinued without notice, which would break the demo silently" — and while it worried about the wrong tier of the catalogue, the *production* pair is what died, 11 days before we would have demoed. A dated note is appended to ADR-018 rather than editing it: the original text is the record of what was verified on 2026-08-25.
+
+Probed live 2026-08-27, one request each, this repo's key:
+
+| id | result | catalogue section |
+|---|---|---|
+| `llama-3.1-8b-instant` | **HTTP 404** `model_not_found` | (was production) |
+| `llama-3.3-70b-versatile` | **HTTP 404** `model_not_found` | (was production) |
+| `openai/gpt-oss-20b` | HTTP 200, usage present, id echoed | **production** |
+| `openai/gpt-oss-120b` | HTTP 200, usage present, id echoed | **production** |
+| `qwen/qwen3.6-27b` | HTTP 200, usage present, id echoed | **preview** |
+
+The two 404s establish that this key is **not** on the exempt committed-spend contract, so the rebinding is forced rather than elective. Groq names `openai/gpt-oss-20b` as the 8B's replacement, and `openai/gpt-oss-120b` **or** `qwen/qwen3.6-27b` as the 70B's.
+
+**Options:** (a) small=`gpt-oss-20b`, frontier=`qwen/qwen3.6-27b` — preserves a ~9.6× tier gap and so the old `>5×` test, but requires amending ADR-018's production-only rule; (b) small=`gpt-oss-20b`, frontier=`gpt-oss-120b` — both production, ADR-018 unamended, but the gap is only **2.0×**, which fails the shipped cascade test; (c) one model on both tiers — 1.0× gap, deletes the cost plane's effect.
+
+**Decision: (b).** The deviation report recommended (a) and was **overruled**; the reasoning is recorded because it generalises. Option (a)'s frontier tier is *smaller, less capable, and 5× costlier per blended token* than `gpt-oss-120b` ($0.60/$3.00 vs $0.15/$0.60 per 1M) — a pair no rational deployment would ever choose, selected only to keep a test's ratio alive. **A number produced by an economically irrational configuration is harness-fitting by construction**, even when every individual figure in it is real: the config itself becomes the fitted parameter. Under (b) "escalate to the more capable model" is actually true, both ids are production, and ADR-018 stands unamended.
+
+Two findings from the probe independently support the overrule, neither of which the deviation report had:
+
+- **`qwen/qwen3.6-27b` emits its reasoning trace into the response body.** At `max_tokens: 8` it returned `"\n<think>\nHere's a thinking process:\n\n1"` as message content. That is not a usage-accounting quirk; it would push reasoning scaffolding through the sentence buffer into every output-lane detector and into `audit_records`, so option (a) would have contaminated the interception path itself.
+- **The gpt-oss pair spends completion tokens on reasoning before emitting content.** Both sizes returned empty content with `finish_reason: length` and `reasoning_tokens: 6` at `max_tokens: 8`. Relevant to the latency benchmark and to any canary that asserts on response text.
+
+### Amendment to ADR-009 — the cascade premise is ratio-parametric
+
+ADR-009 was recorded when the tiers differed ~12×, and both ADR-022 and several docstrings inherited that figure as though it were architectural. It never was: **~12× was llama-era vendor pricing.** The premise is restated as:
+
+> The cascade mechanism is *route cheap, escalate on low confidence*. It does not depend on the price ratio. Measured savings are a function of **(tier ratio × routing fraction)** and are reported **with the deployment's own measured ratio** beside them.
+
+The shipped ratio is **2.0×**, and it is **exactly** 2.0× on input *and* on output ($0.075→$0.15, $0.30→$0.60 per 1M). That matters more than its size: the ratio is **blend-independent**, so no choice of input/output mix can move it and none can be cherry-picked to flatter the savings figure. `test_adr_029_the_tier_ratio_is_blend_independent` pins that property at the price level.
+
+`test_adr_022_tier_prices_preserve_the_cascade_premise` asserted `frontier > small * 5`, which 2.0× fails. It is amended **in this same commit as this ADR** — the front door — to assert what the premise actually requires: the frontier tier is **strictly costlier** per blended token, and the ratio is **≥ 1.5×**. Both survive a genuine vendor price move; a copy-paste flattening both tiers to one figure fails both. This is deliberately *not* AGENTS.md §5.4's forbidden move: the specification changed first, by ruling, and the assertion follows it. Weakening `>5×` to `>1.5×` while leaving ADR-009 claiming ~12× would have been exactly that move.
+
+**Cost reports must carry the ratio and one context line (06 §6).** A savings percentage without its ratio is unreadable. The context line is labelled *context, not our measurement*, and cites vendors' own price pages with a retrieval date.
+
+> **The bracket named in the adjudication did not survive verification, and the measured figures are written instead.** The ruling asked for "typical cross-vendor flagship-vs-mini gaps run ~8–25×". Retrieved 2026-08-27 from the two vendors' own pages: OpenAI `gpt-5.6-sol` vs `gpt-5-nano` = **80× input / 50× output** (53× blended); Anthropic Claude Opus 5 vs Haiku 4.5 = **5.0×** on both. Neither vendor falls inside ~8–25×; the real range is roughly **5×–50×+**. Citing two price pages beside a bracket both of them refute would have been a fabricated figure with real citations attached, so 06 §6 carries the measured numbers. This *strengthens* the amendment rather than weakening it: 5.0× is a real vendor's real gap, and within a single lineup Opus 5 vs Sonnet 5 is **2.5×** — close to ours. The spread exists because the ratio depends entirely on which pair is chosen, which is the ratio-parametric point stated as data.
+
+**Trade-offs:**
+
+- **A 2.0× gap makes the cascade's headline savings smaller than a ~12× gap would.** That is the honest consequence of pricing that actually exists, and it is preferred to a larger number obtained from a configuration chosen for its ratio. The mechanism demonstrates identically; only the multiplier shrinks.
+- **`price_table_version` bumped 1 → 2** (ADR-022's bump-on-change marker); `retrieved` is 2026-08-27.
+- **The usage canary now passes with ~7 tokens of margin, and this is a measured fragility, not a comfortable pass.** At the shipped canary prompt (estimate 64), both gpt-oss sizes report `prompt_tokens: 121` — a **1.89×** ratio against `max_ratio: 2.0`, band [32, 128]. The delta (57) already clears `min_delta_floor` (50), so the ANDed condition rests entirely on the band leg. Measured across three prompt lengths, the cause is decomposable and is **not** the ADR-018 pathology: gpt-oss tokenizes this prose at ~5.1 chars/token (the estimator assumes 4.0) and adds ~**72 tokens** of fixed chat-template overhead; qwen adds ~11. Residual under 1 token at every length. Real scaffolding, correctly reported — but ADR-028's rationale assumed "tokenizer variance is well under 2×", and a 72-token fixed preamble against a 64-token estimate is not tokenizer variance. **No knob is changed here**, because changing a threshold to widen a margin during a rebinding is the move §5.4 forbids and nothing is currently failing. Logged as **M-15** in `docs/08` so it is visible rather than rediscovered at the canary step; if Groq's template grows, a measured-class provider will refuse to boot.
+
+**Docs touched:** this ADR, ADR-018 (dated note appended, original preserved), ADR-022 + 05 §6.1 (the inherited ~12× rationale corrected to ratio-parametric), 05 §3/§4 (example record's `model_used`), 06 §6 (ratio-parametric reporting rules), `config/gateway.yaml` (tiers, prices, provenance, `price_table_version`), `controlplane/gateway/config.py` + `sse_proxy.py` (docstrings asserting ~12×), README (price-provenance bullet), `docs/08` (deviation closed, **SL-3 downgraded**, M-13 logged), `tests/test_gateway_config.py` (constants, production-id test, cascade test amended + blend-independence test added), `tests/test_sse_proxy.py`, `tests/test_canary.py`, `tests/test_audit_records.py` (fixture ids rebound).
 
 ## Minor resolutions log (review findings 6–8 — doc edits, no ADR needed)
 

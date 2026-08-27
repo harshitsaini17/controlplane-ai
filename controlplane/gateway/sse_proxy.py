@@ -208,8 +208,11 @@ class UpstreamDispatcher:
         """Concrete model id for `tier` (05 §6.1 `tiers`), or raise.
 
         Refuses rather than substituting the other tier: ADR-009's premise is that the
-        tiers differ ~12x in cost, so quietly serving `frontier` for an unbound `small`
-        would corrupt the cost plane's central comparison.
+        frontier tier costs strictly more, so quietly serving `frontier` for an unbound
+        `small` would corrupt the cost plane's central comparison — and in the flattering
+        direction, pricing an escalation as if it had been routed cheap. The gap is
+        deployment-specific (2.0x on the shipped gpt-oss pair; ADR-029 restated the premise
+        as ratio-parametric), and the substitution is wrong at any ratio.
 
         An unknown tier *name* is refused by `Tiers.resolve` itself, which raises
         `KeyError`: that is a caller bug and belongs in ERR-GW-001, not in the

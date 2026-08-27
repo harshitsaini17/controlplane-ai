@@ -164,9 +164,12 @@ Two provenance rules already constrain what may ever appear here:
 - **Upstream class** (ADR-018) — the local development gateway's token accounting carries a
   fixed ~5000-token offset, so it is classed `dev` and `eval/` refuses to produce reports
   from it unless run with `--allow-dev`, which stamps `DEV-TAINTED` into the filename.
-- **Price provenance** (ADR-022) — no first-party Groq price table is currently reachable, so
-  the cost simulation may report a **relative** delta (robust to a proportional error in both
-  tiers) but not an absolute dollar figure. See `docs/08` Q-02.
+- **Price provenance** (ADR-022, amended by ADR-029) — the bound Groq models now carry
+  **first-party** per-1M figures on Groq's own models page, so absolute dollar figures are
+  publishable **for those two ids** (`openai/gpt-oss-20b`, `openai/gpt-oss-120b`) with their
+  `source_url` and retrieval date. Any comparison priced on the retired llama pair stays
+  barred — those figures were never first-party and the models no longer serve. Prices are
+  re-verified at submission packaging. See `docs/08` **SL-3**.
 
 ## Repository layout
 

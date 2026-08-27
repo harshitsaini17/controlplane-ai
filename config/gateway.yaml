@@ -13,8 +13,10 @@
 # demo/ refuse dev-class data unless run with --allow-dev, which taints output filenames.
 #
 # ADR-022 keys prices by CONCRETE MODEL ID, because a two-tier cascade whose premise is
-# that the tiers cost ~12x differently cannot be expressed by one price pair per
-# provider. Three distinct states, deliberately not collapsible:
+# that the tiers cost DIFFERENTLY cannot be expressed by one price pair per provider.
+# (ADR-022 was written when that difference was ~12x; ADR-029 restates the premise as
+# ratio-parametric, which changes the size of the gap but not the need for the key.)
+# Three distinct states, deliberately not collapsible:
 #
 #   pricing: {source_url, retrieved, models: {...}}  — a price per model id
 #   pricing: unmetered                               — AFFIRMATIVE claim of no
@@ -26,7 +28,7 @@
 #                                                      UNKNOWN. Zero and unknown are
 #                                                      different facts.
 
-price_table_version: 1
+price_table_version: 2
 
 providers:
 
@@ -64,47 +66,58 @@ providers:
   # --------------------------------------------------------------------------
   # MEASURED CLASS — Groq.
   # --------------------------------------------------------------------------
-  # Model ids verified first-party on 2026-08-25 against console.groq.com/docs/models;
-  # both sit in the PRODUCTION section (not preview — preview ids may be discontinued
-  # without notice, which would silently break the demo).
+  # Tiers REBOUND 2026-08-27 by ADR-029. The previous pair (`llama-3.1-8b-instant`,
+  # `llama-3.3-70b-versatile`) was SHUT DOWN by Groq on 2026-08-16 for free and
+  # developer-tier keys, announced 2026-06-17. ADR-018's trade-off note predicted exactly
+  # this failure mode ("discontinued without notice, which would silently break the demo")
+  # and it landed 11 days before we would have demoed.
   #
-  # PRICE PROVENANCE — READ BEFORE QUOTING A DOLLAR FIGURE FROM THIS PROVIDER.
-  # These prices are NOT first-party-verifiable as of 2026-08-25. Re-checked live:
-  #   groq.com/pricing            -> 308 redirect to a homepage carrying no price content
-  #   console.groq.com/docs/pricing -> 404
-  #   console.groq.com/settings/billing -> authenticated, no public table
-  #   the per-model doc pages     -> zero dollar figures
-  # The figures below therefore rest on SECONDARY aggregators (CloudZero, Metatext and
-  # two others converge on the same numbers) plus a December-2024 groq.com blog post that
-  # states the 70B pair first-party but is stale by any reasonable standard.
+  # Probed live 2026-08-27, one request each, this repo's key:
+  #   llama-3.1-8b-instant      -> HTTP 404  model_not_found
+  #   llama-3.3-70b-versatile   -> HTTP 404  model_not_found
+  #   openai/gpt-oss-20b        -> HTTP 200  usage.prompt_tokens present, id echoed
+  #   openai/gpt-oss-120b       -> HTTP 200  usage.prompt_tokens present, id echoed
+  # The 404s confirm this key is NOT on the exempt committed-spend contract, so the
+  # rebinding is forced rather than elective.
   #
-  # `source_url` points at a page that ACTUALLY CONTAINS the figures rather than at the
-  # canonical-but-empty pricing URL, because a provenance field naming a page without the
-  # numbers is worse than no field. This is what ADR-022's source_url/retrieved exist to
-  # make visible instead of burying: the weakness is in the config, in the open.
-  # STUB(price provenance is secondary-source only; re-verify against a first-party Groq
-  # price table before any absolute dollar figure is published in a report, the README,
-  # the proposal or the video (AGENTS.md §7). The 06 §6 cost simulation reports a
-  # RELATIVE delta, which survives a proportional error in both tiers; an absolute figure
-  # does not. owner-decision-needed if no first-party table has appeared by then)
+  # Both ids sit in the PRODUCTION section of console.groq.com/docs/models (not preview),
+  # which is the ADR-018 rule and is why the alternative frontier candidate
+  # (`qwen/qwen3.6-27b`, preview) was rejected — see ADR-029 for the full overrule.
+  #
+  # PRICE PROVENANCE — IMPROVED, AND NOW FIRST-PARTY (was SL-3's weak link).
+  # Unlike the llama pair, these two carry per-1M figures ON GROQ'S OWN MODELS PAGE:
+  #   openai/gpt-oss-20b    $0.075 input / $0.30 output  per 1M
+  #   openai/gpt-oss-120b   $0.15  input / $0.60 output  per 1M
+  # `source_url` therefore points at a first-party page that ACTUALLY CONTAINS the
+  # figures. This lifts SL-3's absolute-dollar gate FOR THESE TWO IDS ONLY: any
+  # llama-priced historical comparison stays barred, because those prices were never
+  # first-party and the models no longer serve. Re-verify at submission packaging.
+  #
+  # THE TIER RATIO IS 2.0x, NOT ~12x — and ADR-029 amends ADR-009 to match rather than
+  # bending the config to preserve a number. gpt-oss-120b is exactly 2.0x gpt-oss-20b on
+  # input AND on output, so the ratio is blend-independent: no choice of input/output mix
+  # can move it, and none can be cherry-picked to flatter it. The cascade premise is
+  # restated as RATIO-PARAMETRIC — the mechanism (route cheap, escalate on low
+  # confidence) does not depend on the ratio; measured savings scale with
+  # (ratio x routing fraction) and are reported WITH this deployment's actual ratio.
   - name: groq
     upstream_class: measured
     base_url: https://api.groq.com/openai/v1
     key_env: GROQ_API_KEY
     pricing:
-      source_url: https://www.cloudzero.com/blog/groq-pricing/
-      retrieved: 2026-08-25
+      source_url: https://console.groq.com/docs/models   # first-party; carries the figures
+      retrieved: 2026-08-27
       models:
         # USD per 1K tokens. Vendor quotes per 1M, so these are /1000 of the quote.
-        llama-3.1-8b-instant:                    # small tier
-          per_1k_in: 0.00005                     # $0.05 / 1M
-          per_1k_out: 0.00008                    # $0.08 / 1M
-        llama-3.3-70b-versatile:                 # frontier tier — ~12x the small tier,
-          per_1k_in: 0.00059                     # $0.59 / 1M    which is the whole
-          per_1k_out: 0.00079                    # $0.79 / 1M    premise of ADR-009
+        openai/gpt-oss-20b:                      # small tier
+          per_1k_in: 0.000075                    # $0.075 / 1M
+          per_1k_out: 0.0003                     # $0.30  / 1M
+        openai/gpt-oss-120b:                     # frontier tier — exactly 2.0x the small
+          per_1k_in: 0.00015                     # $0.15  / 1M    tier on both directions
+          per_1k_out: 0.0006                     # $0.60  / 1M    (ADR-029 amends ADR-009)
     tiers:
-      small: llama-3.1-8b-instant
-      frontier: llama-3.3-70b-versatile
+      small: openai/gpt-oss-20b
+      frontier: openai/gpt-oss-120b
 
   # --------------------------------------------------------------------------
   # MEASURED CLASS — local Ollama. Zero marginal token cost (local compute).

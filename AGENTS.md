@@ -199,7 +199,12 @@ Freeze gate:  .venv/bin/python -m eval.validate_dataset            # consistency
               approved state and is what eval/run_all.py calls before computing anything.
               A frozen case is not editable as a fix — that is a new freeze cycle.
 
-Run gateway:  [Phase 2+] .venv/bin/uvicorn controlplane.gateway.app:app --reload
+Run gateway:  .venv/bin/uvicorn --factory controlplane.gateway.app:create_app --reload
+              `app.py` exposes the `create_app()` factory and NO module-level `app`, by
+              design (the Gateway docstring: a module global would leave a stale copy
+              behind a hot reload) — so `--factory` is required, not stylistic.
+              Do NOT serve on port 8000: `kiro-local`'s base_url is http://localhost:8000,
+              so the gateway would proxy to itself. Default 8000 → pick another port.
 Eval suite:   [Phase 2+] .venv/bin/python -m eval.run_all         → reports/eval_report.md
               [Phase 2+] .venv/bin/python -m eval.bench_latency   → reports/latency_report.md
               .venv/bin/python -m eval.fault_injection            → reports/fault_injection_report.md

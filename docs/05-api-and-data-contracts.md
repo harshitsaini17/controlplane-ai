@@ -158,7 +158,7 @@ The proposal/README show this shape (assembled from `audit_records`):
   "actions": {"quarantined": true, "review_id":"…",
               "input_redactions": [{"stage":"input","category":"pii.ssn",
                                     "span":{"start":42,"end":53}}]},
-  "model": {"tier_requested":"small","used":"llama-3.3-70b-versatile",
+  "model": {"tier_requested":"small","used":"openai/gpt-oss-120b",
             "upstream_class":"measured","cascade_escalated":true},
   "cost": {"tokens_in":812,"tokens_out":344,"est_usd":0.0041},
   "latency": {"gateway_overhead_ms":46.1,"upstream_ms":1240.0},
@@ -297,7 +297,9 @@ rather than conflating them under one "model" column.
 
 **Pricing is keyed by model id, and is never estimated (ADR-022).** One price pair per
 provider could not express a two-tier cascade whose whole premise is that the tiers cost
-~12× differently, so `pricing.models` is keyed by the same concrete ids `tiers` binds and
+**differently** — ~12× when ADR-022 was written, 2.0× on the pair shipped since ADR-029,
+which changes the size of the gap but not the need for the key — so `pricing.models` is
+keyed by the same concrete ids `tiers` binds and
 `audit_records.model_used` records — no new join, and re-pointing a tier keeps costs correct.
 `est_cost_usd` resolves through `model_used` and is **never averaged across tiers**: an
 average would erase the exact effect the cost plane exists to measure. Three behaviours keep

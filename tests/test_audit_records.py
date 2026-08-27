@@ -89,7 +89,7 @@ def test_fr_aud_001_writes_one_record_readable_as_the_05_4_view(conn) -> None:
     write_record(conn, base_record(
         signals_json=serialize_signals([pii_signal()]),
         tier_requested="small",
-        model_used="llama-3.1-8b-instant",
+        model_used="openai/gpt-oss-20b",
         upstream_class="measured",
         tokens_in=812,
         tokens_out=344,
@@ -100,7 +100,7 @@ def test_fr_aud_001_writes_one_record_readable_as_the_05_4_view(conn) -> None:
     view = canonical_view(conn, "req-1")
 
     # The 05 §4 nesting, not the flat columns.
-    assert view["model"] == {"tier_requested": "small", "used": "llama-3.1-8b-instant",
+    assert view["model"] == {"tier_requested": "small", "used": "openai/gpt-oss-20b",
                             "upstream_class": "measured", "cascade_escalated": False}
     assert view["cost"] == {"tokens_in": 812, "tokens_out": 344, "est_usd": 0.0041}
     assert view["latency"]["gateway_overhead_ms"] == 46.1
@@ -271,7 +271,7 @@ def test_from_verdict_stamps_both_id_lists(uc3: Policy) -> None:
 
 @pytest.mark.parametrize("field,value,match", [
     ("stage_summary", "streaming", "stage_summary"),
-    ("tier_requested", "llama-3.1-8b-instant", "never a concrete model id"),
+    ("tier_requested", "openai/gpt-oss-20b", "never a concrete model id"),
     ("upstream_class", "local", "upstream_class"),
     ("verdict", "allow", "04 §4.2 vocabulary"),
 ])

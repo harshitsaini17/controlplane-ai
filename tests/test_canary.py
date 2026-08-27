@@ -79,7 +79,7 @@ def messages() -> list[dict[str, str]]:
     return [dict(m) for m in CANARY_MESSAGES]
 
 
-def dispatcher(config, prompt_tokens: int | None, *, model: str = "llama-3.1-8b-instant"):
+def dispatcher(config, prompt_tokens: int | None, *, model: str = "openai/gpt-oss-20b"):
     """A dispatcher whose upstream reports `prompt_tokens`, or no usage block at all."""
     def handler(request: httpx.Request) -> httpx.Response:
         payload = {
@@ -345,7 +345,7 @@ def test_run_canary_fires_one_request_and_evaluates_it(config, creds) -> None:
     assert result.passed is True
     assert result.estimate == estimate
     assert result.reported == estimate
-    assert result.model_used == "llama-3.1-8b-instant"
+    assert result.model_used == "openai/gpt-oss-20b"
 
 
 def test_run_canary_catches_an_inflating_upstream(config, creds) -> None:

@@ -182,8 +182,10 @@ class Provider(BaseModel):
         """Whether a cost figure may be computed for `model_id` at all.
 
         Per-model, not per-provider: ADR-022 keys prices by concrete model id precisely
-        because one provider serves both cascade tiers at ~12x different rates, so
-        "can this provider price?" is not a well-formed question.
+        because one provider serves both cascade tiers at *different* rates, so
+        "can this provider price?" is not a well-formed question. (The size of the gap is
+        deployment-specific — 2.0x on the shipped pair per ADR-029 — but the reason the
+        key is per-model does not depend on it.)
 
         Not a validation rule at runtime, deliberately — the boot ladder in
         `GatewayConfig` is where a missing price becomes loud. In the hot path the guard
@@ -196,8 +198,9 @@ class Provider(BaseModel):
         """Cost for one request, or `None` when this model has no known price.
 
         Never estimated and never averaged across tiers (ADR-022): an average would erase
-        the exact ~12x tier gap the cost plane exists to measure, and a fallback figure
-        would be a fabricated measurement. `None` is the honest return, and the caller
+        the exact tier gap the cost plane exists to measure — whatever that gap happens to
+        be for the bound pair (2.0x as shipped, ADR-029) — and a fallback figure would be
+        a fabricated measurement. `None` is the honest return, and the caller
         that receives it must write null into `est_cost_usd` and increment
         `cp_pricing_missing_total` (05 §5).
 

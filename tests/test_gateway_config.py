@@ -38,8 +38,8 @@ DOC_01 = Path(__file__).resolve().parents[1] / "docs" / "01-requirements-and-sce
 _TIER_SENTENCE = re.compile(r"\*\*Tier names are ((?:`[a-z_]+`(?:,? and )?)+)\*\*")
 
 #: Concrete model ids the shipped Groq tiers bind (ADR-022 keys prices by these).
-GROQ_SMALL = "llama-3.1-8b-instant"
-GROQ_FRONTIER = "llama-3.3-70b-versatile"
+GROQ_SMALL = "openai/gpt-oss-20b"
+GROQ_FRONTIER = "openai/gpt-oss-120b"
 
 
 def load_raw() -> dict[str, Any]:
@@ -75,14 +75,23 @@ def test_adr_018_class_ruling_survives_transcription() -> None:
 
 
 def test_groq_tiers_bind_the_verified_production_model_ids() -> None:
-    """Both ids were verified first-party as *production* models (ADR-018).
+    """Both ids were verified first-party as *production* models (ADR-018, ADR-029).
 
     Preview ids can be discontinued without notice; a silently dead id fails at dispatch
     and forces the fallback path mid-demo, which is a BLOCKER dressed as a config typo.
+
+    **ADR-018's own trade-off note predicted this and it came true.** The original pair
+    (`llama-3.1-8b-instant`, `llama-3.3-70b-versatile`) was shut down 2026-08-16 for free
+    and developer-tier keys — probed 2026-08-27, both return HTTP 404 `model_not_found` on
+    this repo's key, so it is not on the exempt committed-spend contract. ADR-029 rebound
+    the tiers to the gpt-oss pair, which Groq itself names as the replacements.
+
+    `qwen/qwen3.6-27b` serves and was the other sanctioned frontier replacement, but it is
+    a **preview** id — exactly what this test exists to keep out of the config.
     """
     groq = load_gateway_config().provider("groq")
-    assert groq.tiers.small == "llama-3.1-8b-instant"
-    assert groq.tiers.frontier == "llama-3.3-70b-versatile"
+    assert groq.tiers.small == GROQ_SMALL == "openai/gpt-oss-20b"
+    assert groq.tiers.frontier == GROQ_FRONTIER == "openai/gpt-oss-120b"
 
 
 def test_q10_ollama_provider_is_declared_but_binds_no_model() -> None:
@@ -180,18 +189,53 @@ def test_adr_022_prices_are_keyed_by_concrete_model_id() -> None:
 
 
 def test_adr_022_tier_prices_preserve_the_cascade_premise() -> None:
-    """ADR-009's premise is that the tiers cost ~12x differently — assert the gap holds.
+    """The cascade premise, as restated RATIO-PARAMETRIC by ADR-029 amending ADR-009.
 
-    A single blended rate, or a copy-paste that flattens both tiers to the same figure,
-    would erase the exact effect the cost plane exists to measure while still producing a
-    plausible-looking dollar number. The bound is loose (>5x) so a genuine vendor price
-    change doesn't fail the suite, but a flattening does.
+    The old bound was `> small * 5`, written when the tiers were the llama pair at ~12x.
+    The shipped gpt-oss pair is exactly **2.0x**, so that bound now fails. It is amended
+    here **in the same commit as ADR-029** — a front-door change to a ruled contract, not
+    a harness loosened to fit a number (AGENTS.md §5.4). The "~12x" was llama-era vendor
+    pricing, never architecture: the mechanism is route-cheap-escalate-on-low-confidence,
+    and measured savings scale with (ratio x routing fraction), reported with the
+    deployment's own ratio.
+
+    Two things must still hold, and a flattening fails both:
+      1. the frontier tier is **strictly costlier per blended token** — otherwise
+         "escalate" carries no cost meaning and the cost plane measures nothing;
+      2. the ratio is **>= 1.5x**, which a copy-paste collapsing both tiers to one figure
+         cannot satisfy.
+
+    `est_cost_usd(id, 1000, 1000)` is the blended measure: equal input and output tokens.
+    For this pair the ratio is **blend-independent** — 120b is exactly 2.0x 20b on input
+    *and* on output — so no input/output mix can move it and none can be cherry-picked to
+    flatter it. `test_adr_029_the_tier_ratio_is_blend_independent` pins that separately.
     """
     groq = load_gateway_config().provider("groq")
     small = groq.est_cost_usd(GROQ_SMALL, 1000, 1000)
     frontier = groq.est_cost_usd(GROQ_FRONTIER, 1000, 1000)
     assert small is not None and frontier is not None
-    assert frontier > small * 5
+    assert frontier > small, "escalation must cost more, or the cost plane measures nothing"
+    assert frontier / small >= 1.5, "a flattened pair erases the effect being measured"
+
+
+def test_adr_029_the_tier_ratio_is_blend_independent() -> None:
+    """The 2.0x gap holds on input and output separately, so no blend can be cherry-picked.
+
+    This is what makes the ratio publishable next to a savings figure: a ratio that moved
+    with the input/output mix would invite picking the mix that flatters it. Asserted at
+    the price level rather than through `est_cost_usd`, because that is where the property
+    actually lives.
+    """
+    groq = load_gateway_config().provider("groq")
+    small, frontier = groq.price_for(GROQ_SMALL), groq.price_for(GROQ_FRONTIER)
+    assert small is not None and frontier is not None
+    in_ratio = frontier.per_1k_in / small.per_1k_in
+    out_ratio = frontier.per_1k_out / small.per_1k_out
+    assert in_ratio == out_ratio, (
+        f"input ratio {in_ratio} != output ratio {out_ratio}; the ratio reported beside a "
+        "savings figure would then depend on the blend chosen to compute it"
+    )
+    assert in_ratio == 2.0
 
 
 def test_price_provenance_fields_are_populated() -> None:

@@ -53,7 +53,7 @@ def dispatcher(config, handler, metrics: MetricsRegistry | None = None,
     return UpstreamDispatcher(config, client=client, metrics=metrics or MetricsRegistry())
 
 
-def completion(text: str = "Thirty days.", *, model: str = "llama-3.1-8b-instant",
+def completion(text: str = "Thirty days.", *, model: str = "openai/gpt-oss-20b",
                prompt_tokens: int = 12, completion_tokens: int = 4) -> dict:
     return {
         "id": "cmpl-1", "model": model,
@@ -212,7 +212,7 @@ def test_a_non_streaming_completion_is_parsed(config, monkeypatch) -> None:
     result = asyncio.run(dispatcher(config, handler).complete(
         MESSAGES, tier="small", provider=provider(config, "groq")))
     assert result.text == "Thirty days from purchase."
-    assert result.model_used == "llama-3.1-8b-instant"
+    assert result.model_used == "openai/gpt-oss-20b"
     assert (result.prompt_tokens, result.completion_tokens) == (12, 4)
     assert result.finish_reason == "stop"
 
@@ -222,11 +222,11 @@ def test_model_used_records_what_actually_answered(config, monkeypatch) -> None:
     monkeypatch.setenv("GROQ_API_KEY", SECRET)
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=completion(model="llama-3.1-8b-instant-0125"))
+        return httpx.Response(200, json=completion(model="openai/gpt-oss-20b-0125"))
 
     result = asyncio.run(dispatcher(config, handler).complete(
         MESSAGES, tier="small", provider=provider(config, "groq")))
-    assert result.model_used == "llama-3.1-8b-instant-0125"
+    assert result.model_used == "openai/gpt-oss-20b-0125"
 
 
 def test_absent_usage_stays_none_rather_than_zero(config, monkeypatch) -> None:
@@ -401,18 +401,21 @@ def test_a_mid_stream_failure_is_not_retried(config, monkeypatch) -> None:
 
 
 def test_an_unbound_tier_is_refused_not_substituted(config) -> None:
-    """★ ADR-009's premise is that the tiers cost ~12x differently.
+    """★ ADR-009's premise is that the frontier tier costs strictly more (ADR-029).
 
     Quietly serving `frontier` for an unbound `small` would corrupt the exact comparison
-    the cost plane exists to make. `ollama-local` ships with both tiers null (SL-4).
+    the cost plane exists to make — and it would do so in the *flattering* direction, by
+    pricing an escalation as if it had been routed cheap. `ollama-local` ships with both
+    tiers null (SL-4). The ratio is deployment-specific (2.0x on the shipped gpt-oss pair,
+    not the retired llama pair's ~12x); the substitution is wrong at any ratio.
     """
     with pytest.raises(UpstreamError, match="binds no model to tier"):
         UpstreamDispatcher(config).resolve_model("small", provider(config, "ollama-local"))
 
 
 @pytest.mark.parametrize("tier,expected", [
-    ("small", "llama-3.1-8b-instant"),
-    ("frontier", "llama-3.3-70b-versatile"),
+    ("small", "openai/gpt-oss-20b"),
+    ("frontier", "openai/gpt-oss-120b"),
 ])
 def test_tiers_resolve_to_concrete_model_ids(config, tier, expected) -> None:
     resolved = UpstreamDispatcher(config).resolve_model(tier, provider(config, "groq"))
