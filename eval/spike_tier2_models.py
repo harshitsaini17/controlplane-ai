@@ -297,58 +297,79 @@ def _percentiles(samples: list[float], cold_ms: float, text: str, n_tokens: int)
     }
 
 
-def _measure_onnx(model_id: str, buckets: dict[str, str], reps: int, threads: int,
-                  quantized: bool) -> dict[str, Any]:
-    """Export to ONNX and time it under ONNX Runtime, optionally int8-quantized.
+def build_onnx_session(model_id: str, threads: int, workdir: Path,
+                       quantized: bool = True) -> dict[str, Any]:
+    """Export `model_id` to ONNX, optionally int8-quantize, and open a CPU session.
+
+    Extracted so that **one** definition of "the served graph" covers every harness that
+    measures these checkpoints. ADR-032's window figures have to describe the same graph
+    ADR-031 picked, and two export paths would eventually differ in opset, axes or quant
+    settings — at which point the two ADRs' numbers would silently stop being comparable.
 
     The export happens here rather than being cached in the repo: a checked-in graph would be a
-    binary artifact whose provenance nobody could check, and the export costs ~2 s. Artifacts
-    are deleted after measurement — six fp32 graphs are ~1.6 GB and this machine has less.
+    binary artifact whose provenance nobody could check, and the export costs ~2 s. The caller
+    owns `workdir` and deletes it after measuring — six fp32 graphs are ~1.6 GB and this
+    machine has less, so callers keep one at a time.
+
+    Returns the session and tokenizer alongside the provenance an artifact should record
+    (parameter count, graph size, export and quantization cost).
     """
-    import numpy as np
     import onnxruntime as ort
     import torch
     from onnxruntime.quantization import QuantType, quantize_dynamic
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
     out: dict[str, Any] = {"model_id": model_id}
+    tok = AutoTokenizer.from_pretrained(model_id)
+    model = AutoModelForSequenceClassification.from_pretrained(model_id)
+    model.eval()
+    out["params_m"] = round(sum(p.numel() for p in model.parameters()) / 1e6, 1)
+    out["labels"] = list(getattr(model.config, "id2label", {}).values())[:6]
+
+    sample = tok("a sentence long enough to trace the graph", return_tensors="pt")
+    names = [n for n in ("input_ids", "attention_mask", "token_type_ids") if n in sample]
+    axes: dict[str, dict[int, str]] = {n: {0: "b", 1: "s"} for n in names}
+    axes["logits"] = {0: "b"}
+
+    fp32 = workdir / "model.onnx"
+    t0 = time.perf_counter()
+    torch.onnx.export(
+        model, tuple(sample[n] for n in names), str(fp32),
+        input_names=names, output_names=["logits"], dynamic_axes=axes,
+        opset_version=17, do_constant_folding=True, dynamo=False,
+    )
+    out["export_s"] = round(time.perf_counter() - t0, 2)
+
+    graph = fp32
+    if quantized:
+        int8 = workdir / "model_int8.onnx"
+        t0 = time.perf_counter()
+        quantize_dynamic(str(fp32), str(int8), weight_type=QuantType.QInt8)
+        out["quantize_s"] = round(time.perf_counter() - t0, 2)
+        fp32.unlink()                      # peak disk: one graph at a time
+        graph = int8
+    out["graph_mb"] = round(graph.stat().st_size / 1e6, 1)
+
+    opts = ort.SessionOptions()
+    opts.intra_op_num_threads = threads
+    opts.inter_op_num_threads = 1
+    out["session"] = ort.InferenceSession(str(graph), opts, providers=["CPUExecutionProvider"])
+    out["tokenizer"] = tok
+    out["fed"] = [i.name for i in out["session"].get_inputs()]
+    return out
+
+
+def _measure_onnx(model_id: str, buckets: dict[str, str], reps: int, threads: int,
+                  quantized: bool) -> dict[str, Any]:
+    """Time one checkpoint on every bucket under ONNX Runtime."""
+    import numpy as np
+
+    out: dict[str, Any] = {"model_id": model_id}
     workdir = Path(tempfile.mkdtemp(prefix="spike_onnx_"))
     try:
-        tok = AutoTokenizer.from_pretrained(model_id)
-        model = AutoModelForSequenceClassification.from_pretrained(model_id)
-        model.eval()
-        out["params_m"] = round(sum(p.numel() for p in model.parameters()) / 1e6, 1)
-        out["labels"] = list(getattr(model.config, "id2label", {}).values())[:6]
-
-        sample = tok("a sentence long enough to trace the graph", return_tensors="pt")
-        names = [n for n in ("input_ids", "attention_mask", "token_type_ids") if n in sample]
-        axes: dict[str, dict[int, str]] = {n: {0: "b", 1: "s"} for n in names}
-        axes["logits"] = {0: "b"}
-
-        fp32 = workdir / "model.onnx"
-        t0 = time.perf_counter()
-        torch.onnx.export(
-            model, tuple(sample[n] for n in names), str(fp32),
-            input_names=names, output_names=["logits"], dynamic_axes=axes,
-            opset_version=17, do_constant_folding=True, dynamo=False,
-        )
-        out["export_s"] = round(time.perf_counter() - t0, 2)
-
-        graph = fp32
-        if quantized:
-            int8 = workdir / "model_int8.onnx"
-            t0 = time.perf_counter()
-            quantize_dynamic(str(fp32), str(int8), weight_type=QuantType.QInt8)
-            out["quantize_s"] = round(time.perf_counter() - t0, 2)
-            fp32.unlink()                      # peak disk: one graph at a time
-            graph = int8
-        out["graph_mb"] = round(graph.stat().st_size / 1e6, 1)
-
-        opts = ort.SessionOptions()
-        opts.intra_op_num_threads = threads
-        opts.inter_op_num_threads = 1
-        sess = ort.InferenceSession(str(graph), opts, providers=["CPUExecutionProvider"])
-        fed = [i.name for i in sess.get_inputs()]
+        built = build_onnx_session(model_id, threads, workdir, quantized=quantized)
+        sess, tok, fed = built.pop("session"), built.pop("tokenizer"), built.pop("fed")
+        out.update(built)
 
         out["buckets"] = {}
         for name, text in buckets.items():

@@ -70,8 +70,9 @@ slugs lived scattered across doc prose, YAML comments, docstrings and test notes
 | `[D2-groq-tier-ids-shut-down-no-production-qwen-exists]` | **MAJOR** | Phase 5 | **CLOSED** — ruled by **ADR-029**, Option B (`openai/gpt-oss-20b` / `openai/gpt-oss-120b`). Both previously-bound llama ids were shut down 2026-08-16; probed live 2026-08-27, both return **HTTP 404 `model_not_found`** on this repo's key, so it is not on the exempt committed-spend contract and the rebinding is forced. **The filed recommendation (option A, `qwen/qwen3.6-27b` frontier) was OVERRULED** — that pair's frontier tier is smaller, less capable and 5x costlier than the one chosen, so it existed only to preserve a test ratio, and a number from an economically irrational config is harness-fitting by construction. The probe independently justified the overrule: qwen emits its `<think>` trace into the response body, which would have pushed reasoning scaffolding through the sentence buffer into every output-lane detector. **ADR-009 amended in the same commit** — the cascade premise is now ratio-parametric (2.0x shipped, blend-independent) and the `>5x` assertion was amended through the front door, not loosened. `reports/` and `demo/` grepped: **no committed figure referenced either dead id**, so no published number moved |
 | `[D1-tier2-budgets-cannot-coexist-with-nfr-p-001]` | **MAJOR** | Phase 5 | **CLOSED** — ruled by **ADR-030**, the Option A direction as a **front-door respecification**. NFR-P-001 is re-scoped onto the **user-perceived hold** (input-lane hold, and each per-sentence hold), with targets **derived from the 04 §2 budgets** rather than chosen to fit; the per-request sum keeps being published as `total_attributable_overhead_ms` with no target, and `added_time_to_last_byte_ms` is added as a measured untargeted row. Filed from a **projection**, never a measurement, and ruled **before any Tier-2 figure exists** — the anti-laundering record is verbatim in ADR-030, and ADR-026 §5's bar on moving a *missed* target is untouched (SL-1 stays unmet and unmoved). The derivation surfaced three gaps of its own rather than hiding them: **M-18**, **M-19**, **M-20** |
 | `[D3-tier2-injection-budget-cannot-hold-on-unbounded-input]` | **MAJOR** | Phase 5 | **OPEN** — filed 2026-08-28 from the ADR-031 spike. The **first deviation in this repo filed from a measurement of a model we intend to ship** (every earlier D3 measured our own code), and the first to put this count above zero since Step 4. `tier2_injection`'s <25 ms budget holds to ~400 characters and breaches by 600 (**33.57 ms P99**, ONNX int8, 6 threads, n=30) on the *fastest* of six candidates, while the `input` stage enforces no length bound at all — `DEFAULT_MAX_CHARS` is the **output** segmenter, and `per_request_max_tokens` is an unimplemented **cost** control in the same lane whose label is unmapped in all three policies. Carries a second consequence with the same cause: tokenizer truncation at 512 tokens means an injection payload past that point is never scored, so FR-DET-002 is length-limited independently of latency. **ADR-031 is not blocked** — the pick is fastest at every length measured, under every option. Four options filed; recommendation **A** (bounded scored window + disclosed coverage loss) |
+| `[D3-full-coverage-windows-cost-600ms-at-the-policy-bound]` | **MAJOR** | Phase 5 | **OPEN** — filed 2026-08-28 by the **stop condition in the ADR-032 ruling's own item 5** ("if batched full coverage measures grossly unacceptable at the bound (>500 ms class), STOP and report with figures — do not truncate silently"). Full coverage of the 4000-token `per_request_max_tokens` bound costs **599 ms** P50 at 6 threads and **2558 ms** at 1 thread. **Batching does not amortise**: best case saves 8% (batch=2), and larger batches make it *worse* (−23% at batch=52), because ONNX Runtime already spreads one window across all cores. The ruling's overrule of prefix truncation stands — this deviation is about what the bound should be, not about reintroducing a coverage hole |
 
-**Open: one.** **19** deviations filed; **18** ruled and closed. The open one is the nineteenth (`[D3-tier2-injection-budget-cannot-hold-on-unbounded-input]`, filed 2026-08-28 from the ADR-031 latency spike) — the first since Step 4 to leave this count above zero, and the first filed from a **measurement of a model this repo intends to ship** rather than of our own code. MAJOR, not BLOCKER: it blocks one detector's behaviour on long inputs, not the checkpoint decision and not the demo path. The eighteenth (`[D1-tier2-budgets-cannot-coexist-with-nfr-p-001]`, closed by **ADR-030**) is the only one filed from a *projection* rather than from a measurement or a doc reading: it reported that two documents cannot both hold in a **future** state, which is why it was a D1 and not the D3 its subject matter might suggest — and why it could be ruled as a specification decision rather than as a target moved after a miss. Its own derivation then logged **M-18/M-19/M-20**, so closing it left three gaps *stated* rather than a clean slate. The Phase-5 filing
+**Open: two.** **20** deviations filed; **18** ruled and closed. Both open ones are Phase-5 filings about the same subject — how much input `tier2_injection` may be asked to scan — and both are MAJOR rather than BLOCKER: they block one detector's behaviour on long inputs, not the checkpoint decision and not the demo path, whose prompts are short. The nineteenth (`[D3-tier2-injection-budget-cannot-hold-on-unbounded-input]`, filed from the ADR-031 latency spike) is the first since Step 4 to leave this count above zero, and the first filed from a **measurement of a model this repo intends to ship** rather than of our own code; its ruling overruled prefix truncation in favour of full-coverage strided windows. The twentieth (`[D3-full-coverage-windows-cost-600ms-at-the-policy-bound]`) was then filed **by that ruling's own item 5**, which required a stop-and-report if full coverage measured in the >500 ms class. It did, at both thread settings. Worth stating plainly because it is unusual: the second deviation is not a re-litigation of the first, it is the branch the first ruling explicitly reserved for this measurement. The eighteenth (`[D1-tier2-budgets-cannot-coexist-with-nfr-p-001]`, closed by **ADR-030**) is the only one filed from a *projection* rather than from a measurement or a doc reading: it reported that two documents cannot both hold in a **future** state, which is why it was a D1 and not the D3 its subject matter might suggest — and why it could be ruled as a specification decision rather than as a target moved after a miss. Its own derivation then logged **M-18/M-19/M-20**, so closing it left three gaps *stated* rather than a clean slate. The Phase-5 filing
 (`[D2-groq-tier-ids-shut-down-no-production-qwen-exists]`) is the seventeenth, closed by **ADR-029**:
 an external event, not a defect in our specs — Groq retired both bound model ids — and the one
 filing so far whose *recommendation was overruled on economic-rationality grounds* rather than on a
@@ -830,3 +831,80 @@ Blocked work: the `tier2_injection` implementation — specifically its behaviou
 crossing. The **checkpoint choice is not blocked**: ADR-031 stands under every option here, since
 the pick is fastest at every length measured. `tier2_toxicity` is unaffected — its stage caps input
 at 240 characters, where it measures 8.58 ms P99.
+
+
+## DEVIATION REPORT [D3-full-coverage-windows-cost-600ms-at-the-policy-bound]
+Severity: MAJOR
+Doc & section: the `[D3-tier2-injection-budget-cannot-hold-on-unbounded-input]` ruling (2026-08-28,
+to become ADR-032), items 2, 3 and 5; 04 §2 `tier2_injection` budget; ADR-030's input-hold target.
+The doc says: full coverage via strided windows, MAX over windows; "MEASURE batched ONNX inference
+before concluding anything: score all windows in one (or few) batched calls; measure at the policy
+bound (`per_request_max_tokens` 4000 ≈ ~50 windows)"; and item 5 — "if batched full coverage
+measures grossly unacceptable at the bound (>500 ms class), STOP and report with figures — do not
+truncate silently."
+Reality says: it is in that class at both thread settings. `eval/spike_window_latency.py`, window
+104 tokens / overlap 26 / step 76 (52 windows at the bound), synthetic filler, ONNX int8, P50 ms:
+
+| windows | input tokens | 6 threads seq | 6 threads batched | 1 thread seq |
+|---|---|---|---|---|
+| 1 | 102 | 11.30 | 11.62 | 49.81 |
+| 4 | 330 | 47.20 | 43.52 | 198.00 |
+| 8 | 634 | 96.52 | 91.99 | 393.78 |
+| 16 | 1546 | 196.19 | 203.88 | 788.30 |
+| **52** | **4082** | **651.41** | **800.75** | **2566.68** |
+
+**Batching does not amortise, and past batch=2 it hurts.** Best configuration at the bound is
+batch=2 → **599 ms** (8% better than sequential); batch=52 is **801 ms**, *worse* than issuing 52
+separate calls. The cause is measurable rather than speculative: a single window at 1 thread costs
+49.81 ms and at 6 threads 11.30 ms — a **4.41x** speedup, so ONNX Runtime already spreads one
+window across the cores. There is no idle parallelism for a batch to exploit, and batching only
+adds a larger tensor to a saturated pipeline. Per-window marginal cost is flat across the whole
+ladder (11.30 → 12.53 ms at 6 threads; 49.2 → 49.8 at 1), which is the signature of a
+compute-bound stage.
+
+Two checks that this is not a harness artefact. **Cross-validation:** ADR-031's crossover measured
+this checkpoint on 104 tokens of *real, ragged* text at 14.27 ms; this harness measures 104 tokens
+of *synthetic, padded* text at 11.30 ms — same order, and the padded figure is the conservative one
+per window. **Window size is not the lever:** cost per content token is **0.111 ms** at a 104-token
+window against **0.187 ms** at 512, because attention is quadratic in sequence length. Smaller
+windows are more token-efficient, so no window geometry rescues the bound; full coverage of 4000
+tokens is inherently ~52 x ~12 ms.
+Impact if we ignore it: a 4000-token prompt pays ~**0.6 s** of input hold with all six cores free,
+and ~**2.6 s** under the contention ADR-030's parallel lane creates — on the *input* lane, before
+the provider is even called, so it is added latency the user waits through with nothing streaming.
+Publishing that as an untargeted length-parametric series (the ruling's item 3) would be honest but
+would leave the gateway's own worst case an order of magnitude past every latency figure this repo
+currently reports. Silently truncating instead is the one thing both the ruling and AGENTS.md §5.4
+forbid.
+Options:
+  A) **Lower `per_request_max_tokens` in the shipped policies to a measured, stated ceiling** — the
+     ruling's item 4 already designates this the per-use-case latency control, so this uses existing
+     config rather than new mechanism. Measured ceilings at 6 threads: 634 tokens ≈ 8 windows ≈ 97 ms;
+     1546 ≈ 20 windows ≈ 250 ms — trade-off: `cost.request_too_large` is currently **unmapped in all
+     three shipped policies**, so mapping it is required and long-but-legitimate prompts start being
+     refused; it also repurposes a cost control as a latency gate.
+  B) **Accept and publish the scaled figure untargeted**, exactly as the ruling's item 3 specifies,
+     with the worst case at the bound stated as 599 ms / 2558 ms — trade-off: no code beyond the
+     windowing itself, full coverage preserved, but the published worst case is ~0.6–2.6 s and
+     nothing in the product prevents a caller from reaching it.
+  C) **Shard windows across cores instead of within them** — the measurement implies this is the more
+     efficient use of the same six cores: 6 windows at 1 thread each would complete in ~49.8 ms wall
+     (~8.3 ms/window effective) against 11.30 ms/window under intra-op parallelism, projecting ~448 ms
+     at the bound — trade-off: **projected, not measured** (I have not run concurrent single-thread
+     sessions), it competes for the very cores ADR-030's parallel detector lane needs, and it would
+     make SL-5's contention exposure the normal case rather than the pessimistic one.
+  D) **Cap by policy AND publish the parametric series** — A for the shipped default, B's disclosure
+     for anything above it — trade-off: two mechanisms and two numbers to explain, but no silent
+     ceiling and no unbounded hold.
+Recommendation: **D**, with A's ceiling set from the measured table rather than chosen. It keeps full
+coverage (no evasion recipe, which is what the first ruling bought), keeps the honest worst case
+published rather than hidden, and puts the actual limit in per-use-case config where 04 §9 says
+thresholds belong — a pipeline that needs 4000-token prompts can raise its own ceiling and accept
+the published latency. C is worth measuring before committing to any number, since it would change
+the table it rests on, but it should not be adopted on a projection.
+Blocked work: **ADR-032 itself.** Its items 1, 2 and 4 are settled and implementable today (window
+geometry 104/26/76, MAX aggregation, `window_count` + max-window index in signal meta, policy
+ceiling as the per-use-case control). What cannot be written is item 3's budget respecification,
+because the figure it would publish is the one this deviation is about. `tier2_injection` is
+therefore still blocked; **`tier2_toxicity` is not** — output sentences are segmenter-bounded at 240
+characters, one window, 8.58 ms P99.
