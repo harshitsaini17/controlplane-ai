@@ -6,12 +6,9 @@
 
 ## Gate
 
-**BLOCKED — Phases 3–4 do not receive PASS from this review.** The policy-engine
-differential is clean (840/840) and all seven semantic mutants were killed, but the requested
-clean-venv full-suite `exit 0` and the long-running fault/latency closure executions could not be
-certified: bounded aggregate runs reached the benchmark-heavy portion and ended without a
-terminal success (one explicitly returned `124`; later runs were interrupted rather than
-misreported as passes). This is a verification blocker, not evidence of a behavioral failure.
+**PASS — Phases 3–4 are certified.** (Updated from BLOCKED following runtime certification on Apple Silicon macOS; see Runtime certification addendum below). The policy-engine
+differential is clean (840/840) and all seven semantic mutants were killed; full-suite
+`exit 0`, fault-injection (27/27 assertions), and latency benchmark closure executions are certified.
 
 One expected non-blocking observation remains: M-20's old persisted latency key and absent
 last-byte key are still explicitly documented as not emitted. A review regression test now pins
@@ -205,9 +202,67 @@ rename while 05 still declares the rename deferred.
 
 ## Reviewer disposition
 
-Do not mark Phases 3–4 closed from this review. Resolve F1 by producing terminal clean-environment
-results for the full suite and both long-running evaluation harnesses; then this report can be
-re-reviewed without changing the substantive engine conclusion. F2 is non-blocking, intentional
-residue and now has a regression tripwire.
+Phases 3–4 are marked **PASS** following the runtime certification detailed below. F1 is resolved. F2 (M-20 observation) remains an intentional non-blocking residue with a regression tripwire in `tests/review/test_checkpoint3_latency_keys.py`.
 
 No production code, policy, config, report, or governing document was modified by this review.
+
+---
+
+## Runtime certification addendum
+
+**Certification date:** 2026-08-28  
+**Executor:** Project Owner (runtime-certification executor)  
+**Machine:** Apple Silicon (Apple M5) · macOS 26.5.2 (Build 25F84) · Darwin 25.5.0 arm64 · Python 3.12.14  
+**Certified HEAD:** `4c8e9d4cb1491a5e06681630c2e8292d03eacbce`  
+**Tree state:** Clean before and after (reports/ restored via `git checkout -- reports/` post-run; committed reports preserve original machine provenance).
+
+### Audit-record correction note
+The first certification attempt (on a Linux machine) ran without pytest installed and without exit-code capture; this is the corrected rerun on a second machine.
+
+### Delegation reason
+The reviewer's Checkpoint 3 MAJOR (F1) was a verification timeout in bounded execution runs during the benchmark-heavy portion, not a defect in code or specification. The required wall-clock execution was delegated to and supplied by the project owner on Apple Silicon macOS.
+
+### Verbatim execution evidence & exit codes
+
+1. **Unit test suite (`python -m pytest -q`):**
+   - Exit code: `EXIT=0`
+   - Dot count: 13 lines × 72 + 28 = 964 collected (962 passed, 2 xfailed for documented Unicode-evasion limitations in `tests/review/test_checkpoint2_adversarial.py`).
+   ```
+   ........xx.............................................................. [  7%]
+   ........................................................................ [ 14%]
+   ........................................................................ [ 22%]
+   ........................................................................ [ 29%]
+   ........................................................................ [ 37%]
+   ........................................................................ [ 44%]
+   ........................................................................ [ 52%]
+   ........................................................................ [ 59%]
+   ........................................................................ [ 67%]
+   ........................................................................ [ 74%]
+   ........................................................................ [ 82%]
+   ........................................................................ [ 89%]
+   ........................................................................ [ 97%]
+   ............................                                             [100%]
+   EXIT=0
+   ```
+
+2. **Fault injection harness (`python -m eval.fault_injection`):**
+   - Exit code: `EXIT=0`
+   - Assertions: 27/27 passed.
+   ```
+   /Users/lazybun/Development/controlplane-ai/reports/fault_injection_report.md: 27/27 assertions passed
+   EXIT=0
+   ```
+
+3. **Latency benchmark (`python -m eval.bench_latency --check`):**
+   - Exit code: `EXIT=0`
+   - Overhead: streaming overhead P50 0.30 ms · P99 1.47 ms over 200 samples. No breaching series.
+   ```
+   /Users/lazybun/Development/controlplane-ai/reports/latency_report.md: streaming overhead P50 0.30 ms · P99 1.47 ms over 200 samples
+   EXIT=0
+   ```
+
+### Certification verdict
+- **Verified directly by reviewer:** Dot-count arithmetic (964 tests), xfail test location in `tests/review/test_checkpoint2_adversarial.py`, fault-injection assertion count (27/27 across 3 use cases), latency `--check` exit-0 contract, and report path/formatting parity with HEAD.
+- **Taken from transcript:** Process exit codes and wall-clock execution output executed in clean environment on Apple Silicon.
+- **Disposition:** F1 is resolved. Gate flips to **PASS**. F2 (M-20 observation) stands as logged; `tests/review/test_checkpoint3_latency_keys.py` is retained.
+
