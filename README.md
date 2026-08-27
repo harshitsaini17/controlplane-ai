@@ -123,8 +123,9 @@ the business proposal, or the demo video unless it has a row here.
 
 | Claim | Command | Report | Status |
 |---|---|---|---|
-| Gateway overhead P50/P95/P99 | `python -m eval.bench_latency` | `reports/latency_report.md` | **NFR-P-001 met.** Streaming (its only scope, 06 §4): P50 **0.25 ms** · P95 **0.54 ms** · P99 **1.47 ms** over 200 samples, against P50 < 40 / P99 < 100 ms. Non-streaming is a *different quantity* and tabulated apart: P99 **0.41 ms** (n=100). Client wall-clock − upstream (**4.12 ms** P99) is reported as an upper bound only — it includes `TestClient` transport, and 06 §4 bars it as the headline. **Measured with 3 of 11 detectors live**; the report's forward projection shows the target does not survive the full set — open `[D1-tier2-budgets-cannot-coexist-with-nfr-p-001]` |
-| Per-detector latency vs budget | `python -m eval.bench_latency` | `reports/latency_report.md` | **NFR-P-002 met for the 3 detectors that exist**, all with **0 timeout faults**: `tier1_pii` P99 **0.126 ms**/2 ms · `tier1_blocklist` **0.023 ms**/2 ms · `numeric_claims` **0.208 ms**/5 ms. The other **8 are not exercised** and their budgets are **untested, not met** — the report names them rather than showing zeros |
+| Gateway overhead P50/P95/P99 (`total_attributable_overhead_ms`) | `python -m eval.bench_latency` | `reports/latency_report.md` | **Measured, and deliberately not a verdict.** Streaming: P50 **0.25 ms** · P95 **0.48 ms** · P99 **1.46 ms** over 200 samples; non-streaming is a *different quantity*, tabulated apart at P99 **0.42 ms** (n=100). **ADR-030 withdrew this quantity's target**, so these figures carry no pass/fail — they are published exactly so a withdrawn target does not become a withdrawn number (the 06 §4 formula is unchanged, so they stay comparable to earlier runs). Client wall-clock − upstream (**4.14 ms** P99) is an upper bound only — it includes `TestClient` transport, which 06 §4 bars as the headline. **Measured with 3 of 11 detectors live** |
+| Per-sentence and input-lane hold vs NFR-P-001 | `python -m eval.bench_latency` | `reports/latency_report.md` | **`not measured`** — the third state, neither met nor missed. ADR-030 re-scoped NFR-P-001 onto `input_hold_ms` (P50 < 40 / P99 < 50 ms) and each `sentence_holds_ms` entry (P50 < 40 / P99 < 100 ms); **neither series is emitted yet (M-20)**, so the harness returns no verdict rather than letting the withdrawn per-request figure read as a pass. Targets were *derived* from the 04 §2 budgets, not fitted — arithmetic in ADR-030 |
+| Per-detector latency vs budget | `python -m eval.bench_latency` | `reports/latency_report.md` | **NFR-P-002 met for the 3 detectors that exist**, all with **0 timeout faults**: `tier1_pii` P99 **0.126 ms**/2 ms · `tier1_blocklist` **0.020 ms**/2 ms · `numeric_claims` **0.205 ms**/5 ms. The other **8 are not exercised** and their budgets are **untested, not met** — the report names them rather than showing zeros |
 | Tier-1 PII recall | `python -m eval.run_all` | `reports/eval_report.md` §NFR-EVAL-001 | v1 **0.8361** → v2 **0.8852** — target 0.95 **MISSED**, target unmoved (ADR-026 §5). Residual misses: 7/7 are the documented bare-7-digit scope exclusion (ADR-026 §3), verified programmatically — no unexplained failure. Standing Limitation, `docs/08` |
 | Per-detector precision / recall / F1 | `python -m eval.run_all` | `reports/eval_report.md` §Detectors | **measured for 3 of 11 detectors**; 8 absent, reported as skipped. 136 of 218 labelled positives are unscored because their detector does not exist yet |
 | Disclosed revision v1 → v2 (`tier1_pii`, `numeric_claims`) | `python -m eval.run_all` | `reports/eval_report.md` §Disclosed revision | `numeric_claims` precision **0.2667 → 0.8571** (recall flat at 0.750); `tier1_pii` recall **0.8361 → 0.8852** at precision 1.000 both. v1 columns are **re-computed every run** from frozen `_v1_*.py`, never transcribed |
@@ -150,14 +151,25 @@ corrected *after* the single permitted re-measurement. The proof enumerates ever
 differing lines out of 151 and shows all 276 numeric tokens on measurement-bearing lines
 identical, so a reader can verify no figure moved instead of taking it on trust.
 
-**The first three measured numbers landed with this commit; the rest are still blank on
-purpose.** A placeholder number is worse than a blank, so a row flips only when a report
-actually produces it, carrying its method and sample size. The detector rows above were
-produced against the frozen 280-case dataset
-(`b37d1909f5fb16db2b1fa38f5fbc64ceb70c3d02`), whose hash `eval/run_all.py` verifies before it
-computes anything — so a number cannot be generated against a different corpus even by
-accident. **Two of the three missed**, and they are reported as missed: see the paragraph
-above and the two open deviations in `docs/08`.
+**9 of the 14 rows above carry a measured figure; the remaining 5 are blank on purpose, and
+they are blank for three different reasons that this table keeps apart.** A placeholder number
+is worse than a blank, so a row flips only when a report actually produces it, carrying its
+method and sample size. `not yet measured` means the harness does not exist yet (3 rows);
+`not computed` means the inputs do not exist yet (τ needs the confidence-kind detectors);
+`not measured` is the third state proper — the harness runs and deliberately returns **no
+verdict**, which is where NFR-P-001 sits until the per-hold series are emitted (M-20). Reading
+any of the three as a pass is the specific failure this table is built to prevent.
+
+The detector rows above were produced against the frozen 280-case dataset at **freeze 2** —
+commit `f162959f7d29ead32342fd8744bd10ed244369af`, digest `6a3ecbbe75fd020b…` — whose hash
+`eval/run_all.py` verifies before it computes anything, so a number cannot be generated against
+a different corpus even by accident. Freeze 1 (`b37d1909f5fb…`, digest `3b3931365a3c2918…`) is
+**superseded** and is not what any figure here was computed against; it survives in 06 §2 as the
+origin of the v1 baseline, and the v1 columns are re-computed each run from frozen `_v1_*.py`
+against the *current* freeze rather than transcribed from that one. **Two of the three missed**, and they are reported as missed: see the paragraph
+above. Both were filed as deviations and are now **ruled and closed** (ADR-026) — closing them
+did not make the misses go away, it recorded them as **Standing Limitations** in `docs/08`,
+where `SL-1` is the PII recall target that remains unmet and, per ADR-026 §5, unmoved.
 
 Two provenance rules already constrain what may ever appear here:
 
