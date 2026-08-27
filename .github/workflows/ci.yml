@@ -1,0 +1,90 @@
+# ControlPlane.ai — continuous integration (M-21).
+#
+# Runs the four gates AGENTS.md §10 names as the repo's verification surface, on both
+# ends of the supported interpreter range. Nothing here is new verification: every step
+# is a command a contributor runs locally, which is the point — CI catches the case where
+# it passes on the author's machine and nowhere else.
+#
+# ─── CI NEVER WRITES TO reports/ ─────────────────────────────────────────────────────
+# `reports/` is version-controlled *evidence*, not build output (06 §8). A report is
+# citable only when it carries the commit it was generated at and a clean-tree stamp, so
+# a report produced by an ephemeral runner — on unknown hardware, from a detached HEAD —
+# would be a latency figure nobody can reproduce wearing the provenance of one somebody
+# can. Both harnesses therefore run with `--out "$RUNNER_TEMP/..."`, and the final step
+# asserts `reports/` is byte-identical afterwards. The assertion exists because a comment
+# promising this would not survive someone dropping the `--out` flag: the guard fails the
+# build, the comment would not.
+#
+# Committed reports come from a human running the harness on real hardware from a clean
+# tree, per 06 §8. CI's job is to prove the harnesses still *pass*, not to author evidence.
+#
+# Verified locally at the tree this file landed on: py3.12.12 and py3.14.6, full suite
+# exit 0 (964 tests, 0 failures, ~9 s each); fault injection 27/27; bench --check exit 0.
+# The matrix is a measured claim, not an aspiration.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false        # a 3.12-only break must not hide a 3.14-only break
+      matrix:
+        python: ["3.12", "3.14"]
+    name: verify (py${{ matrix.python }})
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # The light extra only. The 02 §8 model stack (`[ml]`) is deliberately absent:
+      # it needs CPU-only torch installed first (AGENTS.md §10) and NFR-P-002 is a
+      # CPU-budget claim measured on real hardware, not on a shared runner.
+      - name: Install (dev extra)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Unit + contract suite
+        run: python -m pytest -q
+
+      # 06 §1: the dataset is FROZEN. `--freeze` asserts byte-identity with the approved
+      # state, so an edited fixture fails here rather than silently moving a published rate.
+      - name: Dataset freeze gate
+        run: python -m eval.validate_dataset --freeze
+
+      # 06 §5 — nonzero exit on any failed 04 §5 fail-open/fail-closed invariant.
+      - name: Fault injection (04 §5 invariants)
+        run: python -m eval.fault_injection --out "$RUNNER_TEMP/fault_injection_report.md"
+
+      # 06 §4 — `--check` is the NFR-P-001/002 tripwire; it exits nonzero on a breach.
+      - name: Latency tripwire (NFR-P-001/002)
+        run: python -m eval.bench_latency --check --out "$RUNNER_TEMP/latency_report.md"
+
+      # The enforcement behind the provenance note at the top of this file.
+      - name: Assert reports/ untouched (06 §8 provenance)
+        run: |
+          if [ -n "$(git status --porcelain -- reports/)" ]; then
+            echo "::error::CI modified reports/ — committed evidence must come from a"
+            echo "::error::human run on real hardware from a clean tree (06 §8)."
+            git status --porcelain -- reports/
+            git diff -- reports/
+            exit 1
+          fi
+          echo "reports/ unchanged."

@@ -205,13 +205,25 @@ Run gateway:  .venv/bin/uvicorn --factory controlplane.gateway.app:create_app --
               behind a hot reload) — so `--factory` is required, not stylistic.
               Do NOT serve on port 8000: `kiro-local`'s base_url is http://localhost:8000,
               so the gateway would proxy to itself. Default 8000 → pick another port.
-Eval suite:   [Phase 2+] .venv/bin/python -m eval.run_all         → reports/eval_report.md
-              [Phase 2+] .venv/bin/python -m eval.bench_latency   → reports/latency_report.md
+Eval suite:   .venv/bin/python -m eval.run_all                       → reports/eval_report.md
+                         (per-detector P/R/F1 + both policy matrices; runs the freeze
+                         gate first. Prints `NFR-EVAL-001: MISSED` — that is SL-1, a real
+                         unmet target, logged and deliberately not tuned away.)
+              .venv/bin/python -m eval.bench_latency                 → reports/latency_report.md
+                         (add --check for the NFR-P-001/002 tripwire: nonzero on breach)
               .venv/bin/python -m eval.fault_injection            → reports/fault_injection_report.md
                          (06 §5; nonzero exit on any failed 04 §5 invariant)
               [Phase 2+] .venv/bin/python -m eval.cost_simulation | .pii_leak_scan
+              Both harnesses take --out: CI redirects there and asserts reports/ is
+              untouched, because a report is evidence and not build output (06 §8).
 Demo:         [Phase 2+] .venv/bin/python -m demo.run_script      (07; nonzero exit on beat failure)
 Dashboard:    [Phase 2+] .venv/bin/streamlit run dashboard/app.py (ADR-007)
+
+CI:           .github/workflows/ci.yml — matrix py3.12 + py3.14; pytest, freeze gate,
+              fault injection, bench --check. Verified locally on both interpreters.
+Onboarding:   docs/TESTING.md — the four verification tiers (unit → eval → latency →
+              live gateway) with the reasoning attached. This section in brief; that
+              file at length.
 
 Secrets:      via .env (gitignored). NEVER commit keys. NEVER print env values.
               Names are normative in 05 §6: UPSTREAM_API_KEY, REVIEW_WEBHOOK_URL, CP_DB_PATH.
@@ -261,4 +273,5 @@ indistinguishable from a gap that was missed.
 
 ---
 
-*Last updated: 2026-08-26 (§11.1 lightened protocol added at the start of Phase 3). When this file changes, note it in the session summary so the human knows the agent contract shifted.*
+*Last updated: 2026-08-27 (§10: `run_all` and `bench_latency` lose their stale
+`[Phase 2+]` markers — both run; CI and `docs/TESTING.md` pointers added). When this file changes, note it in the session summary so the human knows the agent contract shifted.*
