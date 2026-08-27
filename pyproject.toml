@@ -23,6 +23,12 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest==8.3.4",
+    # ADR-031: graph export tooling for `eval/spike_tier2_models.py`. Deliberately dev-only
+    # and NOT in `ml` — it BUILDS the ONNX graph, it does not serve it, and `onnxruntime`
+    # (which does) carries no dependency on it. `optimum` is deliberately absent: its
+    # onnxruntime extra fails on torch 2.13 and downgrades transformers as a side effect.
+    "onnx==1.22.0",
+    "onnxscript==0.7.1",
 ]
 # The 02 §8 model stack. Split into an extra, not dropped: Phase 1 (schema, policies,
 # audit DB, tests) needs none of it, and `sentence-transformers` pulls torch — install
@@ -32,6 +38,14 @@ ml = [
     "sentence-transformers==3.3.1",  # 02 §8: MiniLM embeddings (consistency, router)
     "spacy==3.8.16",           # 02 §8 + ADR-011: en_core_web_sm person-entity enrichment
                                # 3.8.7+ required for Python 3.14 (earlier caps at <3.13).
+    # ADR-031 (02 §8 "New deps require an ADR note"): the Tier-2 checkpoints are served on
+    # ONNX Runtime, which is what puts them inside the 04 §2 <25 ms budget — eager PyTorch
+    # misses it for every candidate measured. `transformers` is pinned EXPLICITLY even
+    # though `sentence-transformers` already pulls it: the tier2 detectors import it
+    # directly, and leaving a direct dependency unpinned is how 4.57.6 silently became
+    # 4.53.3 once already this phase (an `optimum` install resolved it downward).
+    "onnxruntime==1.29.0",     # ADR-031: int8 inference for both tier2 detectors
+    "transformers==4.57.6",    # ADR-031: direct import; pinned against silent downgrade
 ]
 # ADR-007 (Accepted 2026-08-24, Q-03): Streamlit dashboard reading SQLite.
 dashboard = [

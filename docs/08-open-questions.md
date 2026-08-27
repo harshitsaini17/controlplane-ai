@@ -69,8 +69,9 @@ slugs lived scattered across doc prose, YAML comments, docstrings and test notes
 | `[D5-adr-027-stamp-has-no-column-in-the-05-3-ddl]` | **BLOCKER** | Phase 4 | **CLOSED** — ruled by **ADR-027 Amendment 1**, Option A: two `TEXT NOT NULL DEFAULT '[]'` columns added to the 05 §3 DDL. The non-derivability analysis is ratified into the amendment — `detector_failures_json` carries fail_open records, the escalate floor leaves a content BLOCK standing, and `contributing_signal_ids` is a strict subset of `signals_json` by design — so the stamp is **stored, not derived**; `escalation_cause` derives from the stored columns. Round-trip verified (21 columns, `[]` not NULL when empty); 10 tests added, all 6 mutants killed including the one reproducing this defect. No migration needed: no `.db` existed |
 | `[D2-groq-tier-ids-shut-down-no-production-qwen-exists]` | **MAJOR** | Phase 5 | **CLOSED** — ruled by **ADR-029**, Option B (`openai/gpt-oss-20b` / `openai/gpt-oss-120b`). Both previously-bound llama ids were shut down 2026-08-16; probed live 2026-08-27, both return **HTTP 404 `model_not_found`** on this repo's key, so it is not on the exempt committed-spend contract and the rebinding is forced. **The filed recommendation (option A, `qwen/qwen3.6-27b` frontier) was OVERRULED** — that pair's frontier tier is smaller, less capable and 5x costlier than the one chosen, so it existed only to preserve a test ratio, and a number from an economically irrational config is harness-fitting by construction. The probe independently justified the overrule: qwen emits its `<think>` trace into the response body, which would have pushed reasoning scaffolding through the sentence buffer into every output-lane detector. **ADR-009 amended in the same commit** — the cascade premise is now ratio-parametric (2.0x shipped, blend-independent) and the `>5x` assertion was amended through the front door, not loosened. `reports/` and `demo/` grepped: **no committed figure referenced either dead id**, so no published number moved |
 | `[D1-tier2-budgets-cannot-coexist-with-nfr-p-001]` | **MAJOR** | Phase 5 | **CLOSED** — ruled by **ADR-030**, the Option A direction as a **front-door respecification**. NFR-P-001 is re-scoped onto the **user-perceived hold** (input-lane hold, and each per-sentence hold), with targets **derived from the 04 §2 budgets** rather than chosen to fit; the per-request sum keeps being published as `total_attributable_overhead_ms` with no target, and `added_time_to_last_byte_ms` is added as a measured untargeted row. Filed from a **projection**, never a measurement, and ruled **before any Tier-2 figure exists** — the anti-laundering record is verbatim in ADR-030, and ADR-026 §5's bar on moving a *missed* target is untouched (SL-1 stays unmet and unmoved). The derivation surfaced three gaps of its own rather than hiding them: **M-18**, **M-19**, **M-20** |
+| `[D3-tier2-injection-budget-cannot-hold-on-unbounded-input]` | **MAJOR** | Phase 5 | **OPEN** — filed 2026-08-28 from the ADR-031 spike. The **first deviation in this repo filed from a measurement of a model we intend to ship** (every earlier D3 measured our own code), and the first to put this count above zero since Step 4. `tier2_injection`'s <25 ms budget holds to ~400 characters and breaches by 600 (**33.57 ms P99**, ONNX int8, 6 threads, n=30) on the *fastest* of six candidates, while the `input` stage enforces no length bound at all — `DEFAULT_MAX_CHARS` is the **output** segmenter, and `per_request_max_tokens` is an unimplemented **cost** control in the same lane whose label is unmapped in all three policies. Carries a second consequence with the same cause: tokenizer truncation at 512 tokens means an injection payload past that point is never scored, so FR-DET-002 is length-limited independently of latency. **ADR-031 is not blocked** — the pick is fastest at every length measured, under every option. Four options filed; recommendation **A** (bounded scored window + disclosed coverage loss) |
 
-**Open: zero.** All **18** filed deviations are ruled and closed. The eighteenth (`[D1-tier2-budgets-cannot-coexist-with-nfr-p-001]`, closed by **ADR-030**) is the only one filed from a *projection* rather than from a measurement or a doc reading: it reported that two documents cannot both hold in a **future** state, which is why it was a D1 and not the D3 its subject matter might suggest — and why it could be ruled as a specification decision rather than as a target moved after a miss. Its own derivation then logged **M-18/M-19/M-20**, so closing it left three gaps *stated* rather than a clean slate. The Phase-5 filing
+**Open: one.** **19** deviations filed; **18** ruled and closed. The open one is the nineteenth (`[D3-tier2-injection-budget-cannot-hold-on-unbounded-input]`, filed 2026-08-28 from the ADR-031 latency spike) — the first since Step 4 to leave this count above zero, and the first filed from a **measurement of a model this repo intends to ship** rather than of our own code. MAJOR, not BLOCKER: it blocks one detector's behaviour on long inputs, not the checkpoint decision and not the demo path. The eighteenth (`[D1-tier2-budgets-cannot-coexist-with-nfr-p-001]`, closed by **ADR-030**) is the only one filed from a *projection* rather than from a measurement or a doc reading: it reported that two documents cannot both hold in a **future** state, which is why it was a D1 and not the D3 its subject matter might suggest — and why it could be ruled as a specification decision rather than as a target moved after a miss. Its own derivation then logged **M-18/M-19/M-20**, so closing it left three gaps *stated* rather than a clean slate. The Phase-5 filing
 (`[D2-groq-tier-ids-shut-down-no-production-qwen-exists]`) is the seventeenth, closed by **ADR-029**:
 an external event, not a defect in our specs — Groq retired both bound model ids — and the one
 filing so far whose *recommendation was overruled on economic-rationality grounds* rather than on a
@@ -80,7 +81,7 @@ together: `[D5-adr-027-stamp-has-no-column-in-the-05-3-ddl]` by **ADR-027 Amendm
 defects in *settled contracts* rather than in code — the stamp one a gap in ADR-027's own audit
 representation, found while wiring the write path that ADR specified; the canary one a
 requirement whose independent reference did not exist, found by probing for it. Per the note
-below, `Open: zero` means **nothing undecided**, not nothing missing: four Standing Limitations
+below, a low `Open:` count means **little undecided**, not little missing: **five** Standing Limitations
 remain, and closing a deviation never closes the gap it documented.
 
 The **eight** filed from Step 4 up to that closure account as: **two** measured-accuracy findings
@@ -89,8 +90,8 @@ marker, the NANP constraint, the `eyJ` derivation), **one** report-prose gate fo
 re-measurement, and **D5**. The **two** Phase-4 filings are the **ninth and tenth** from Step 4
 onward and are **both now closed** — 10 closed + 0 open = 10, and 6 pre-Step-4 closures bring the
 total to 16. The Phase-5 Groq rebinding is the **eleventh** from Step 4 onward, and the tier2
-budget projection the **twelfth**: 12 closed + 0 open = 12, and the 6 pre-Step-4 closures bring
-the total to **18**.
+budget projection the **twelfth**. The ADR-031 spike filing is the **thirteenth** and the only one still open: **12 closed + 1 open = 13**, and the 6 pre-Step-4 closures bring
+the total to **19**.
 **Three of those eight were found by writing the ADR-026 spec-derived tests**, which is the
 outcome that discipline exists to produce: tests authored from the specifications rather than
 from the fixtures caught two defects in the ruled specs themselves and one in the implementer's
@@ -98,7 +99,7 @@ reading of them, *before* any number was computed. D5 was found the same way —
 04 §5 literally and discovering the object it describes cannot exist.
 
 ⚠ **Open deviations and open questions are separate counts.** Six *questions* remain OPEN
-above — **Q-01, Q-05, Q-06, Q-07, Q-08, Q-10** — while **zero deviations** are open, and the two
+above — **Q-01, Q-05, Q-06, Q-07, Q-08, Q-10** — while **one deviation** is open, and the two
 registers are deliberately kept apart: a deviation is a contradiction awaiting a ruling, a
 question is a decision not yet needed. Collapsing them into one "open" number would hide which
 kind of answer is owed. (The *gaps* left behind by closures are the
@@ -198,6 +199,7 @@ itself is gone, never because it stopped being newsworthy.
 | **SL-2** | **v1-superset phone behaviour**: an invalid NANP area code still fires — e.g. `(115) 555-0123` | Documented v1-superset behaviour, **not a bug** | v1's `_PHONE` is retained deliberately and evaluated first, so it shadows the NANP `N ∈ [2–9]` rows. Narrowing it would change v1-derived behaviour and the permanent precision-1.000 baseline would no longer describe code that ships. Precision hardening is a **later freeze cycle** and must not ride along with a measurement | ADR-026 Amendment 1; 04 §2.5; `tests/test_tier1_detectors.py::test_nanp_n_constraint_rejects_leading_0_and_1` (asserts at pattern level, docstring records the shadowing) |
 | **SL-3** | **DOWNGRADED 2026-08-27 (ADR-029) — now a provenance-*freshness* reminder, no longer a publication gate.** First-party prices exist for both bound ids | `console.groq.com/docs/models` carries per-1M figures directly: `openai/gpt-oss-20b` **$0.075 in / $0.30 out**, `openai/gpt-oss-120b` **$0.15 in / $0.60 out**. Retrieved 2026-08-27. The retired llama pair now prices as "ContactSales" on that same page, which is why its old figures were never obtainable first-party | **Absolute dollar figures ARE publishable for these two ids**, carrying `source_url` + `retrieved`. Two limits stand: any comparison priced on the **retired llama pair remains barred** (never first-party, and the models no longer serve, so it can never be re-verified); and prices are **re-verified at submission packaging**, since a stale price is a wrong price. The entry stays open for that re-verification, not for a missing source | `config/gateway.yaml` (provider `groq`); ADR-022; **ADR-029**; README claims section; 06 §6 |
 | **SL-4** | **No genuinely local fallback model installed** | Ollama on `:11434` serves exactly one model, `minimax-m2.7:cloud`, whose `remote_host` is `https://ollama.com:443` — a **cloud** model behind a local daemon | It fails the no-`remote_host` assertion, so it cannot be the local fallback; binding it would also falsify the `unmetered` claim, since its tokens are billed to someone. `ollama pull <a-real-local-model>` unblocks it. **owner-decision-needed** | `config/gateway.yaml` (provider `ollama-local`, both tiers `null` + STUB); Q-10 **Re-verified 2026-08-27** (Phase-5 Step 0.3): `GET :11434/api/tags` still returns exactly one model, `minimax-m2.7:cloud`. No local model was pulled, so SL-4 **stays open** and `fast_consistency`'s second sample uses the measured-class Groq provider — real token cost, ADR-018 compliant. |
+| **SL-5** | **The Tier-2 <25 ms budget is measured with 6 threads free for one inference**, and NFR-P-002 states no concurrency assumption | At **1 thread**, both ADR-031 picks breach at the output segmenter cap: `madhurjindal` **25.90 P50 / 26.20 P99**, `martin-ha` **34.48 / 35.50** (ONNX int8, n=50). Both still fit at corpus-typical lengths (**17.81 / 10.62 P50**) | Every Tier-2 figure this repo publishes is a **low-concurrency** figure: one inference gets the whole CPU on an idle laptop, and under concurrent requests per-request parallelism falls toward the 1-thread column, where the budget stops holding at the cap. Not tuned away and not reported as a passing number — the 1-thread column is published beside the 6-thread one so the exposure is visible rather than inferred. Bounding it properly needs a concurrency figure NFR-P-002 does not state and no harness here measures; a load test is **Phase 6+** and out of hackathon scope | ADR-031 §5; `reports/spike_tier2_models.json` (both `threads` sweeps); any Tier-2 latency claim in the README or 06 §4 |
 
 ### Prose-fix log — ADR-026 Amendment 2 clause (d)
 
@@ -615,9 +617,11 @@ No behavioural change; no ADR needed.
 
 **Q-03 — Dashboard tech** — RESOLVED 2026-08-24. Ruling: **Streamlit**. ADR-007 flipped Proposed → Accepted; `streamlit` recorded as an optional `dashboard` extra in `pyproject.toml`.
 
-**Q-04 — Tier-2 model picks (injection + toxicity classifiers)** — RESOLVED 2026-08-24 (deferred by decision).
-Ruling: **defer the checkpoint choice**; stub the detector interfaces now (`detectors/tier2_classifiers.py`), pick real checkpoints later via the NFR-P-002 latency spike. The interface stub carries `STUB(phase-1-scaffold, Q-04 deferred)`.
-⚠ Doc-rot note: the original Q-04 said to record the eventual choice "as ADR-011", but ADR-011 is already the `privacy.person` producer decision. The spike result gets the **next free ADR number**, not ADR-011.
+**Q-04 — Tier-2 model picks (injection + toxicity classifiers)** — **CLOSED 2026-08-28 by ADR-031.**
+Original ruling (2026-08-24): **defer the checkpoint choice**; stub the detector interfaces now (`detectors/tier2_classifiers.py`), pick real checkpoints later via the NFR-P-002 latency spike.
+Ruling: **`madhurjindal/Jailbreak-Detector`** (injection) and **`martin-ha/toxic-comment-model`** (toxicity), both served on **ONNX Runtime with dynamic int8**. Six published candidates measured by `eval/spike_tier2_models.py` across three backends × five stage-reachable lengths × two thread settings; **selection on latency only**, no corpus label ever read, because picking a model by its score on the frozen fixtures that later measure it is harness-fitting. Eager PyTorch misses the budget for every candidate at the segmenter cap — **not a D3**, since 02 §8 and 04 §2 both specify ONNX and eager was never the documented backend. `protectai/deberta-v3-base-prompt-injection-v2` is rejected despite one FITS row: re-probed on the crossover ladder it measured **36.69 ms P99 at the same 240 characters** it passed at in the sweep (61 vs 50 tokens — the two composers build that length differently), and a verdict that flips on tokenizer detail is *at* the budget, not inside it. Full measurements, the population-correctness fix, and the int8 accuracy disclosure are in **ADR-031**.
+⚠ Doc-rot note (now discharged): the original Q-04 said to record the eventual choice "as ADR-011", but ADR-011 is already the `privacy.person` producer decision. The spike result took the **next free ADR number** — **ADR-031**.
+⚠ **This closure is not the whole story.** The picks satisfy the budget at every length their stages can *deliver*, but the `input` stage applies no length cap, so `tier2_injection` has reachable inputs it cannot serve in 25 ms. Filed as `[D3-tier2-injection-budget-cannot-hold-on-unbounded-input]` — **OPEN** in the ledger below. Thread sensitivity is logged as **SL-5**.
 
 ## DEVIATION REPORT [D5-adr-027-stamp-has-no-column-in-the-05-3-ddl]
 Severity: BLOCKER
@@ -759,3 +763,70 @@ sentence in 04 §2.2, **M-19** a combined 5 ms engine budget with a real measure
 last-byte row. The lane goes parallel **when
 Tier-2 lands**, not now — switching earlier would change the conditions of the shipped
 measurement. ADR-026 §5's bar on moving an already-missed target is untouched.
+
+---
+
+## DEVIATION REPORT [D3-tier2-injection-budget-cannot-hold-on-unbounded-input]
+Severity: MAJOR
+Doc & section: 04 §2 registry, `tier2_injection` row ("| `tier2_injection` | input | <25 ms |");
+01 §5 NFR-P-002 ("Tier-2 < 25 ms"); 04 §3 `budget.per_request_max_tokens: 4000`
+The doc says: `tier2_injection` runs at stage `input` under a **<25 ms** budget. NFR-P-002 states
+that budget with **no length qualifier and no concurrency qualifier** — it reads as a property of
+the detector, holding for whatever the stage hands it.
+Reality says: it holds only up to a length the stage does not enforce. Measured on the ADR-031 pick
+(`madhurjindal/Jailbreak-Detector`, ONNX int8, 6 threads, n=30,
+`reports/spike_tier2_crossover.json`):
+
+| input | tokens | P50 | P99 | verdict |
+|---|---|---|---|---|
+| 240 ch | 68 | 8.82 | 14.84 | FITS |
+| 400 ch | 104 | 14.27 | 22.80 | FITS |
+| 600 ch | 158 | 23.51 | **33.57** | **BREACH** |
+| 1000 ch | 247 | 46.88 | **54.82** | **BREACH** |
+| 4000 ch | 512 | 95.31 | **99.72** | **BREACH** |
+
+The crossing lies between **400 and 600 characters (104–158 tokens)**; the exact point was not
+measured. This is the *fastest* of six candidates — the runner-up breaches at 240 characters — so
+no checkpoint choice avoids it.
+
+**Nothing bounds the input length.** Verified rather than assumed: `DEFAULT_MAX_CHARS = 240` bounds
+the **output** segmenter only (ADR-002, `sentence_buffer.py`); the request schema declares no
+`max_length` on message content; `app.py` sets no body-size cap. `Budget.per_request_max_tokens`
+(`policy/schema.py:251`, 04 §3 value 4000) is **read by nothing** — `cost_budget` is still a stub —
+and by its own contract it is a *cost* control in the **same input lane**, emitting
+`cost.request_too_large`, which is **unmapped in all three shipped policies**. So even fully
+implemented it flags concurrently with the classifier rather than gating what the classifier sees.
+
+A second consequence has the same cause: the tokenizer truncates at **512 tokens**
+(`max_position_embeddings`), so an injection payload beyond token 512 is **never seen by the
+classifier at all**. FR-DET-002's input check is length-limited by construction, independently of
+latency.
+Impact if we ignore it: NFR-P-002 is silently unmet for a reachable input class, and the miss lands
+where it is most expensive — the input lane is fully buffered before dispatch, so this time is
+**pure added latency** and feeds ADR-030's `input_hold_ms` target (P50 < 40 / P99 < 50), which a
+600-character prompt breaches on the detector alone. It is also an evasion path: padding a prompt
+past the crossing degrades the check, and past token 512 removes it.
+Options:
+  A) **Bound the scored window inside the detector** — score the first N tokens (N set so measured
+     P99 < 25 ms; the data puts N ≈ 104), and record truncation on the signal plus a counter —
+     trade-off: content past N is unscored, which makes the existing 512-token blind spot larger
+     and more common. Bounded and disclosed rather than silent, but it *is* a coverage reduction.
+  B) **Window the input and score every window**, taking the max score — trade-off: the 25 ms
+     budget is per detector call, so k windows cost ≈k×; it breaks the budget at k ≥ 2 unless the
+     windows run concurrently, and 04 §2 has no notion of a chunked detector.
+  C) **Enforce a real input length bound before the lane** — implement `per_request_max_tokens` as a
+     gate and map `cost.request_too_large` in all three policies — trade-off: repurposes a cost
+     control as a safety gate, and rejects long-but-legitimate prompts, which changes the gateway's
+     request semantics for every use case.
+  D) **Re-scope NFR-P-002 to a stated input envelope** ("<25 ms up to N tokens") — trade-off: honest
+     and cheap, but it is a target gaining a qualifier *after* a measured miss, so it needs
+     ADR-026 §5's anti-laundering treatment or it reads as tuning the target to the result.
+Recommendation: **A**, with the coverage loss logged as a Standing Limitation in the same commit.
+It keeps the budget a real bound on the hot path, needs no change to request semantics or to any
+policy, and converts a silent degradation into a counted one. C is the right *eventual* answer but
+belongs to the cost plane (Phase 6), and D should not be reached for while a measured option holds
+the documented number.
+Blocked work: the `tier2_injection` implementation — specifically its behaviour on inputs above the
+crossing. The **checkpoint choice is not blocked**: ADR-031 stands under every option here, since
+the pick is fastest at every length measured. `tier2_toxicity` is unaffected — its stage caps input
+at 240 characters, where it measures 8.58 ms P99.

@@ -912,3 +912,123 @@ percentile far from the cause.
 **Docs touched:** 01 (NFR-P-001 row), 02 §3 (parallel-at-Tier-2 trigger), 05 §3/§5 (`latency_json`
 vocabulary: the rename plus the two new series), 06 §4 (formula gains the per-hold series and the
 last-byte row; the sum retained under its new name), 08 (deviation closed; M-18/M-19 logged).
+
+---
+
+## ADR-031 — Tier-2 checkpoints: `madhurjindal/Jailbreak-Detector` + `martin-ha/toxic-comment-model`, on ONNX Runtime (resolves Q-04)
+
+**Status:** Accepted 2026-08-28. Closes **Q-04**, deferred 2026-08-24 pending an NFR-P-002 latency
+spike. Q-04's own doc-rot note directs the result to "the next free ADR number" — ADR-011 was
+already taken by the `privacy.person` producer decision — which is this one.
+
+**Context.** 04 §2 gives both Tier-2 detectors a **<25 ms** budget (NFR-P-002) and specifies the
+implementation as "small transformer, **CPU/ONNX**". No checkpoint was named. `eval/spike_tier2_models.py`
+measures six published candidates — three per role — across three backends, five lengths and two
+thread settings, on this hardware, and reports P50/P95/P99/max per cell.
+
+**Selection is on latency only.** The spike never reads a corpus *label*, and no candidate was
+scored for accuracy. That is deliberate: the eval corpus is frozen (06 §1) and choosing a model by
+its performance on the same fixtures that later measure it is harness-fitting. Accuracy is measured
+once, blind, by 06 §3 — on whichever checkpoint this ADR binds.
+
+### Decision
+
+| Role | Checkpoint | Params | Backend |
+|---|---|---|---|
+| `tier2_injection` | `madhurjindal/Jailbreak-Detector` | 65.8 M | ONNX Runtime, dynamic int8 |
+| `tier2_toxicity` | `martin-ha/toxic-comment-model` | 67.0 M | ONNX Runtime, dynamic int8 |
+
+Both emit a two-class probability, which is what 04 §2's `score = model prob` and
+`score_kind="detection"` (ADR-012) require. `martin-ha` is `{non-toxic, toxic}`, so the
+moderate/high split comes from the 04 §2 internal cutoffs (0.5/0.8, overridable via
+`detector_params`) rather than from model classes — `unitary/toxic-bert`'s six-way head would have
+supplied its own taxonomy and 04 §2 does not ask for one.
+
+### Measurements
+
+Ryzen 5 5600H (12 logical CPUs), Linux 7.1.2, Python 3.14.6, torch 2.13.0+cpu,
+onnxruntime 1.29.0. `n=50` per cell (`n=30` crossover, `n=20` truncation probe). Raw:
+`reports/spike_tier2_models.json`, `reports/spike_tier2_crossover.json`,
+`reports/spike_tier2_crossover_runnerup.json`.
+
+**1. Eager PyTorch never satisfies the budget across the reachable range** — at 6 threads, every
+candidate breaches at the segmenter cap, and four breach at corpus-median length. This is **not a
+D3**: eager was never the specified backend. 02 §8 names "one small **ONNX**/transformers
+classifier" and 04 §2 says "CPU/ONNX", so measuring eager and finding it short measures something
+the docs never claimed.
+
+**2. Under ONNX Runtime the budget holds, with margin, at every length each stage can deliver**
+(6 threads, int8, P50 / P99 ms):
+
+| Role | Checkpoint | corpus P50 | corpus max | segmenter cap (240 ch) |
+|---|---|---|---|---|
+| injection | **madhurjindal** 65.8 M | 4.51 / 5.21 | 4.96 / 5.32 | 7.13 / 7.60 |
+| injection | jackhhao 109.5 M | 7.32 / 8.17 | 9.20 / 10.55 | 13.34 / 15.48 |
+| injection | protectai/deberta 184.4 M | 13.14 / 14.53 | 15.05 / 15.65 | 20.40 / 21.31 |
+| toxicity | **martin-ha** 67.0 M | 2.74 / 2.91 | 4.07 / 4.92 | 9.04 / 9.93 |
+| toxicity | unitary 109.5 M | 5.85 / 6.74 | 8.35 / 9.10 | 18.32 / 19.28 |
+| toxicity | s-nlp 124.6 M | 6.89 / 13.91 | 10.26 / 12.82 | 20.41 / **28.31** |
+
+fp32 also fits for both picks at output lengths (madhurjindal 13.84/14.45 at the cap; martin-ha
+17.22/17.99), so int8 is chosen for **headroom**, not necessity — see the disclosure below.
+
+**3. `protectai/deberta-v3-base-prompt-injection-v2` is rejected despite a FITS row.** It is the
+only purpose-built injection model in the set, so it was probed a second time on the crossover
+ladder: at 240 characters it measured **27.08 / 36.69 ms — BREACH**, against 20.40 / 21.31 FITS in
+the sweep. The two runs compose 240 characters differently (whole corpus units vs hard-truncated
+cycling), yielding 50 vs 61 tokens, and at 184 M parameters that 11-token difference crosses the
+budget. A checkpoint whose verdict flips on tokenizer detail is **at** the line, not inside it.
+Recorded rather than averaged away: the disagreement is the finding.
+
+**4. Population correctness — a methodology error caught and corrected before any number here.**
+The first sweep bucketed lengths over the *pooled* corpus (n=280), which put a 348-character
+`kind:"conversation"` text in the longest bucket. No Tier-2 detector can receive it: the
+conversation stage runs only `conv_tracker`. Every breach verdict on the surviving candidates came
+from a length the architecture cannot deliver. Buckets are now **stage-scoped** to the 04 §2 Stage
+column — `input` texts for injection, `output` texts segmented by the gateway's own `Segmentation`
+for toxicity (imported, not reimplemented: two definitions of "one sentence" would eventually
+disagree). Correcting it flipped `madhurjindal` from FITS to BREACH on eager, because the median
+`input` case tokenizes at **1.94 chars/token** against **4.19** for the median output sentence —
+62 characters becoming 32 tokens where 67 characters of prose become 16. Letter-spacing *is* the
+evasion, so bucketing injection payloads by character count understates their cost. The density is
+not uniform across the lane (1.94–4.31 ch/tok over the reachable input buckets), which is the
+reason the buckets carry a measured `tokens` field rather than a conversion factor.
+
+**5. Thread sensitivity is a real exposure, not a footnote.** At **1 thread** both picks breach at
+the segmenter cap — madhurjindal **25.90 P50 / 26.20 P99**, martin-ha **34.48 / 35.50** — while
+still fitting at corpus-typical lengths (17.81 / 10.62 P50). The budgets above are measured with 6 threads available to one inference. Under concurrent
+load, per-request parallelism falls, and NFR-P-002 has no stated concurrency assumption. Logged as
+**SL-5**; not tuned away and not treated as a passing figure.
+
+**6. Int8 accuracy disclosure.** Dynamic quantization perturbs logits — ONNX fp32 reproduces torch
+exactly, int8 differs in the third significant digit (3.002 vs 2.974 on a probe input). So a
+shipped int8 detector's accuracy is **not** the published checkpoint's reported accuracy, and no
+number from a model card may be presented as ours. 06 §3's blind eval measures what actually ships.
+
+### Consequences
+
+1. `controlplane/detectors/tier2_classifiers.py` loses its `STUB(phase-1-scaffold, Q-04 deferred)`
+   and binds these two ids.
+2. **Dependencies** (02 §8 "New deps require an ADR note"): the `ml` extra gains
+   `onnxruntime==1.29.0` and an explicit `transformers==4.57.6` pin — transitive through
+   `sentence-transformers` today, but a direct import once these detectors exist, and an unpinned
+   direct dependency is how 4.57.6 silently became 4.53.3 once already this phase. Export tooling
+   (`onnx`, `onnxscript`) is **dev-only**: it builds the graph, it does not serve it.
+   `optimum` is deliberately **absent** — `optimum[onnxruntime]==1.27.0` fails on torch 2.13
+   (`_attention_scale` import) and downgrades transformers as a side effect. `torch.onnx.export`
+   plus `onnxruntime.quantization` covers the same ground with no version conflict.
+3. Where the served graph comes from — exported on first use and cached, versus checked in — is an
+   **implementation** decision inside this contract, not an ADR: a committed binary graph has
+   provenance nobody can audit, so first-use export is the default unless startup cost forbids it.
+4. **The budget does not hold across the full input range**, and the input stage applies no length
+   cap. Filed as `[D3-tier2-injection-budget-cannot-hold-on-unbounded-input]` — this ADR binds the
+   checkpoints, that deviation decides the input bound, and the pick does not depend on the ruling
+   (`madhurjindal` is fastest at every length measured).
+5. `tests/test_gateway_app.py::test_ovlp01_is_not_yet_wired` and
+   `tests/test_fault_injection.py::test_tier2_is_not_yet_injectable` are both tripwires that fire
+   when a Tier-2 detector lands. Landing these detectors must re-point them in the same commit, not
+   delete them.
+
+**Docs touched:** 08 (Q-04 closed with the pick; SL-5 added; the deviation filed), `pyproject.toml`
+(the §2 dependency note), 04 §2 unchanged — the registry rows already say CPU/ONNX and this ADR
+fills in which checkpoint.
