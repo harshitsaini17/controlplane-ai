@@ -64,8 +64,8 @@ The range contains 33 commits. The three report-landings requested by the checkp
 - **File:line:** `pyproject.toml:39` (pytest configuration); benchmark-heavy boundary begins
   in `tests/test_bench_latency.py:1`
 - **Doc section:** 06 §4, 06 §5, 06 §8; checkpoint hygiene item 13
-- **Evidence:** collection reports **961 tests on the reviewed tree** and **962 after adding
-  this review's mandatory M-20 test**. The dataset freeze command completed successfully for
+- **Evidence:** collection reports **961 tests on the reviewed tree** and **964 after adding
+  this review's mandatory M-20 test and two reviewer-devised mutation tests**. The dataset freeze command completed successfully for
   280 cases. Direct engine/review tests completed successfully. However, bounded aggregate
   contract/full-suite runs did not return `0`; one bounded run returned `EXIT=124`, and later
   runs were interrupted after remaining non-terminal in the benchmark-heavy portion. The
@@ -74,7 +74,7 @@ The range contains 33 commits. The three report-landings requested by the checkp
 - **Impact:** items 4–11 and 13 have strong code/test/report evidence, but this reviewer cannot
   independently certify their requested runtime closure or the clean-venv `exit 0` gate.
 - **Disposition:** rerun in a fresh venv, sequentially, capture `pytest -q` showing the 961-test
-  reviewed-tree baseline (or 962 with this review test) and `exit 0`, then run
+  reviewed-tree baseline (or 964 with this review's three tests) and `exit 0`, then run
   `python -m eval.fault_injection` and `python -m eval.bench_latency --check` to terminal
   completion. Attach stdout, wall time, and generated-artifact diffs. No production fix is
   proposed from timeout evidence alone.
@@ -196,7 +196,7 @@ rename while 05 still declares the rename deferred.
 ### 13. Hygiene — BLOCKED by F1
 
 - Freeze: **PASS**, 280 cases, digest match.
-- Collection: **961** tests on reviewed tree; **962** after this required review test.
+- Collection: **961** tests on reviewed tree; **964** after this review's three tests.
 - Ledger: inspection confirms **18/18 closed**, open count zero.
 - SL-3 and prose-fix log: current on inspection.
 - Policy/config governing-ADR scan: no divergence found.
