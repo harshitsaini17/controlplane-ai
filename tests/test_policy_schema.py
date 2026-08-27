@@ -923,3 +923,137 @@ def test_detector_params_rejects_a_nested_mapping(valid_policy_dict: dict[str, A
     valid_policy_dict["detector_params"] = {"numeric_claims": {"units": {"time": "ms"}}}
     with pytest.raises(ValidationError):
         Policy(**valid_policy_dict)
+
+
+# --------------------------------------------------------------------------
+# messages.* template rendering — owner live-test finding, 2026-08-28
+#
+# Found by the owner running the gateway by hand, not by this suite: a live
+# `hr_copilot` BLOCK returned the literal "under {use_case} policy" to the
+# caller. The suite had 962 tests and none of them looked at a *rendered*
+# message, because every assertion compared against
+# `policy.messages.block_fallback` — the same unrendered value the bug served.
+# An assertion that reads the thing under test through the thing under test
+# cannot fail. Hence the first test below asserts a property (no residual
+# placeholder) rather than an equality against the source of truth.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("filename", POLICY_FILES)
+def test_fr_pol_004_shipped_messages_render_with_no_residual_placeholders(
+    filename: str,
+) -> None:
+    """Every shipped policy's user-facing text is fully rendered at load.
+
+    The judge-facing property, stated as a property: a `{` or `}` surviving into either
+    message means a caller sees template syntax. Asserted for all three policies and both
+    fields, since the bug reached production text in two of the three files.
+    """
+    policy = Policy(**load_raw(filename))
+    for field in ("block_fallback", "escalate_user_notice"):
+        text = getattr(policy.messages, field)
+        assert "{" not in text and "}" not in text, (
+            f"{filename}:{field} still carries template syntax: {text!r}"
+        )
+        assert text.strip(), f"{filename}:{field} rendered empty"
+
+
+def test_use_case_placeholder_is_substituted_not_stripped(
+    valid_policy_dict: dict[str, Any],
+) -> None:
+    """`{use_case}` becomes the policy's own use_case.
+
+    Guards the failure mode where a renderer "fixes" the visible symptom by deleting the
+    placeholder: the braces would be gone and this assertion would still fail.
+    """
+    valid_policy_dict["use_case"] = "finance_advisor"
+    valid_policy_dict["messages"]["block_fallback"] = "Refused under {use_case} policy."
+    policy = Policy(**valid_policy_dict)
+    assert policy.messages.block_fallback == "Refused under finance_advisor policy."
+
+
+def test_a_template_with_no_placeholder_is_passed_through_unchanged(
+    valid_policy_dict: dict[str, Any],
+) -> None:
+    """`support_bot`'s messages carry no placeholder; rendering must not touch them."""
+    literal = "I can't help with that request."
+    valid_policy_dict["messages"]["block_fallback"] = literal
+    assert Policy(**valid_policy_dict).messages.block_fallback == literal
+
+
+def test_doubled_braces_render_as_one_literal_brace_and_stop_there(
+    valid_policy_dict: dict[str, Any],
+) -> None:
+    """The escape hatch works, and its output is not re-rendered.
+
+    `{{use_case}}` is how an operator writes a literal `{use_case}` — a JSON example inside
+    a fallback message, say. It must survive as literal text: a second rendering pass would
+    substitute it, which is exactly the bug this section exists to prevent, arriving one
+    release later through the escape hatch.
+    """
+    valid_policy_dict["use_case"] = "hr_copilot"
+    valid_policy_dict["messages"]["block_fallback"] = "Literal {{use_case}} stays."
+    assert Policy(**valid_policy_dict).messages.block_fallback == "Literal {use_case} stays."
+
+
+@pytest.mark.parametrize(
+    "template, expected",
+    [
+        ("Blocked by {policy_version}.", "not a known placeholder"),
+        ("Blocked by {}.", "positional placeholders"),
+        ("Blocked by {0}.", "positional placeholders"),
+        ("Blocked by {use_case.__class__}.", "attribute and index access"),
+        ("Blocked by {use_case[0]}.", "attribute and index access"),
+    ],
+)
+def test_unknown_or_unsafe_placeholder_is_a_load_time_error(
+    valid_policy_dict: dict[str, Any], template: str, expected: str
+) -> None:
+    """A bad placeholder fails the load; it never reaches a caller.
+
+    Load time is the only acceptable place to catch this. At runtime the alternatives are
+    raising inside a BLOCK — turning a refusal into a 500 — or serving the raw template,
+    which is the original defect. The two access forms are refused because `str.format`
+    resolves attribute and index lookups inside a field name, so a template could otherwise
+    walk the object graph; policy files are operator config rather than user input, so this
+    is defence in depth, and cheap.
+    """
+    valid_policy_dict["messages"]["block_fallback"] = template
+    with pytest.raises(ValidationError, match=expected):
+        Policy(**valid_policy_dict)
+
+
+def test_malformed_braces_are_refused_with_the_escape_hatch_named(
+    valid_policy_dict: dict[str, Any],
+) -> None:
+    """An unbalanced brace is a typo, and the error says how to write a literal one."""
+    valid_policy_dict["messages"]["block_fallback"] = "Refused under {use_case policy."
+    with pytest.raises(ValidationError, match="not a valid template"):
+        Policy(**valid_policy_dict)
+
+
+def test_both_message_fields_are_rendered_not_only_the_fallback(
+    valid_policy_dict: dict[str, Any],
+) -> None:
+    """`escalate_user_notice` goes to callers on the ESCALATE path (05 §1.1) too.
+
+    Named separately because the live bug surfaced on BLOCK, and fixing only the field that
+    was observed failing is how the same defect returns on the other path.
+    """
+    valid_policy_dict["use_case"] = "support_bot"
+    valid_policy_dict["messages"]["escalate_user_notice"] = "Routed under {use_case}."
+    policy = Policy(**valid_policy_dict)
+    assert policy.messages.escalate_user_notice == "Routed under support_bot."
+
+
+def test_rendering_survives_a_reload_without_double_substituting() -> None:
+    """Loading the same file twice yields the same rendered text (FR-CFG-002).
+
+    `policy/store.py` builds a `Policy` once per load, so in-place rendering is safe — but
+    hot reload re-parses the file, and this pins that the second load renders from the
+    file's template rather than from an already-rendered string.
+    """
+    first = Policy(**load_raw("hr_copilot.yaml"))
+    second = Policy(**load_raw("hr_copilot.yaml"))
+    assert first.messages.block_fallback == second.messages.block_fallback
+    assert "hr_copilot" in first.messages.block_fallback
