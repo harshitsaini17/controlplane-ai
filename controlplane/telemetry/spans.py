@@ -67,7 +67,22 @@ ALL: tuple[str, ...] = (
 #: `latency_json` keys that are legal but are not spans (see the module docstring).
 #: `gateway_overhead_ms` is derived per the 06 §4 formula; `upstream_ms` is the
 #: provider wait, recorded because it must be *subtractable*, not because it is ours.
-LATENCY_EXTRA_KEYS: frozenset[str] = frozenset({"gateway_overhead_ms", "upstream_ms"})
+#: `input_hold_ms` and `sentence_holds_ms` are the ADR-030 per-hold series NFR-P-001
+#: targets — composed of measured intervals rather than being spans themselves, which is
+#: why they live here and not in `ALL`.
+LATENCY_EXTRA_KEYS: frozenset[str] = frozenset({
+    "gateway_overhead_ms",
+    "upstream_ms",
+    "input_hold_ms",
+    "sentence_holds_ms",
+})
+
+#: The one `latency_json` key whose value is a **list**, not a scalar (ADR-030): NFR-P-001
+#: targets each per-sentence hold individually, so P50/P99 are taken over holds rather than
+#: over requests and a pre-summed figure cannot express the target. Kept as an explicit set
+#: so `clamp_latency` and any future reader can tell the two shapes apart by name instead of
+#: by `isinstance`, which would silently accept a list under any key.
+LATENCY_SERIES_KEYS: frozenset[str] = frozenset({"sentence_holds_ms"})
 
 #: Everything that may appear as a `latency_json` key (05 §3).
 LATENCY_KEYS: frozenset[str] = frozenset(ALL) | LATENCY_EXTRA_KEYS
@@ -88,3 +103,21 @@ def check_latency_keys(latency: object) -> None:
             f"latency_json keys {unknown} are not in the 05 §5 span vocabulary; "
             "add the span to 05 §5 first (AGENTS.md §4), then to this module"
         )
+    # Shape is part of the contract, not a detail of it (ADR-030). `sentence_holds_ms` is a
+    # series because NFR-P-001 targets each hold; every other key is one interval. Both
+    # confusions corrupt a figure while looking plausible: a scalar under the series key
+    # reads as a single-sentence request, and a list under a scalar key would make a
+    # percentile over `float` raise far from the cause.
+    for key, value in latency.items():
+        if key in LATENCY_SERIES_KEYS:
+            if not isinstance(value, list) or any(
+                isinstance(v, bool) or not isinstance(v, (int, float)) for v in value
+            ):
+                raise ValueError(
+                    f"latency_json[{key!r}] must be a list of numbers (ADR-030 series), "
+                    f"got {type(value).__name__}"
+                )
+        elif isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(
+                f"latency_json[{key!r}] must be a number, got {type(value).__name__}"
+            )

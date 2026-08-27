@@ -97,16 +97,16 @@ NFR_P_001: dict[str, dict[str, float]] = {
     "sentence_holds_ms": {"p50": 40.0, "p99": 100.0},
 }
 
-#: Why NFR-P-001 currently has no verdict. Printed rather than inferred: the old per-request
-#: target is withdrawn and the per-hold series are not emitted yet (M-20), which is the third
-#: state — neither "met" nor "failed" (M-10 / ADR-027 Amendment 1).
+#: Printed only when a run carries **no** per-hold series at all, which is the third state —
+#: neither "met" nor "failed" (M-10 / ADR-027 Amendment 1). The gateway emits both series as of
+#: M-20, so on a normal run this never appears; it survives for the case that would otherwise
+#: be silent — a batch with no streaming samples, where an empty violation list would read as a
+#: pass over a requirement nothing was measured against.
 NFR_P_001_NOT_MEASURED = (
-    "**NFR-P-001: `not measured`.** ADR-030 re-scoped it onto `input_hold_ms` and "
-    "`sentence_holds_ms`, and neither series is emitted yet (**M-20**) — the intervals exist in "
-    "`app.py` but are accumulated into one figure rather than recorded per hold. The previous "
-    "per-request target is **withdrawn**, so this run neither meets nor fails NFR-P-001. "
-    "`--check` therefore returns no NFR-P-001 verdict, which 06 §4 requires be stated in these "
-    "words rather than left to read as a pass."
+    "**NFR-P-001: `not measured`.** ADR-030 scopes it to `input_hold_ms` and "
+    "`sentence_holds_ms` on **streaming** pipelines, and this run recorded neither — so it "
+    "neither meets nor fails NFR-P-001, and the empty violation list above is not a pass. The "
+    "previous per-request target is **withdrawn**, so nothing else here stands in for it."
 )
 
 #: 01 §3 pipeline labels, so the report speaks the docs' vocabulary.
@@ -225,9 +225,10 @@ class Sample:
     wall_ms: float
     http_status: int
     verdict: str
-    #: The ADR-030 per-hold series, read back from `latency_json` — empty until M-20 lands.
-    #: Empty means "not recorded", never "zero holds": a streaming request that released a
-    #: sentence necessarily held it, so a zero-length series here is an absent measurement.
+    #: The ADR-030 per-hold series, read back from `latency_json` — one entry per sentence
+    #: held. Emitted by the gateway as of M-20; still defaulted here, because empty means
+    #: "not recorded" and never "zero holds": a streaming request that released a sentence
+    #: necessarily held it, so a zero-length series is an absent measurement, not a fast one.
     hold_series: tuple[float, ...] = ()
     #: The ADR-030 input-lane hold. `None` for the same reason, kept distinct from 0.0.
     input_hold_ms: float | None = None
@@ -268,6 +269,34 @@ class Batch:
             if (use_case is None or s.use_case == use_case)
             and (streaming is None or s.streaming is streaming)
         ]
+
+    def _matching(self, use_case: str | None, streaming: bool | None) -> list[Sample]:
+        return [
+            s for s in self.samples
+            if (use_case is None or s.use_case == use_case)
+            and (streaming is None or s.streaming is streaming)
+        ]
+
+    def input_holds(self, use_case: str | None = None, *, streaming: bool | None = None
+                    ) -> list[float]:
+        """The ADR-030 input-lane holds. One per request; `None` entries are dropped.
+
+        Dropped rather than zero-filled: an absent `input_hold_ms` is a request whose hold was
+        never recorded, and a zero would enter the percentile as a real, very fast hold.
+        """
+        return [s.input_hold_ms for s in self._matching(use_case, streaming)
+                if s.input_hold_ms is not None]
+
+    def sentence_holds(self, use_case: str | None = None, *, streaming: bool | None = None
+                       ) -> list[float]:
+        """Every per-sentence hold, **flattened across requests** (ADR-030).
+
+        Flattening is the point rather than a convenience: NFR-P-001 targets each hold a user
+        waits through, so the population is holds, not requests. Averaging per request first
+        would let a 10-sentence response's slow hold hide behind its nine fast ones — exactly
+        the per-request smoothing the re-scope exists to stop.
+        """
+        return [h for s in self._matching(use_case, streaming) for h in s.hold_series]
 
 
 def run_batch(
@@ -341,9 +370,10 @@ def run_batch(
                     wall_ms=wall_ms,
                     http_status=response.status_code,
                     verdict=view["verdict"],
-                    # Forward-compatible read-back. Absent today (M-20), so these stay empty
-                    # rather than defaulting to a number: `nfr_p001_measurable()` then reports
-                    # honestly, and flips the day `app.py` records the holds — no edit here.
+                    # Read back rather than recomputed, like every other figure here: these
+                    # are the gateway's own hold measurements (M-20). Absence stays absence —
+                    # `nfr_p001_measurable()` reads it and the report prints the third state,
+                    # so a batch with no streaming samples cannot render as a pass.
                     hold_series=tuple(
                         float(v) for v in (view["latency"].get("sentence_holds_ms") or ())
                     ),
@@ -417,23 +447,37 @@ class Violation:
 
 
 def check_nfr_p001(batch: Batch) -> list[Violation]:
-    """No NFR-P-001 verdict is possible yet, and an empty list here is **not a pass**.
+    """NFR-P-001 as ADR-030 scopes it: the two per-hold series, **streaming only**.
 
-    Before ADR-030 this gated the per-request `gateway_overhead_ms` sum against P50 40 / P99
-    100 ms. ADR-030 removed that quantity from NFR-P-001's scope — it is still published, as
-    `total_attributable_overhead_ms`, but untargeted — and re-scoped the requirement onto the
-    per-hold series. Those are not emitted yet (M-20).
+    Before ADR-030 this gated the per-request `gateway_overhead_ms` sum. That quantity is still
+    published — as `total_attributable_overhead_ms` — but untargeted, and gating it here would
+    assert a requirement the docs no longer contain.
 
-    So this returns nothing for a reason 06 §4 names explicitly: continuing to gate the sum
-    would assert a requirement the docs no longer contain, and gating nothing *silently* would
-    render as "no violation" and read as a pass. The report prints
-    `NFR_P_001_NOT_MEASURED` instead, and `nfr_p001_measurable()` is what will flip when the
-    instrumentation lands.
+    Two properties worth stating, because both are easy to get wrong in a way that flatters us:
 
-    `batch` is kept in the signature deliberately: the call site does not change when M-20
-    lands, only this body does.
+    * **Streaming only.** 01's NFR-P-001 row scopes to streaming pipelines, so a non-streaming
+      request's single buffered hold is published but never gated here.
+    * **The population is holds, not requests** (see `Batch.sentence_holds`). A percentile over
+      per-request means would let one slow hold hide behind a long response's fast ones.
+
+    An empty return is a pass **only if** the series exist; when they do not,
+    `nfr_p001_measurable()` is False and the report prints the third state instead. That
+    distinction is the whole of M-10 / ADR-027 Amendment 1 applied here.
     """
-    return []
+    violations: list[Violation] = []
+    for series, values in (
+        ("input_hold_ms", batch.input_holds(streaming=True)),
+        ("sentence_holds_ms", batch.sentence_holds(streaming=True)),
+    ):
+        stats = Stats.of(values)
+        if stats is None:
+            continue
+        targets = NFR_P_001[series]
+        for metric, measured in (("P50", stats.p50), ("P99", stats.p99)):
+            target = targets[metric.lower()]
+            if measured >= target:
+                violations.append(Violation("NFR-P-001", series, metric, target, measured))
+    return violations
 
 
 def nfr_p001_measurable(batch: Batch) -> bool:
@@ -613,6 +657,27 @@ def _row(label: str, stats: Stats | None) -> str:
             f"| {stats.minimum:.2f} | {stats.maximum:.2f} |")
 
 
+def _hold_row(label: str, targets: dict[str, float], stats: Stats | None) -> str:
+    """One row of the NFR-P-001 table: the targets beside the measurement.
+
+    A breaching figure is **bolded**, so the table itself shows the breach rather than relying
+    on the reader to compare two columns. `not measured` fills the cells when the series is
+    absent — never zeros, which would read as "measured, and instant".
+    """
+    p50_t, p99_t = targets["p50"], targets["p99"]
+    if stats is None:
+        return (f"| {label} | < {p50_t:.0f} ms | < {p99_t:.0f} ms | — "
+                "| not measured | not measured | not measured | — | — |")
+
+    def cell(value: float, target: float | None) -> str:
+        return (f"**{value:.2f}**" if target is not None and value >= target
+                else f"{value:.2f}")
+
+    return (f"| {label} | < {p50_t:.0f} ms | < {p99_t:.0f} ms | {stats.n} "
+            f"| {cell(stats.p50, p50_t)} | {cell(stats.p95, None)} "
+            f"| {cell(stats.p99, p99_t)} | {stats.minimum:.2f} | {stats.maximum:.2f} |")
+
+
 def render(
     batch: Batch,
     *,
@@ -688,11 +753,27 @@ def render(
         "non-streaming are tabulated separately because they are different quantities** — "
         "streaming sums measured hold intervals, non-streaming subtracts the upstream call "
         "from wall-clock (06 §4).",
-        "4. **ADR-030 re-scoped NFR-P-001 onto the per-hold series, so the tables below carry "
-        "no NFR-P-001 verdict.** The per-request sum is retained and published under its new "
-        "name, untargeted; the requirement's own targets now attach to `input_hold_ms` and each "
-        "`sentence_holds_ms` entry, neither of which is emitted yet (M-20). Gating these tables "
-        "on a withdrawn target would assert a requirement the docs no longer contain.",
+        "4. **ADR-030 re-scoped NFR-P-001 onto the per-hold series**, so the requirement is "
+        "gated on `input_hold_ms` and `sentence_holds_ms` — the two holds a user actually waits "
+        "through — and **not** on the per-request sum, which is retained and published under its "
+        "new name, untargeted. The per-sentence population is **holds, not requests**: a "
+        "percentile over per-request means would let one slow hold hide behind a long response's "
+        "fast ones.",
+        "",
+        "## NFR-P-001 — the targeted per-hold series (streaming)",
+        "",
+        "These two series are what NFR-P-001 targets after ADR-030, whose targets were *derived* "
+        "from the 04 §2 budgets rather than fitted to a measurement. `sentence_holds_ms` is "
+        "tabulated **over holds**, so `n` is the number of sentences held, not the number of "
+        "requests. Non-streaming pipelines record one buffered hold each and are published below "
+        "but never gated here — 01's NFR-P-001 row scopes to streaming.",
+        "",
+        "| Series | Target P50 | Target P99 | n | P50 | P95 | P99 | min | max |",
+        "|---|---|---|---|---|---|---|---|---|",
+        _hold_row("`input_hold_ms`", NFR_P_001["input_hold_ms"],
+                  Stats.of(batch.input_holds(streaming=True))),
+        _hold_row("`sentence_holds_ms` (per hold)", NFR_P_001["sentence_holds_ms"],
+                  Stats.of(batch.sentence_holds(streaming=True))),
         "",
         "## `total_attributable_overhead_ms` — streaming pipelines (published, no target)",
         "",
@@ -791,19 +872,23 @@ def render(
                 f"| {v.requirement} | {v.subject} | {v.metric} | {v.target:.1f} ms "
                 f"| **{v.measured:.3f} ms** |"
             )
+    elif nfr_p001_measurable(batch):
+        lines.append(
+            "**No violation.** Both requirements were evaluated against emitted series: "
+            "NFR-P-001 on the two per-hold series above (ADR-030 scope), NFR-P-002 on the "
+            "per-detector budgets. `--check` exits zero on this state and nonzero on any row "
+            "above appearing. **Coverage is what bounds this, not the verdict:** the budgets "
+            "the projection below composes belong to detectors that do not exist yet, so this "
+            "is a pass at the current detector set, not a pass at the documented one."
+        )
     else:
         lines.append(
             "**No violation of any requirement this run can evaluate.** `--check` exits zero on "
             "this state and nonzero on any row above appearing. That covers NFR-P-002 only — see "
             "the NFR-P-001 note below, which is a *third* state and not a pass."
         )
-    lines += ["", NFR_P_001_NOT_MEASURED]
-    if nfr_p001_measurable(batch):
-        lines += [
-            "",
-            "⚠ **This run carries per-hold series, so the note above is stale** — M-20 has landed "
-            "and `check_nfr_p001` still returns no verdict. Wire the gate to the emitted series.",
-        ]
+    if not nfr_p001_measurable(batch):
+        lines += ["", NFR_P_001_NOT_MEASURED]
 
     if batch.errors:
         lines += [
@@ -914,11 +999,22 @@ def render(
         "sentence-level interception promises — each hold is the delay before *that* sentence "
         "appears — and the total is published untargeted beside it so a reader can see both.",
         "",
-        "**The fit is conditional, not unconditional (M-18).** `entity_enricher` is budgeted "
-        "per *span*, not per sentence, so a heavily-enriched sentence composes to `60 + 10k` and "
-        "crosses the 100 ms per-sentence P99 at **k = 4**. No doc bounds `k`. ADR-030 records "
-        "this against its own target rather than assuming it away, and inventing a cap to make "
-        "the target fit is exactly the move AGENTS.md §5.4 forbids.",
+        "**The fit is now unconditional (M-18 / M-19 closed).** It was conditional when ADR-030 "
+        "was accepted: `entity_enricher` was budgeted per *span*, so a heavily-enriched sentence "
+        "composed to `60 + 10k` and crossed the 100 ms per-sentence P99 at **k = 4**, with no doc "
+        "bounding `k`. 04 §2.2 now caps enrichment at **10 ms aggregate per sentence**, so `k` "
+        "leaves the arithmetic entirely, and the policy+action step carries a **combined 5 ms "
+        "budget** instead of sitting untracked inside a targeted quantity. Worst cases become "
+        "30 / 40 / 45 / 75 ms and every row fits. Both caps were ruled where the budget lives "
+        "(04 §2.2) rather than inside the target that needed them — inventing a bound to make "
+        "one's own target fit is the move AGENTS.md §5.4 forbids.",
+        "",
+        "One adjacency ADR-030 records rather than rounds away: the **enriched typical** row "
+        "lands at exactly **40.0 ms** against a strict `< 40` P50. It is not a breach, because "
+        "the P50 judges the *median* hold and a median sentence is unenriched — enrichment "
+        "requires a span-bearing `hallucination.*` signal, so a median enriched sentence would "
+        "mean over half of all traffic is hallucination-flagged. It is written down because it is "
+        "the first place a future budget change would break the derivation.",
         "",
         "Three things this does **not** say. It is not a measurement, so it is not a D3 — a D3 "
         f"needs an observed breach, and nothing here was observed: {headroom}. "

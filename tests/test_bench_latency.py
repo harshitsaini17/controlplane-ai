@@ -194,60 +194,120 @@ def test_both_tables_are_populated_by_the_default_mix(batch):
     assert batch.by_stream_mode(False), "no buffered samples — 06 §4's second table is empty"
 
 
-def test_nfr_p001_yields_no_verdict_because_adr_030_rescoped_it():
+def test_the_per_request_sum_can_never_breach_nfr_p001():
     """The per-request sum is out of NFR-P-001's scope, so no sum can breach it.
 
     Before ADR-030 this asserted the opposite: a 5-second streaming sum *had* to breach. That
     assertion encoded the target ADR-030 withdrew, so it is re-authored rather than deleted —
     the property worth pinning is that the harness stops asserting a requirement the docs no
     longer contain. An absurd sum is used deliberately: if any threshold were still wired to
-    this series, 5 seconds would trip it.
+    this series, 5 seconds would trip it. The sum is still *published*; it is simply not gated.
     """
     absurd = bl.Batch(
         samples=[_sample(use_case="support_bot", streaming=True, overhead_ms=5_000.0)],
         store=PolicyStore(),
     )
     assert bl.check_nfr_p001(absurd) == []
-    # And non-streaming likewise — the scope narrowing did not silently widen.
+
+
+def test_nfr_p001_now_gates_the_per_hold_series_and_names_the_breach():
+    """M-20 landed, so the gate is real: a slow hold must produce a D3-shaped violation.
+
+    This is the assertion the interim `return []` could not make. Both series are checked at
+    both percentiles, and the `Violation` carries requirement/subject/metric/target/measured
+    separately so `--check` and the report render the same fact.
+    """
+    slow = bl.Batch(
+        samples=[_sample(streaming=True, input_hold_ms=60.0, hold_series=(150.0,))],
+        store=PolicyStore(),
+    )
+    violations = bl.check_nfr_p001(slow)
+    subjects = {(v.subject, v.metric) for v in violations}
+    assert subjects == {
+        ("input_hold_ms", "P50"), ("input_hold_ms", "P99"),
+        ("sentence_holds_ms", "P50"), ("sentence_holds_ms", "P99"),
+    }
+    assert all(v.requirement == "NFR-P-001" for v in violations)
+    assert {v.target for v in violations} == {40.0, 50.0, 100.0}
+
+    fast = bl.Batch(
+        samples=[_sample(streaming=True, input_hold_ms=0.4, hold_series=(0.3, 0.2))],
+        store=PolicyStore(),
+    )
+    assert bl.check_nfr_p001(fast) == []
+
+
+def test_the_gated_population_is_holds_not_requests():
+    """One slow hold in a long response must breach, not be averaged away.
+
+    This is the substance of ADR-030's re-scope: the target attaches to the hold a user waits
+    through. Ten holds whose *mean* is comfortable but whose tail is 500 ms is a pass under
+    per-request smoothing and a breach under the per-hold reading, so it separates the two.
+    """
+    lopsided = bl.Batch(
+        samples=[_sample(streaming=True, input_hold_ms=1.0,
+                         hold_series=(1.0,) * 9 + (500.0,))],
+        store=PolicyStore(),
+    )
+    assert len(bl.Batch(samples=lopsided.samples).sentence_holds(streaming=True)) == 10
+    breaches = {(v.subject, v.metric) for v in bl.check_nfr_p001(lopsided)}
+    assert ("sentence_holds_ms", "P99") in breaches
+    assert ("sentence_holds_ms", "P50") not in breaches, "the median hold is fast; only the tail breaches"
+
+
+def test_non_streaming_holds_are_published_but_never_gated():
+    """01 scopes NFR-P-001 to streaming pipelines, so the buffered hold cannot breach it.
+
+    The non-streaming path records a one-element series (M-11: the response *is* the unit), and
+    that entry is published. Gating it here would silently widen a requirement the docs scope.
+    """
     buffered = bl.Batch(
-        samples=[_sample(use_case="finance_advisor", streaming=False, overhead_ms=5_000.0)],
+        samples=[_sample(use_case="finance_advisor", streaming=False,
+                         input_hold_ms=900.0, hold_series=(900.0,), overhead_ms=5_000.0)],
         store=PolicyStore(),
     )
     assert bl.check_nfr_p001(buffered) == []
 
 
-def test_an_empty_nfr_p001_verdict_never_renders_as_a_pass(batch):
-    """Returning no violations must not read as "met". This is the whole M-20 risk.
+def test_a_real_run_is_measurable_and_renders_a_verdict_not_the_third_state(batch):
+    """The M-20 interim is over: a real replay carries both series, so the note retires.
 
-    A gate that silently checks nothing produces the same empty list as a gate that checked and
-    found nothing wrong. The report therefore has to *say* which of the two happened, and this
-    pins that it says the honest one (M-10 / ADR-027 Amendment 1: three states, not two).
+    The staleness guard this replaces existed to make the interim note fail loudly once the
+    instrumentation landed. It has now served its purpose, so what is pinned instead is the
+    other direction — that the report does not keep printing "not measured" over series it
+    actually has.
     """
+    assert bl.nfr_p001_measurable(batch), "a real replay must emit the per-hold series"
+    assert batch.input_holds(streaming=True), "input_hold_ms absent from a real run"
+    assert batch.sentence_holds(streaming=True), "sentence_holds_ms absent from a real run"
+
     body = bl.render(batch, dataset_dir=bl.DATASET_DIR, provenance_note="", cadence_ms=0.5,
                      violations=[], live_note="")
-    assert "**NFR-P-001: `not measured`.**" in body
-    assert "neither meets nor fails NFR-P-001" in body
-    # The withdrawn target must not appear as a live claim anywhere.
+    assert "**NFR-P-001: `not measured`.**" not in body
+    assert "## NFR-P-001 — the targeted per-hold series (streaming)" in body
+    assert "Both requirements were evaluated against emitted series" in body
+    # The withdrawn target must not reappear as a live claim.
     assert "NFR-P-001 met" not in body
     assert "(NFR-P-001 scope)" not in body
 
 
-def test_the_not_measured_note_goes_stale_loudly_when_the_series_arrive(batch, store):
-    """When M-20 lands, the report must flag its own note rather than keep printing it.
+def test_the_third_state_still_renders_when_a_run_carries_no_series(store):
+    """An empty violation list over an unmeasured requirement is not a pass.
 
-    Without this the instrumentation could land and the report would go on saying "not
-    measured" — an untrue claim that looks conservative, which is the failure mode hardest to
-    notice.
+    Reachable without a time machine: a batch with no streaming samples has nothing NFR-P-001
+    scopes to. The three states must stay distinct (M-10 / ADR-027 Amendment 1), so the report
+    has to say which of "checked, clean" and "never checked" happened.
     """
-    assert not bl.nfr_p001_measurable(batch), "no run emits the series yet"
-
-    future = bl.Batch(
-        samples=[_sample(hold_series=(18.9, 14.8), input_hold_ms=12.4)], store=store
+    unmeasured = bl.Batch(
+        samples=[_sample(use_case="finance_advisor", streaming=False, hold_series=())],
+        store=store,
     )
-    assert bl.nfr_p001_measurable(future)
-    body = bl.render(future, dataset_dir=bl.DATASET_DIR, provenance_note="", cadence_ms=0.5,
+    assert not bl.nfr_p001_measurable(unmeasured)
+    body = bl.render(unmeasured, dataset_dir=bl.DATASET_DIR, provenance_note="", cadence_ms=0.5,
                      violations=[], live_note="")
-    assert "the note above is stale" in body
+    assert "**NFR-P-001: `not measured`.**" in body
+    assert "neither meets nor fails NFR-P-001" in body
+    assert "Both requirements were evaluated against emitted series" not in body
 
 
 # ---------------------------------------------------------------------------

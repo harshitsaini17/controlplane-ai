@@ -751,37 +751,77 @@ It breached under **both** readings, so the finding never rested on the sequenti
 ### Derivation of the targets — from the documented budgets, not from convenience
 
 Composed from `BUDGETS_MS` and `LANES` under the parallel execution model of (4). Every figure
-below is arithmetic over 04 §2; none is measured, because the detectors it turns on do not exist.
+below is arithmetic over the 04 §2 budgets plus the 5 ms engine line this ADR sets; none is a
+measurement, because the detectors it turns on do not exist. The engine line is the one term with
+a measurement *beside* it (below) rather than only a budget.
+
+Two non-detector terms are inside every row, because 06 §4 puts them inside the hold: the
+**engine step** (`cp.policy.evaluate` + `cp.action.apply`, 5 ms combined) and, on output holds
+only, **enrichment** (10 ms aggregate per sentence). Both were gaps when this ADR was first
+written; both are now ruled and are carried in the arithmetic rather than absorbed by it.
 
 | Hold | Documented composition | Worst case |
 |---|---|---|
-| Input lane | `max(tier1_pii 2, tier1_blocklist 2, tier2_injection 25, cost_budget 1, loop_guard 1)` | **25 ms** |
-| Per-sentence, typical | `max(tier1_pii 2, tier1_blocklist 2, tier2_toxicity 25, numeric_claims 5)` — `rag_grounding` skipped without context docs | **25 ms** |
-| Per-sentence, with context docs | `+ rag_grounding 30` into the same `max` | **30 ms** |
-| Per-sentence, `on_sampled` boundary compare | `max(30, fast_consistency 60)` | **60 ms** |
-| Per-sentence, `+ k` enriched spans | `60 + 10k` (`entity_enricher` is **per span**, 04 §2.2) | **60 + 10k ms** |
+| Input lane | `max(tier1_pii 2, tier1_blocklist 2, tier2_injection 25, cost_budget 1, loop_guard 1)` + engine 5 | **30 ms** |
+| Per-sentence, typical | `max(tier1_pii 2, tier1_blocklist 2, tier2_toxicity 25, numeric_claims 5)` + engine 5 — `rag_grounding` skipped without context docs | **30 ms** |
+| Per-sentence, typical, enriched | `+ entity_enricher 10` (**aggregate per sentence**, 04 §2.2) | **40 ms** |
+| Per-sentence, with context docs | `max(30, rag_grounding 30)` + enrichment 10 + engine 5 | **45 ms** |
+| Per-sentence, `on_sampled` boundary compare | `max(30, fast_consistency 60)` + enrichment 10 + engine 5 | **75 ms** |
+
+The enrichment term is now **flat, not `10k`** — that is the whole effect of the 04 §2.2 cap. The
+input lane carries no enrichment term at all: enrichment is conditional on a span-bearing
+`hallucination.*` signal (04 §2.2) and no input-lane detector emits one.
+
+**Every row fits, and one adjacency is stated rather than glossed.** Worst cases 30 / 40 / 45 / 75
+against P50 < 40 and P99 < 100: the input lane clears its P50 by 10 ms and its P99 by 20; the
+per-sentence P99 clears by 25 ms at the `on_sampled` worst case. The **enriched typical row lands
+at exactly 40.0 ms against a strict `< 40`** — zero margin. It is not a P50 breach, because the
+P50 target judges the *median* hold and a median sentence is unenriched (enrichment requires a
+span-bearing `hallucination.*` signal on that sentence; if the median sentence had one, over half
+of all traffic would be hallucination-flagged). But it is the first place this derivation would
+break under a budget change, so it is written down where a future budget edit will hit it.
 
 **Targets:** input-lane hold **P50 < 40 ms, P99 < 50 ms**; per-sentence hold **P50 < 40 ms,
 P99 < 100 ms**. Streaming pipelines only, as before.
 
-Why these and not others. The input lane's worst case is 25 ms and `tier2_injection` runs on
-*every* request, so its P50 cannot be set below 25 — 40/50 clears the documented composition with
-headroom for the unbudgeted policy+action step (below) without being loose enough to hide a
-regression. The per-sentence P50 of 40 ms covers the typical 25–30 ms composition; the P99 of
-100 ms covers the `on_sampled` worst case of 60 ms.
+Why these and not others. The input lane's *detector* composition is 25 ms and `tier2_injection`
+runs on *every* request, so its P50 cannot be set below 25 — 30 ms once the engine step is
+included, and 40/50 clears that without being loose enough to hide a regression. The per-sentence
+P50 of 40 ms covers the typical 30 ms composition; the P99 of 100 ms covers the `on_sampled` worst
+case of 75 ms.
 
-**Two gaps this derivation surfaces rather than papers over**, per the ruling's own instruction
-that an unfittable composition is a budget problem and not a target to inflate:
+**The two gaps this derivation surfaced are now closed** (ruled 2026-08-27). They are kept here
+with their original finding intact, because the reason each was *logged rather than solved in
+place* is the same reason the fit above is trustworthy: a target is not allowed to invent the
+bound that makes it fit.
 
-- **`entity_enricher` is unbounded per sentence.** At 10 ms per enriched span, `60 + 10k` crosses
-  the 100 ms P99 at **k = 4**. The per-sentence target is therefore satisfiable *only* under an
-  enrichment bound that no doc currently states. Logged as **M-18**; 04 §2.2 needs either a cap
-  or an explicit exclusion of enrichment from the hold. Not resolved here — inventing a cap to
-  make my own target fit is the move §5.4 exists to forbid.
-- **Policy evaluate + action apply are unbudgeted.** 06 §4 puts them inside the hold ("detector
-  wait + policy + action") but 04 §2 budgets only detectors. Measured today at well under 1 ms
-  for the whole step, so the targets above absorb it; stated because an unbudgeted term inside a
-  targeted quantity is a gap whether or not it currently matters. Logged as **M-19**.
+- **`entity_enricher` was unbounded per sentence** — at 10 ms per enriched span, `60 + 10k`
+  crossed the 100 ms P99 at **k = 4**, so the per-sentence target was satisfiable only under a
+  bound no doc stated. **Closed by the 04 §2.2 cap** (M-18): 10 ms *aggregate* per sentence, skip
+  remaining spans on exceed, `cp_enrichment_skipped_total`. The fit above is therefore
+  **unconditional** — the derivation no longer rests on an assumption about `k`, because `k` no
+  longer enters the arithmetic. Ruled in 04 §2.2 rather than here, and after the composition it
+  affects was already published, so the cap is a detector-budget decision that this target had to
+  live with — not one written to make this target fit.
+- **Policy evaluate + action apply were unbudgeted.** 06 §4 puts them inside the hold ("detector
+  wait + policy + action") but 04 §2 budgets only detectors. **Closed with a combined 5 ms budget
+  line** for `cp.policy.evaluate` + `cp.action.apply` (M-19), carried in every row of the table
+  above. Both are deterministic work — a severity lookup over converged signals and a template
+  transform — so a budget two orders of magnitude above the measurement is a tripwire, not an
+  allowance.
+
+  **Measured, now that the spans are actually emitted: combined P50 0.019 ms, P95 0.039 ms,
+  P99 0.095 ms (n = 300, `reports/latency_report.md`)** — against the 5 ms budget, ~50x headroom
+  at P99. Two caveats on that figure, both of which make it conservative rather than flattering:
+  it is a per-*request* sum across every unit in the response (`merge_latency` accumulates), so it
+  is an **upper bound** on any single hold's engine cost; and it is measured at the current
+  detector set, where the engine converges few signals. A breach needs no new mechanism to
+  surface — it lands in the per-hold series and trips `--check`, exactly as a detector breach
+  does.
+
+  Worth recording that these three spans (`cp.ingress` included) were in the 05 §5 vocabulary but
+  **written by no code** when this ADR was first accepted, so the original "measured today at well
+  under 1 ms" had no measurement behind it. The figure above is the first real one.
 
 ### Sampled consistency (04 §2.3) — explicitly bounded, not assumed away
 
@@ -790,8 +830,9 @@ hold, and its own **skip-on-lag** semantics bound it: the comparison happens *on
 has ≥ 70% of the primary's released+buffered length, and otherwise the sentence proceeds without
 the signal, audited `meta.consistency:"lagged"` and counted in `cp_consistency_lagged_total`. So
 the 60 ms term is **paid only when the sample is actually ready** — a lagging sample costs the
-alignment check, not the comparison. This is why the P99 target is set at the 60 ms composition
-rather than at some multiple of it: the mode cannot queue up compares, it drops them.
+alignment check, not the comparison. This is why the P99 target is set at the composition that
+term dominates (75 ms, per the table above) rather than at some multiple of it: the mode cannot
+queue up compares, it drops them.
 
 `consistency: on` (UC-3, `streaming: false`) is untouched — it compares once, pre-delivery, in a
 non-streaming pipeline that NFR-P-001 never covered.
@@ -834,24 +875,39 @@ untargeted precisely so the weakening is legible rather than hidden, and
 
 ### Implementation status — the contract lands now, the instrumentation with it
 
-This ADR settles the **contract**; three of its quantities are not yet emitted, and saying so is
-load-bearing rather than a caveat. `input_hold_ms`, `sentence_holds_ms` and
-`added_time_to_last_byte_ms` are new `latency_json` series: the intervals already exist in the
-code (`app.py:414` is the input-lane hold, `app.py:698`'s `unit_ms` is the per-sentence hold) but
-they are **accumulated into one figure and never recorded separately**, so the re-scoped targets
-cannot be evaluated until the write path carries them.
+**Updated 2026-08-27 — the two targeted series now land; two untargeted quantities still do not.**
 
-Consequence, stated rather than glossed: **NFR-P-001 is `not measured` from this ADR until that
-instrumentation lands.** The old per-request target is withdrawn and the new per-hold targets have
-no series yet, which is the third state M-10 / ADR-027 Amendment 1 insists on — not "met", not
-"failed". The latency report must say exactly that, and `--check` must not gate NFR-P-001 on a
-quantity that is no longer its subject. A benchmark that kept gating the sum would be reporting
-a target the docs no longer contain; one that silently gated nothing would read as a pass.
+`input_hold_ms` and `sentence_holds_ms` are **emitted** on both delivery paths, so NFR-P-001 has
+a real verdict rather than the third state. The input hold is `cp.ingress` + input-lane time
+before dispatch, per 06 §4; the per-sentence series carries one entry per released unit, and on a
+non-streaming pipeline one entry for the buffered response, which M-11 makes the unit there.
+`--check` gates the two series and names the breaching subject and percentile; the gated
+population is **holds, not requests** — a 10-segment response contributes 10 samples, which is
+what a per-hold target means.
+
+Still not emitted, and tracked as the remainder of **M-20**: the **rename**
+(`app.py` writes `gateway_overhead_ms`, not `total_attributable_overhead_ms` — the code's enforced
+vocabulary in `spans.py` still carries the old name) and **`added_time_to_last_byte_ms`**. Both
+are untargeted publication rows, so neither blocks NFR-P-001; the divergence is between this ADR's
+documented vocabulary and `check_latency_keys`' enforced one, and it is not caught by a test —
+`tests/test_telemetry.py` parses the 05 §5 **span** and **metric** tables from the doc, but the
+`latency_json` key names are not doc-parsed.
+
+What the original caveat here said, kept because it is the reasoning the fix had to satisfy:
+NFR-P-001 was `not measured` from this ADR until the instrumentation landed — the old per-request
+target withdrawn, the new per-hold targets with no series yet, which is the third state
+M-10 / ADR-027 Amendment 1 insists on: not "met", not "failed". A benchmark that kept gating the
+sum would have reported a target the docs no longer contain; one that silently gated nothing would
+have read as a pass. `nfr_p001_measurable()` decides which of those the report prints, so the
+third state remains reachable — it is what a run with no streaming traffic still renders.
 
 This is the ordinary spec-first order in this repo (docs precede code by design, AGENTS.md §2), so
-the doc is not "ahead of" the code in a way that needs reconciling — but the **05 §5 vocabulary is
-enforced at the write path** by `check_latency_keys`, so the new keys are documented as the
-contract and marked not-yet-emitted until `app.py` writes them. Tracked as **M-20**.
+the doc was not "ahead of" the code in a way that needed reconciling — but the **05 §5 vocabulary
+is enforced at the write path** by `check_latency_keys`, so a key is documented as the contract and
+marked not-yet-emitted until `app.py` writes it. `sentence_holds_ms` is the one **list** in that
+vocabulary, and its shape is enforced there too: a scalar under it would read as a
+single-sentence request, and a list under a scalar key would surface as a `TypeError` inside a
+percentile far from the cause.
 
 **Docs touched:** 01 (NFR-P-001 row), 02 §3 (parallel-at-Tier-2 trigger), 05 §3/§5 (`latency_json`
 vocabulary: the rename plus the two new series), 06 §4 (formula gains the per-hold series and the

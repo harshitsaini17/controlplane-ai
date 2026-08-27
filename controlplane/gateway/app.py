@@ -68,6 +68,7 @@ from controlplane.gateway.sse_proxy import UpstreamDispatcher
 from controlplane.policy.engine import Verdict, most_severe
 from controlplane.policy.schema import Action
 from controlplane.policy.store import PolicyStore
+from controlplane.telemetry import spans
 from controlplane.telemetry.metrics import REGISTRY_DEFAULT, MetricsRegistry
 
 #: SSE sentinel closing an OpenAI-compatible stream.
@@ -402,16 +403,29 @@ async def handle_completion(state: Gateway, http_request: Request) -> Response:
     """
     started = time.perf_counter()
     body = await http_request.json()
+    # `cp.ingress` (02 §4 step t0) is resolve-use-case + load-policy — NOT the body read
+    # above, which is client transport the gateway does not control and which 06 §4 keeps
+    # out of the headline for the same reason it keeps the reference row separate.
+    ingress_started = time.perf_counter()
     request = ingest(dict(http_request.headers), body, state.store, key_map=state.key_map)
+    ingress_ms = (time.perf_counter() - ingress_started) * 1000.0
     http_request.state.request_id = request.request_id
 
     coverage = pipeline.Coverage()
-    latency: dict[str, float] = {}
+    latency: dict[str, Any] = {spans.INGRESS: ingress_ms}
 
     input_started = time.perf_counter()
     verdict, outcome, lane = await pipeline.input_lane(request, coverage, metrics=state.metrics)
     pipeline.note_enrichment(lane.signals, coverage)
-    held_ms = (time.perf_counter() - input_started) * 1000.0
+    # ADR-030 `input_hold_ms`: 06 §4 defines it as **ingress + input-lane time, before
+    # dispatch**, so ingress is inside it. `held_ms` starts from the same point for the same
+    # reason — the 06 §4 streaming formula also opens with "ingress + input-lane time", and
+    # the previous accumulator started after ingest, under-reporting the sum by that
+    # interval. Correcting it moves our own published figure UP, which is the only direction
+    # a fidelity fix to a measurement may move it without needing an argument.
+    input_hold_ms = ingress_ms + (time.perf_counter() - input_started) * 1000.0
+    latency["input_hold_ms"] = input_hold_ms
+    held_ms = input_hold_ms
     pipeline.merge_latency(latency, lane.latency.items())
 
     if not outcome.dispatch:
@@ -511,11 +525,25 @@ async def _buffered_response(
     lane = await pipeline.run_lane(stage, response.text, request, coverage,
                                   metrics=state.metrics)
     pipeline.note_enrichment(lane.signals, coverage)
+    engine_started = time.perf_counter()
     verdict = pipeline.converge(lane, request.policy, metrics=state.metrics)
+    policy_ms = (time.perf_counter() - engine_started) * 1000.0
+    action_started = time.perf_counter()
     outcome = await pipeline.apply_output(response.text, verdict, request)
+    action_ms = (time.perf_counter() - action_started) * 1000.0
     pipeline.note_pii_intercepts(outcome, request.use_case, metrics=state.metrics)
-    held_ms += (time.perf_counter() - unit_started) * 1000.0
+    unit_ms = (time.perf_counter() - unit_started) * 1000.0
+    held_ms += unit_ms
     pipeline.merge_latency(latency, lane.latency.items())
+    pipeline.merge_latency(latency, (
+        (spans.POLICY_EVALUATE, policy_ms), (spans.ACTION_APPLY, action_ms),
+    ))
+    # One entry, because this path has exactly one unit: M-11 makes a non-streaming pipeline
+    # buffer the whole response and run the `output_sentence` detectors over that buffer, so
+    # the response IS the unit. Recorded as a one-element series rather than omitted, so the
+    # key means the same thing on both paths — NFR-P-001 still scopes to streaming, and the
+    # benchmark splits on `streaming` before taking any percentile.
+    latency["sentence_holds_ms"] = [unit_ms]
 
     review_id = str(uuid.uuid4()) if outcome.action is Action.ESCALATE else None
 
@@ -623,6 +651,10 @@ async def _stream_response(
         # duration to leave token-wait time. Using `held_ms` there subtracts the input lane
         # from an interval it was never part of, under-reporting `upstream_ms`.
         stream_hold_ms = 0.0
+        # ADR-030's per-hold series: one entry per sentence, NOT an accumulator. It is the
+        # per-hold detail `stream_hold_ms` sums away, and NFR-P-001 targets the entries
+        # rather than the sum — which is precisely why both have to exist.
+        sentence_holds: list[float] = []
         buffer = Segmentation()
         signals: list[Signal] = list(input_signals)
         actions: list[Any] = []
@@ -647,7 +679,13 @@ async def _stream_response(
             the sum of the holds that actually happened, and `upstream_ms` the stream
             duration minus those holds — so a partial record carries real measurements, and
             it is `record_status` rather than a missing key that keeps them out of a
-            published aggregate."""
+            published aggregate.
+
+            The ADR-030 per-hold series is written here for the same reason: on a crash path
+            the holds that already happened are real measurements of real waits, and the
+            series is the quantity NFR-P-001 targets. `input_hold_ms` is already in
+            `latency` — it was recorded before dispatch, so it exists even for a request
+            that dies mid-stream."""
             total_ms = (time.perf_counter() - started) * 1000.0
             stream_ms = (time.perf_counter() - stream_started) * 1000.0
             latency["upstream_ms"] = round(max(0.0, stream_ms - stream_hold_ms), 3)
@@ -655,6 +693,12 @@ async def _stream_response(
                 total_ms=total_ms, upstream_ms=latency["upstream_ms"],
                 held_ms=held_ms, streaming=True,
             )
+            # Written only when at least one sentence was held. An empty list would claim
+            # "measured, zero holds" for a request that died before its first boundary,
+            # which is the "not measured" vs "measured clean" collapse M-10 forbids — an
+            # absent key already means not-recorded, and the bench reads it that way.
+            if sentence_holds:
+                latency["sentence_holds_ms"] = list(sentence_holds)
 
         def write_partial() -> None:
             """The M-13 fallback: record a request that died after releasing content.
@@ -692,17 +736,29 @@ async def _stream_response(
                 metrics=state.metrics,
             )
             pipeline.note_enrichment(lane.signals, coverage)
+            engine_started = time.perf_counter()
             verdict = pipeline.converge(lane, request.policy, metrics=state.metrics)
+            policy_ms = (time.perf_counter() - engine_started) * 1000.0
+            action_started = time.perf_counter()
             outcome = await pipeline.apply_output(segment_text, verdict, request)
+            action_ms = (time.perf_counter() - action_started) * 1000.0
             pipeline.note_pii_intercepts(outcome, request.use_case, metrics=state.metrics)
             unit_ms = (time.perf_counter() - unit_started) * 1000.0
             held_ms += unit_ms
             stream_hold_ms += unit_ms
+            # ADR-030: each hold is its own entry, because NFR-P-001 targets the hold a user
+            # waits through. Appended even when this unit turns out to be terminal — the
+            # sentence was still held for that long, and dropping it would make a blocked
+            # response look like it held less than it did.
+            sentence_holds.append(unit_ms)
 
             signals.extend(lane.signals)
             verdicts.append(verdict)
             actions.extend(outcome.applied)
             pipeline.merge_latency(latency, lane.latency.items())
+            pipeline.merge_latency(latency, (
+                (spans.POLICY_EVALUATE, policy_ms), (spans.ACTION_APPLY, action_ms),
+            ))
 
             if outcome.action in (Action.BLOCK, Action.ESCALATE):
                 terminal = (verdict, outcome)

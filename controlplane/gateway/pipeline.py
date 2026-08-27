@@ -355,8 +355,21 @@ async def input_lane(
     """
     prompt = last_user_text(request.messages)
     lane = await run_lane(Stage.INPUT, prompt, request, coverage, metrics=metrics)
+    # The engine step is timed into the lane's own latency map (ADR-030 / M-19). 06 §4 puts
+    # policy + action INSIDE the hold, and the two span names have been in the 05 §5
+    # vocabulary all along while nothing wrote them — so an unbudgeted term sat inside a
+    # targeted quantity, unmeasurable. Timed here rather than at the call site so every
+    # caller of `input_lane` gets it without having to remember to.
+    engine_started = time.perf_counter()
     verdict = converge(lane, request.policy, metrics=metrics)
+    policy_ms = (time.perf_counter() - engine_started) * 1000.0
+    action_started = time.perf_counter()
     outcome = await apply_input_verdict(prompt, verdict, request.policy)
+    action_ms = (time.perf_counter() - action_started) * 1000.0
+    merge_latency(lane.latency, (
+        (spans.POLICY_EVALUATE, policy_ms),
+        (spans.ACTION_APPLY, action_ms),
+    ))
     note_pii_intercepts(outcome, request.use_case, metrics=metrics)
     return verdict, outcome, lane
 
@@ -463,15 +476,30 @@ def note_enrichment(
         coverage.note_missing("entity_enricher")
 
 
-def clamp_latency(latency: dict[str, float]) -> dict[str, float]:
+def clamp_latency(latency: dict[str, Any]) -> dict[str, Any]:
     """Round span timings to microseconds for a byte-stable audit record.
 
     Rounding only. Keys are deliberately **not** filtered against the 05 §5 vocabulary:
     `spans.check_latency_keys` enforces that at the write path, and an unknown key must
     fail loudly there rather than disappear quietly here — a dropped key would turn a
     contract violation into a missing measurement.
+
+    `sentence_holds_ms` is a **list** (ADR-030) and is rounded element-wise. It is matched
+    by name against `spans.LATENCY_SERIES_KEYS` rather than by `isinstance`, so a list
+    arriving under a scalar key still reaches `check_latency_keys` and fails there instead
+    of being quietly accepted by a permissive rounder.
     """
-    return {key: round(value, 3) for key, value in latency.items()}
+    out: dict[str, Any] = {}
+    for key, value in latency.items():
+        if key in spans.LATENCY_SERIES_KEYS and isinstance(value, list):
+            out[key] = [round(v, 3) for v in value]
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            out[key] = round(value, 3)
+        else:
+            # Not roundable and not a declared series: pass it through untouched so the
+            # write-path check reports the real shape error rather than a TypeError here.
+            out[key] = value
+    return out
 
 
 def merge_latency(into: dict[str, float], extra: Iterable[tuple[str, float]]) -> None:

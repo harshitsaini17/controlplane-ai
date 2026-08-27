@@ -70,15 +70,46 @@ def test_span_list_has_no_duplicates_and_is_doc_ordered() -> None:
     assert positions == sorted(positions), "ALL should follow the order 05 §5 lists"
 
 
-def test_latency_keys_admit_the_two_derived_figures_only() -> None:
-    """05 §3 lists `gateway_overhead_ms` + `upstream_ms` beside the per-detector spans.
+def test_latency_keys_admit_the_derived_figures_and_the_adr_030_series() -> None:
+    """05 §3 lists the non-span `latency_json` keys beside the per-detector spans.
 
-    They are legal `latency_json` keys but not spans: `gateway_overhead_ms` is derived
-    by the 06 §4 formula and `upstream_ms` is the provider wait, recorded so it can be
-    subtracted. Anything else is a typo.
+    Four, and each for its own reason: `gateway_overhead_ms` is derived by the 06 §4
+    formula, `upstream_ms` is the provider wait recorded so it can be subtracted, and
+    `input_hold_ms` / `sentence_holds_ms` are the ADR-030 per-hold series NFR-P-001
+    targets — composed of measured intervals rather than being spans themselves.
+    Anything else is a typo.
     """
-    assert spans.LATENCY_EXTRA_KEYS == {"gateway_overhead_ms", "upstream_ms"}
+    assert spans.LATENCY_EXTRA_KEYS == {
+        "gateway_overhead_ms", "upstream_ms", "input_hold_ms", "sentence_holds_ms",
+    }
     assert spans.LATENCY_KEYS == set(spans.ALL) | spans.LATENCY_EXTRA_KEYS
+    # The series key must be declared as a series, or `clamp_latency` rounds a list as a
+    # scalar and the write path accepts a pre-summed figure under a name that promises holds.
+    assert spans.LATENCY_SERIES_KEYS == {"sentence_holds_ms"}
+    assert spans.LATENCY_SERIES_KEYS <= spans.LATENCY_KEYS
+
+
+def test_the_series_key_must_carry_a_list_and_every_other_key_a_number() -> None:
+    """Shape is part of the contract (ADR-030), not a detail of it.
+
+    Both confusions corrupt a figure while looking plausible: a scalar under
+    `sentence_holds_ms` reads as a single-sentence request, and a list under a scalar key
+    would surface as a TypeError inside a percentile, far from the cause.
+    """
+    spans.check_latency_keys({"sentence_holds_ms": [1.0, 2.5], "input_hold_ms": 0.4})
+    spans.check_latency_keys({"sentence_holds_ms": []})  # zero sentences held is legal
+
+    with pytest.raises(ValueError, match="must be a list of numbers"):
+        spans.check_latency_keys({"sentence_holds_ms": 3.5})
+    with pytest.raises(ValueError, match="must be a list of numbers"):
+        spans.check_latency_keys({"sentence_holds_ms": ["1.0"]})
+    with pytest.raises(ValueError, match="must be a number"):
+        spans.check_latency_keys({"input_hold_ms": [1.0]})
+    with pytest.raises(ValueError, match="must be a number"):
+        spans.check_latency_keys({spans.INGRESS: None})
+    # `bool` is an int subclass; a flag in a latency field is a bug, not a duration.
+    with pytest.raises(ValueError, match="must be a number"):
+        spans.check_latency_keys({spans.INGRESS: True})
 
 
 def test_unknown_latency_key_is_refused_with_an_actionable_message() -> None:

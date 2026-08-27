@@ -87,6 +87,12 @@ REGISTRY: dict[str, MetricSpec] = {
                    "provider fallback — never silent (FR-GW-006)"),
         MetricSpec("cp_pricing_missing_total", "counter", ("provider", "model"),
                    "model absent from pricing.models; est_cost is null (ADR-022)"),
+        # `reason` carries the cause the way `cp_detector_failures_total{detector,fail_mode}`
+        # does: "enrichment was skipped" is one countable fact, and a skip whose cause is
+        # invisible cannot be told from a sentence that simply had no spans to enrich.
+        MetricSpec("cp_enrichment_skipped_total", "counter", ("use_case", "reason"),
+                   "enrichment stopped early — 10 ms/sentence aggregate cap or a "
+                   "failure (04 §2.2); never blocks, not a fail_mode class"),
     )
 }
 
