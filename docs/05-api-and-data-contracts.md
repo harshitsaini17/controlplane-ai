@@ -102,7 +102,10 @@ CREATE TABLE audit_records (
   -- short `signals_json`. `{}` means "coverage not recorded" and is distinct from
   -- `{"ran":[],"not_run":[]}` = "nothing ran and nothing was expected" — the same
   -- distinction ADR-027 Amendment 1 draws between `[]` and NULL. Any record the gateway
-  -- writes for a completed request states both lists.
+  -- writes for a completed request states both lists. **ADR-033 adds a third list,
+  -- `unavailable[]`** ({detector, missing}): registered but unloadable at boot, which is
+  -- neither a run nor an expected-and-skipped. A detector appears in AT MOST ONE of the
+  -- three.
   detectors_json TEXT NOT NULL DEFAULT '{}',
   sampled_deep INTEGER DEFAULT 0,
   -- Crash-safety marker (M-13). `complete` = the lifecycle finished and `verdict` is final.
@@ -177,7 +180,8 @@ The proposal/README show this shape (assembled from `audit_records`):
               "input_hold_ms":12.4,"sentence_holds_ms":[18.9,14.8],
               "added_time_to_last_byte_ms":51.7},
   "detectors": {"ran":["tier1_pii","numeric_claims"],
-                "not_run":[{"detector":"fast_consistency","reason":"not_implemented"}]},
+                "not_run":[{"detector":"fast_consistency","reason":"not_implemented"}],
+                "unavailable":[{"detector":"tier2_toxicity","missing":"onnxruntime"}]},
   "record_status": "complete",
   "override": {"decision":"approve","note":"claim verified against filing","ts":"…"}
 }
@@ -200,6 +204,17 @@ than a key inside `actions` precisely so that filter is expressible in SQL.
 `reason` vocabulary — **`not_implemented`** (the detector has no live implementation in this
 phase; see the deferred-scope register in 08). Extending this list is a doc change, as for any
 other fixed vocabulary here.
+
+**`unavailable` — registered but unloadable (ADR-033).** Entries are `{detector, missing}`, where
+`missing` names the absent dependency (an import name, never a traceback). This is the third
+lifecycle state and it is a **boot-time** fact: the detector has an implementation, so
+`not_implemented` would be a false statement, and nothing ran, so it is **not** a
+`DetectorFailureRecord` either. `dependency_unavailable` is deliberately **not** a `not_run`
+reason — that would restate an environment fact once per request while leaving unanswerable
+whether the coverage promise was ever keepable. A detector may appear in **at most one** of
+`ran`, `not_run`, `unavailable`; the write path enforces that, as it already does for the first
+two. Enforcement is at **boot**, mirroring FR-GW-006: any active policy mapping that detector's
+class to `fail_closed` refuses the boot outright (04 §5).
 
 **`{}` means "coverage not recorded"**, and is deliberately distinct from
 `{"ran":[],"not_run":[]}`, which asserts that nothing ran and nothing was expected. This is the
@@ -244,6 +259,7 @@ cp_consistency_lagged_total{use_case}     cp_probe_rejections_total{use_case}
 cp_fallback_engaged_total{from_provider,to_provider,reason}      # FR-GW-006
 cp_pricing_missing_total{provider,model}                        # ADR-022
 cp_enrichment_skipped_total{use_case,reason}                    # 04 §2.2 cap
+cp_detector_unavailable_total{detector}                         # ADR-033 state (c)
 ```
 The definition of `cp_gateway_overhead_ms` / `latency_json.total_attributable_overhead_ms` is **normative in 06 §4** — implementations and dashboards must use that formula, not an ad-hoc one.
 

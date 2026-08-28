@@ -36,11 +36,15 @@ import pytest
 from fastapi.testclient import TestClient
 
 from controlplane.audit.records import canonical_view
-from controlplane.detectors.base import DetectorError, Stage
+from controlplane.detectors import availability
+from controlplane.detectors.availability import DetectorUnavailableError
+from controlplane.detectors.base import DetectorError, Stage, registered_names
+from controlplane.gateway import app as app_module
 from controlplane.gateway import pipeline
 from controlplane.gateway.app import (
     HTTP_ESCALATE,
     CanaryUnavailableWarning,
+    DetectorUnavailableWarning,
     Gateway,
     _request_verdict,
     create_app,
@@ -1321,3 +1325,175 @@ def test_the_id_still_correlates_the_header_with_the_audit_record(make_client) -
 
     assert response.status_code == 200
     assert audit_of(gateway, response)["request_id"] == response.headers[HEADER_REQUEST_ID]
+
+
+# ---------------------------------------------------------------------------
+# ADR-033 — registered but unloadable (state (c)), end to end
+# ---------------------------------------------------------------------------
+
+
+ABSENT_DEP = "onnxruntime_absent_on_purpose"
+
+
+@pytest.fixture
+def unloadable_tier2(monkeypatch):
+    """Make `tier2_injection` genuinely unloadable, without faking a load (ADR-033 rule 4).
+
+    Two monkeypatches, and both are needed for the state to be *reachable* rather than
+    simulated. `_probe_scope` widens the probe to a detector Tier-2 has not yet bound into
+    `LIVE` — which is what a post-Tier-2 boot will look like — and `REQUIREMENTS` points it
+    at a module that does not exist on any host, so `find_spec` reports a real absence.
+    Nothing installs a stub loader: a probe satisfied by a fake would assert the opposite of
+    the invariant.
+    """
+    monkeypatch.setattr(availability, "REQUIREMENTS", {"tier2_injection": (ABSENT_DEP,)})
+    monkeypatch.setattr(app_module, "_probe_scope", lambda: ("tier2_injection",))
+
+
+def fail_open_policies(tmp_path):
+    """A policy dir whose every use case maps `tier2: fail_open`.
+
+    `support_bot` and `hr_copilot` copied as shipped — **not** `finance_advisor` with its
+    `fail_mode` edited. ADR-033 rule 4 permits re-pointing a test at a fail-open fixture and
+    forbids relaxing the strict policy, because a suite that edits `fail_closed` to get green
+    is testing a configuration nobody ships.
+    """
+    policy_dir = tmp_path / "fail_open_policies"
+    policy_dir.mkdir()
+    for name in ("support_bot.yaml", "hr_copilot.yaml"):
+        shutil.copy(ROOT / "policies" / name, policy_dir)
+    return PolicyStore(policy_dir)
+
+
+def test_the_probe_scope_is_the_union_of_both_binding_mechanisms() -> None:
+    """The gateway binds detectors two ways and they disagree; the probe must see both.
+
+    `pipeline.LIVE` is what the served path calls; `_REGISTRY` is the eval harness's route.
+    Probing only the registry leaves the mechanism inert on the served path (it is empty in
+    this process), and probing only `LIVE` misses a harness registration. Neither omission
+    fails loudly, so the union is pinned here.
+    """
+    assert set(pipeline.LIVE) <= set(app_module._probe_scope())
+    assert set(registered_names()) <= set(app_module._probe_scope())
+
+
+def test_a_healthy_host_produces_an_empty_manifest(make_client) -> None:
+    """The mechanism must be INERT until a detector actually fails to load.
+
+    Every detector in `LIVE` today is a regex pass that imports nothing, so a non-empty
+    manifest here would mean the probe is inventing absences — and every request would carry
+    a false `unavailable[]` entry.
+    """
+    _, gateway, _ = make_client()
+    assert gateway.detector_manifest == ()
+    assert gateway.detectors_unloadable == {}
+
+
+def test_a_fail_closed_policy_refuses_the_boot(unloadable_tier2, tmp_path) -> None:
+    """★ ADR-033 rule 2: the shipped `finance_advisor` maps `tier2: fail_closed`.
+
+    Refusal happens at boot, from the lifespan hook — the FR-GW-006 canary's precedent. A
+    gateway that started here would promise fail-closed Tier-2 protection on every
+    `finance_advisor` request while recording the absence in a column nobody watches.
+    """
+    gateway = Gateway(
+        dispatcher=Stub("fine"), metrics=MetricsRegistry(),
+        db_path=str(tmp_path / "audit.db"), key_map={},
+    )
+    assert gateway.detectors_unloadable == {"tier2_injection": ABSENT_DEP}
+
+    with pytest.raises(DetectorUnavailableError) as exc:
+        with TestClient(create_app(gateway)):
+            pass
+    assert "finance_advisor" in str(exc.value)
+
+
+def test_a_bare_testclient_does_not_enforce_availability(unloadable_tier2, tmp_path) -> None:
+    """Same lifespan property the canary test pins, for the same reason.
+
+    Enforcement is a boot decision, so it fires under `with TestClient(app)` and not under a
+    bare call. This is why adding the hook left the existing suite intact, and it is worth
+    pinning separately from the refusal above.
+    """
+    gateway = Gateway(
+        dispatcher=Stub("fine"), metrics=MetricsRegistry(),
+        db_path=str(tmp_path / "audit.db"), key_map={},
+    )
+    assert TestClient(create_app(gateway)).get("/metrics").status_code == 200
+
+
+def test_a_fail_open_policy_set_warns_loudly_and_still_serves(
+    unloadable_tier2, tmp_path
+) -> None:
+    """Availability over strictness is a documented per-use-case choice (04 §5, 01 §3)."""
+    gateway = Gateway(
+        store=fail_open_policies(tmp_path), dispatcher=Stub("All good here."),
+        metrics=MetricsRegistry(), db_path=str(tmp_path / "audit.db"), key_map={},
+    )
+    with pytest.warns(DetectorUnavailableWarning, match="UNLOADABLE"):
+        with TestClient(create_app(gateway)) as client:
+            assert client.get("/metrics").status_code == 200
+
+
+def test_an_unloadable_detector_is_recorded_as_unavailable_not_not_run(
+    unloadable_tier2, tmp_path
+) -> None:
+    """★ The distinction the third state exists for (05 §4).
+
+    `tier2_injection` is in the input lane and absent from `LIVE`, so it reaches
+    `note_missing` exactly as an unimplemented detector would. Filing it as
+    `not_implemented` would be a false statement in an append-only table: the detector
+    exists, and what is missing is a dependency this record can name.
+    """
+    gateway = Gateway(
+        store=fail_open_policies(tmp_path), dispatcher=Stub("All good here."),
+        metrics=MetricsRegistry(), db_path=str(tmp_path / "audit.db"), key_map={},
+    )
+    with pytest.warns(DetectorUnavailableWarning):
+        with TestClient(create_app(gateway), raise_server_exceptions=False) as client:
+            response = post(client, "support_bot", prompt=CLEAN_INPUT["text"])
+
+    assert response.status_code == 200
+    detectors = audit_of(gateway, response)["detectors"]
+    assert detectors["unavailable"] == [
+        {"detector": "tier2_injection", "missing": ABSENT_DEP}
+    ]
+    not_run = {entry["detector"] for entry in detectors["not_run"]}
+    assert "tier2_injection" not in not_run, "a detector may be in at most one list"
+    assert gateway.metrics.value_of(
+        "cp_detector_unavailable_total", detector="tier2_injection"
+    ) == 1.0
+
+
+def test_the_missing_dependency_is_an_import_name_never_a_traceback(
+    unloadable_tier2, tmp_path
+) -> None:
+    """NFR-SEC-001 shape rule: `missing` is a dependency name, like `error_class` is a class.
+
+    A caught `ImportError`'s message would be the convenient thing to store and can carry
+    absolute paths and interpreter internals into a column that is published in reports.
+    """
+    gateway = Gateway(
+        store=fail_open_policies(tmp_path), dispatcher=Stub("All good here."),
+        metrics=MetricsRegistry(), db_path=str(tmp_path / "audit.db"), key_map={},
+    )
+    with pytest.warns(DetectorUnavailableWarning):
+        with TestClient(create_app(gateway), raise_server_exceptions=False) as client:
+            response = post(client, "support_bot", prompt=CLEAN_INPUT["text"])
+
+    missing = audit_of(gateway, response)["detectors"]["unavailable"][0]["missing"]
+    assert missing == ABSENT_DEP
+    assert "/" not in missing and "\n" not in missing and "Error" not in missing
+
+
+def test_a_healthy_boot_omits_the_key_rather_than_writing_an_empty_list(
+    make_client,
+) -> None:
+    """`[]` would assert "this boot loaded everything" — a claim older rows never made.
+
+    The ADR-027 Amendment 1 distinction between `[]` and absent, applied to this column: an
+    absent key stays silent instead of back-dating a guarantee.
+    """
+    client, gateway, _ = make_client("All good here.")
+    response = post(client, "support_bot", prompt=CLEAN_INPUT["text"])
+    assert "unavailable" not in audit_of(gateway, response)["detectors"]

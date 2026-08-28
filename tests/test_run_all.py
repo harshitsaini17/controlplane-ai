@@ -28,10 +28,15 @@ from eval.policy_matrix import (
     reconcile,
 )
 from eval.run_all import (
+    DEMOTED,
     IMPLEMENTED,
     IMPLEMENTED_LABELS,
+    SCORED,
+    SCORED_V1,
     SKIPPED,
+    UNLOADABLE,
     V1_BASELINE,
+    _demote_unloadable,
     DetectorResult,
     LabelScore,
     _revision_section,
@@ -579,3 +584,89 @@ def test_frozen_v1_modules_are_byte_identical_to_their_source_commit() -> None:
             f"{frozen}.py no longer contains {original}.py from {source[:7]} verbatim — "
             "the v1 baseline has drifted and every v1 figure is now unreproducible"
         )
+
+
+# ---------------------------------------------------------------------------
+# ADR-033 state (c) — implemented but unloadable, reported not scored
+# ---------------------------------------------------------------------------
+
+
+def test_the_partition_loses_no_detector_and_duplicates_none() -> None:
+    """`SCORED` ⊎ `DEMOTED` must reconstruct `IMPLEMENTED` exactly.
+
+    Rule 1 is "measured or absent", and a detector that fell out of both lists would be
+    neither: silently dropped from the report while every stated total still balanced.
+    """
+    assert [d.name for d in SCORED] + [d.name for d in DEMOTED] == [
+        d.name for d in IMPLEMENTED
+    ]
+    assert not {d.name for d in SCORED} & {d.name for d in DEMOTED}
+
+
+def test_this_host_scores_everything_it_implements() -> None:
+    """Documents the local truth and guards the inert case.
+
+    The three shipped detectors are regex passes that import nothing, so a non-empty
+    `DEMOTED` here would mean the probe is inventing absences and suppressing real
+    measurements — a silent loss of coverage in the eval report.
+    """
+    assert UNLOADABLE == {}
+    assert DEMOTED == ()
+    assert [d.name for d in SCORED_V1] == [d.name for d in V1_BASELINE]
+
+
+def test_an_unloadable_detector_is_demoted_out_of_scoring(monkeypatch) -> None:
+    """★ The branch, exercised in the only direction a healthy host can exercise it.
+
+    `UNLOADABLE` is patched — the probe's *result*, not the import system. That is the
+    opposite direction from what ADR-033 rule 4 forbids: rule 4 bars faking a load to make
+    an absent detector look present, which would launder a coverage claim. Declaring a
+    present detector absent cannot launder anything, and the probe itself is tested against
+    a genuinely missing module in `tests/test_detector_availability.py`.
+    """
+    monkeypatch.setattr("eval.run_all.UNLOADABLE", {"tier1_pii": "some_dependency"})
+    scored, baselines, rows = _demote_unloadable()
+
+    assert "tier1_pii" not in {d.name for d in scored}
+    assert "tier1_pii" not in {d.name for d in baselines}, "the v1 baseline goes too"
+    assert [r.name for r in rows] == ["tier1_pii"]
+
+
+def test_the_demotion_reason_names_the_dependency_and_not_a_missing_implementation(
+    monkeypatch,
+) -> None:
+    """The two states must not collapse into one sentence in the report.
+
+    "not implemented" would be false — the detector exists and was scored on the last host
+    — and a reader comparing two reports would conclude the code regressed rather than that
+    the environment differs.
+    """
+    monkeypatch.setattr("eval.run_all.UNLOADABLE", {"numeric_claims": "sentence_transformers"})
+    _, _, rows = _demote_unloadable()
+
+    assert "sentence_transformers" in rows[0].reason
+    assert "unloadable" in rows[0].reason.lower()
+    assert "not implemented" not in rows[0].reason.lower()
+
+
+def test_the_demotion_reason_is_built_from_the_probe_not_typed(monkeypatch) -> None:
+    """"Consumes the same state" (Ruling 2 semantics 3), pinned.
+
+    A hand-written dependency name beside `REQUIREMENTS` is two declarations that can
+    disagree, and the prose one is the one nobody updates.
+    """
+    monkeypatch.setattr("eval.run_all.UNLOADABLE", {"tier1_blocklist": "a_renamed_package"})
+    _, _, rows = _demote_unloadable()
+    assert "a_renamed_package" in rows[0].reason
+
+
+def test_demoted_labels_are_not_claimed_as_covered() -> None:
+    """`IMPLEMENTED_LABELS` gates the end-to-end matrix's covered slice.
+
+    Derived from `SCORED`, so a host missing a dependency cannot report a matrix over labels
+    no detector could emit that run — which would score every one of them as a miss.
+    """
+    assert IMPLEMENTED_LABELS == frozenset(
+        label for dut in SCORED for label in dut.scope
+    )
+    assert not {label for dut in DEMOTED for label in dut.scope} & IMPLEMENTED_LABELS

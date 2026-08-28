@@ -1182,3 +1182,86 @@ either, and the bound case is in the >500 ms class on either.
 **Docs touched:** 01 (NFR-P-002 gains the single-window scope), 04 §2 (`tier2_injection` row),
 06 §4 (the untargeted window-count series joins the reported set), 08 (both D3s closed; the
 `cost.request_too_large` M-row).
+
+---
+
+## ADR-033 — A detector has three lifecycle states, not two: "registered but unloadable" is a boot-time condition (resolves `[D1-not-run-vocabulary-cannot-say-dependency-absent]`)
+
+**Status:** Accepted 2026-08-28.
+**Context.** 05 §4 fixed `not_run[].reason` to a closed vocabulary with one member,
+`not_implemented`, defined as *"the detector has no live implementation in this phase"*. That was
+true while every model-backed detector was a stub. The moment one gains an implementation, a host
+without the `[ml]` extra has **no truthful value to record**: the detector exists, so
+`not_implemented` is a false statement, and it was the only member admitted. The host is not
+hypothetical — `.github/workflows/ci.yml` installs `.[dev]` only and says the model stack is
+*deliberately* absent. Worse, because 05 §4 states that a not-run entry is **not** a
+`DetectorFailureRecord` ("no attempt was made, so there is no fault"), `finance_advisor`'s
+`tier2: fail_closed` was **silently not honoured** on such a host: the request passed with a
+coverage note and nothing resolved a fail mode. The gap is generic — `rag_grounding`
+(sentence-transformers), `entity_enricher` (spaCy) and the Tier-2 pair (onnxruntime/transformers)
+reach it identically.
+
+### Decision — three states, each with its own record
+
+| # | State | Record |
+|---|---|---|
+| (a) | **Not registered** for this stage or switched off by policy | absent from `ran`; absent from `not_run` — it was never expected (existing 05 §4 semantics) |
+| (b) | **Loaded and ran** | `Signal`s, or a `DetectorFailureRecord` on runtime fault (existing 04 §5) |
+| (c) | **Registered but unloadable** — dependency absent at load | **NEW**: boot manifest + `detectors.unavailable[]` on every affected record |
+
+State (c) is a **boot-time condition**, and that is the whole of why it needs its own
+representation. It is never a per-request `DetectorFailureRecord` — nothing ran, so there is no
+fault, no `error_class` and no timestamp that means anything. And it is never a silent not-run,
+because coverage **was** promised: a policy names the detector's class and a use case expects it.
+
+### Semantics
+
+1. **Boot-time load probe.** At startup each registered detector that declares a loader attempts
+   it. Failures do not raise; they enter a **boot manifest** naming the detector and the missing
+   dependency. A detector with no loader (every deterministic Tier-1 emitter) is trivially
+   available.
+2. **Enforcement mirrors FR-GW-006's canary**, which is the precedent for "a boot may refuse":
+   - If **any active policy** maps an unavailable detector's class to **`fail_closed`** →
+     **BOOT FAILS** with an error naming the detector, the missing dependency, and the policies
+     that require it. You cannot promise fail-closed protection with the protector absent; a
+     gateway that boots into that state is asserting a guarantee it structurally cannot keep.
+   - If **every** policy using it is **`fail_open`** → boot proceeds with a **loud warning**;
+     every affected request's audit record carries the detector in `detectors.unavailable[]`
+     (distinct from `ran`, from `not_run`, and from `detector_failures`), and
+     `cp_detector_unavailable_total{detector}` counts it.
+3. **`eval/run_all` consumes the same state** rather than keeping a parallel notion of "skipped".
+   Its skip-and-report already exists; what changes is that "no implementation" and "dependency
+   absent" stop sharing one label.
+4. **Test environments without the `[ml]` extra run via `fail_open`-configured policies or
+   explicit registration stubs — never by faking a load.** A stubbed detector that reports itself
+   loaded would make the boot check pass by lying, which is the failure this ADR exists to
+   prevent, reintroduced one layer down.
+
+### Consequences
+
+1. **CI cannot boot the gateway against the shipped policies once the Tier-2 pair lands, and that
+   is correct.** `finance_advisor.yaml` sets `tier2: fail_closed`; CI has no `onnxruntime`. Per
+   rule 2 that boot must fail. Tests that boot against the real `policies/` directory are
+   re-pointed at fail-open fixtures per rule 4 — **not** by installing a fake loader and **not**
+   by relaxing `finance_advisor`. The alternative, a green CI booting a gateway whose fail-closed
+   promise is void, is exactly the silent non-enforcement this deviation reported.
+2. `05 §3`/`§4` gain `detectors.unavailable[]` (entries `{detector, missing}`); the write-path
+   validator enforces it, and a detector may appear in **at most one** of `ran`, `not_run`,
+   `unavailable` — the same trustworthiness rule the existing `ran`/`not_run` overlap check
+   enforces, extended to three lists.
+3. `05 §5` gains `cp_detector_unavailable_total{detector}`.
+4. `04 §5` gains state (c) beside the fail-open/fail-closed resolution table, since a reader of the
+   failure semantics needs to know that one case never reaches them.
+5. **`not_implemented` keeps its exact meaning** and its place in the vocabulary. This ADR does not
+   redefine it; it stops it being asked to carry a second meaning. `dependency_unavailable` is
+   deliberately **not** added as a `not_run` reason — that would put a boot-time environment fact
+   in a per-request coverage field, where every request restates it and no reader can tell whether
+   the promise was ever keepable.
+6. `entity_enricher` is the one detector with no `fail_mode` class at all (04 §2.2: enrichment
+   failure skips and logs and never blocks, and `DETECTOR_FAIL_CLASS` omits it deliberately). It
+   therefore can **never** trigger a boot failure — there is no class to map to `fail_closed` —
+   and its unavailability is a warning plus a record entry, always. Stated because "no class"
+   reads like an oversight until it is written down.
+
+**Docs touched:** 04 §5 (state (c)), 05 §3 (the DDL comment), 05 §4 (the coverage contract and the
+JSON view), 05 §5 (the metric), 08 (deviation closed).

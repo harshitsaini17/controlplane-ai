@@ -35,6 +35,7 @@ from typing import Any, Iterable, Sequence
 
 from controlplane.detectors._v1_numeric_claims import numeric_claims as v1_numeric_claims
 from controlplane.detectors._v1_tier1_patterns import tier1_pii as v1_tier1_pii
+from controlplane.detectors.availability import probe_availability
 from controlplane.detectors.base import DetectorContext, Signal, Stage
 from controlplane.detectors.numeric_claims import numeric_claims
 from controlplane.detectors.tier1_patterns import tier1_blocklist, tier1_pii
@@ -194,6 +195,55 @@ SKIPPED: tuple[SkippedDetector, ...] = (
 )
 
 
+#: `{detector: missing dependency}` on THIS host, from ADR-033's single declaration.
+#: Probed once per process: `find_spec` is deterministic, and re-probing per case would ask
+#: the same question a few thousand times.
+UNLOADABLE: dict[str, str] = {
+    entry.detector: entry.missing
+    for entry in probe_availability([dut.name for dut in (*IMPLEMENTED, *V1_BASELINE)])
+}
+
+
+def _demote_unloadable() -> tuple[
+    tuple[DetectorUnderTest, ...], tuple[DetectorUnderTest, ...], tuple[SkippedDetector, ...]
+]:
+    """Partition the implemented detectors by whether this host can load them (ADR-033).
+
+    This is rule 1 ("measured or absent") applied to a case it did not originally have a
+    word for. A detector whose dependency is absent produces no signals, so scoring it
+    would emit precision/recall of 0.0 — a **fabricated failing number** for a detector
+    that was never asked a question. Reporting it beside the stubs is the honest handling,
+    with one difference that has to survive into the table: its reason is a missing
+    dependency, not a missing implementation.
+
+    The reason string is built from the probe rather than typed, which is the "consumes the
+    same state" part of the ruling. A hand-written "needs sentence-transformers" beside a
+    `REQUIREMENTS` entry naming the same module is two declarations that can disagree, and
+    the one in prose is the one nobody updates.
+    """
+    scored, demoted = [], []
+    for dut in IMPLEMENTED:
+        if dut.name in UNLOADABLE:
+            demoted.append(dut)
+        else:
+            scored.append(dut)
+    baselines = tuple(d for d in V1_BASELINE if d.name not in UNLOADABLE)
+    rows = tuple(
+        SkippedDetector(
+            dut.name,
+            tuple(sorted(dut.scope)),
+            f"**implemented but unloadable on this host** — missing `{UNLOADABLE[dut.name]}` "
+            f"(ADR-033 state (c)). Not scored: a detector that could not load answers no "
+            f"question, and 0.0 would read as a failing detector",
+        )
+        for dut in demoted
+    )
+    return tuple(scored), baselines, rows
+
+
+SCORED, SCORED_V1, DEMOTED = _demote_unloadable()
+
+
 # --------------------------------------------------------------------------
 # Metrics
 # --------------------------------------------------------------------------
@@ -291,8 +341,10 @@ async def _run(dut: DetectorUnderTest, case: dict[str, Any]) -> list[Signal]:
 #: Every label an implemented detector can emit — the coverage test for the end-to-end
 #: matrix. Derived from the `IMPLEMENTED` scopes rather than restated, so landing a detector
 #: widens the matrix automatically and cannot drift from what is actually scored.
+#: `SCORED`, not `IMPLEMENTED`: on a host missing a dependency the end-to-end matrix must
+#: not claim to cover labels no detector can emit this run (ADR-033).
 IMPLEMENTED_LABELS: frozenset[str] = frozenset(
-    label for dut in IMPLEMENTED for label in dut.scope
+    label for dut in SCORED for label in dut.scope
 )
 
 
@@ -307,7 +359,7 @@ def collect_emissions(cases: Sequence[dict[str, Any]]) -> dict[str, list[Signal]
     for case in cases:
         stage = _KIND_STAGE[case["kind"]]
         signals: list[Signal] = []
-        for dut in IMPLEMENTED:
+        for dut in SCORED:
             if stage not in dut.stages:
                 continue
             signals.extend(asyncio.run(_run(dut, case)))
@@ -345,7 +397,7 @@ def evaluate(cases: Sequence[dict[str, Any]]) -> tuple[list[DetectorResult], int
     excluded them by design. Which turn breached is not a field, so it cannot be recovered
     mechanically; the honest handling is to exclude and say so with the count.
     """
-    scored = (*IMPLEMENTED, *V1_BASELINE)
+    scored = (*SCORED, *SCORED_V1)
     results = [
         DetectorResult(name=d.name, note=d.note, variant=d.variant) for d in scored
     ]
@@ -766,12 +818,12 @@ def build_report(
     ]
 
     lines += _skipped_section()
-    for skipped in SKIPPED:
+    for skipped in (*SKIPPED, *DEMOTED):
         unscored = sum(label_counts.get(label, 0) for label in skipped.labels)
         labels = " · ".join(f"`{label}`" for label in skipped.labels)
         lines.append(f"| `{skipped.name}` | {labels} | {unscored} | {skipped.reason} |")
     total_unscored = sum(
-        label_counts.get(label, 0) for s in SKIPPED for label in s.labels
+        label_counts.get(label, 0) for s in (*SKIPPED, *DEMOTED) for label in s.labels
     )
     lines += [
         "",
@@ -946,8 +998,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     recall = pii_v2.recall if pii_v2 else None
     print(f"wrote {out_path}")
     print(f"  cases loaded      : {len(cases)}")
-    print(f"  detectors scored  : {len(IMPLEMENTED)} of {len(IMPLEMENTED) + len(SKIPPED)}"
-          f" (+{len(V1_BASELINE)} frozen v1 baselines)")
+    print(f"  detectors scored  : {len(SCORED)} of"
+          f" {len(SCORED) + len(SKIPPED) + len(DEMOTED)}"
+          f" (+{len(SCORED_V1)} frozen v1 baselines)")
+    for name, missing in sorted(UNLOADABLE.items()):
+        print(f"  UNLOADABLE        : {name} (missing {missing}) — reported, not scored")
     print(f"  tier1_pii recall  : v1 {_fmt(pii_v1.recall if pii_v1 else None, digits=4)}"
           f" -> v2 {_fmt(recall, digits=4)} (NFR-EVAL-001 target 0.95)")
     print(f"  tier1_pii prec.   : v1 {_fmt(pii_v1.precision if pii_v1 else None, digits=4)}"

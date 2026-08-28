@@ -404,6 +404,8 @@ Resolution by policy `fail_mode` for that detector's class — **semantics uncha
   silent BLOCK — a human sees why). A *floor*, not an override: §4.2 severity still lets a
   genuine content BLOCK win, so failure handling can never downgrade a block into a release.
 
+**A third state never reaches this resolution at all (ADR-033).** The two modes above resolve a detector that *ran and faulted*. A detector that is **registered but unloadable** — its dependency absent at load — produced no fault to resolve: nothing ran, so there is no `error_class` and no `fail_mode_applied`. It is a **boot-time** condition, recorded in `detectors.unavailable[]` and counted by `cp_detector_unavailable_total{detector}`, and it is enforced at boot rather than per request: if any active policy maps that detector's class to `fail_closed`, **the gateway refuses to boot**, because a fail-closed promise with the protector absent is a guarantee it cannot keep. Under `fail_open` for every policy that uses it, boot proceeds loudly and each affected record carries the entry. `entity_enricher` has no `fail_mode` class at all (§2.2) and so can never trigger the refusal.
+
 Records travel in `detector_failures_json`, never `signals_json` (05 §3/§4), and the §4.3
 step-5 stamp names contributing signal_ids **and** failure_record_ids — so an ESCALATE with
 zero content signals is self-explaining rather than a bare quarantine. Changing any fail_mode

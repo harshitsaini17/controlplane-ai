@@ -93,6 +93,12 @@ REGISTRY: dict[str, MetricSpec] = {
         MetricSpec("cp_enrichment_skipped_total", "counter", ("use_case", "reason"),
                    "enrichment stopped early — 10 ms/sentence aggregate cap or a "
                    "failure (04 §2.2); never blocks, not a fail_mode class"),
+        # ADR-033 state (c). No `use_case` label, deliberately: unloadability is a
+        # property of the PROCESS, identical for every request this boot, so a per-use-case
+        # breakdown would multiply one boot-time fact across the dashboard as if it varied.
+        MetricSpec("cp_detector_unavailable_total", "counter", ("detector",),
+                   "registered but unloadable at boot — dependency absent (ADR-033); "
+                   "counted per affected request, never a fault record"),
     )
 }
 

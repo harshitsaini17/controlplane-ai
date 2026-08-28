@@ -27,7 +27,7 @@ Two things this module deliberately does not do:
 from __future__ import annotations
 
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -166,10 +166,24 @@ class Coverage:
     (FR-AUD-001) but a streaming response is many sentences, so a per-unit list would be
     a list of lists answering a question nobody asks. The question coverage answers is
     "was this check ever applied to this response".
+
+    Three lists, not two (ADR-033), and a detector lands in **at most one**: `ran`,
+    `not_run` (expected, absent in this phase), `unavailable` (implemented, unloadable on
+    this host). The audit write path refuses an overlap outright.
     """
 
     ran: set[str] = field(default_factory=set)
     missing: dict[str, str] = field(default_factory=dict)
+    #: The ADR-033 boot manifest, `{detector: missing dependency}`, injected by the caller
+    #: that owns it (`Gateway`). READ-ONLY here: it is a fact about the process, identical
+    #: for every request of this boot, so accumulating it per request would be recording
+    #: the same finding many times over. What varies is which of these a given request
+    #: *expected* — and that is `unavailable` below.
+    unloadable: Mapping[str, str] = field(default_factory=dict)
+    #: The subset of `unloadable` this request would actually have exercised, `{detector:
+    #: missing}`. Scoped to expectation for the same reason `not_run` is (05 §4): a
+    #: detector no policy on this request would have called is not a coverage gap for it.
+    unavailable: dict[str, str] = field(default_factory=dict)
 
     def note_ran(self, detector: str) -> None:
         self.ran.add(detector)
@@ -178,14 +192,31 @@ class Coverage:
         self.missing.pop(detector, None)
 
     def note_missing(self, detector: str, reason: str = NOT_IMPLEMENTED) -> None:
-        if detector not in self.ran:
-            self.missing[detector] = reason
+        """File an expected-but-absent detector into `not_run` — or `unavailable`.
+
+        The branch is ADR-033's whole point. Both states reach this call site identically
+        (`LIVE` has no entry either way), but they are different claims: `not_implemented`
+        says this phase never wrote the detector, while `unavailable` says it exists and
+        this host could not load it. Recording state (c) as `not_implemented` would be a
+        false statement in an append-only table, and recording it as nothing at all would
+        drop a coverage promise silently — the two failures the third state exists to
+        separate. `reason` is ignored on that branch: the manifest names the dependency,
+        which is strictly more than a reason code can say.
+        """
+        if detector in self.ran:
+            return
+        missing = self.unloadable.get(detector)
+        if missing is not None:
+            self.unavailable[detector] = missing
+            return
+        self.missing[detector] = reason
 
     def serialize(self) -> str:
         """The `detectors_json` value. Sorted, so two identical requests audit identically."""
         return serialize_detectors(
             ran=sorted(self.ran),
             not_run=sorted((d, r) for d, r in self.missing.items()),
+            unavailable=sorted(self.unavailable.items()),
         )
 
 

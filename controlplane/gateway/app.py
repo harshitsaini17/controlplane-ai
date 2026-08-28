@@ -51,7 +51,12 @@ from controlplane.audit.records import (
     serialize_actions,
     write_record,
 )
-from controlplane.detectors.base import Signal, Stage
+from controlplane.detectors.availability import (
+    Unavailable,
+    enforce_at_boot,
+    probe_availability,
+)
+from controlplane.detectors.base import Signal, Stage, registered_names
 from controlplane.gateway import pipeline
 from controlplane.gateway.canary import CanaryResult, canary_on_startup
 from controlplane.gateway.config import GatewayConfig, UpstreamClass, load_gateway_config
@@ -96,6 +101,30 @@ class CanaryUnavailableWarning(UserWarning):
     dev-class provider. This one means it never ran, so the boot carries no verdict
     either way — a state the operator must be able to tell from a pass.
     """
+
+
+class DetectorUnavailableWarning(UserWarning):
+    """A registered detector could not be loaded this boot (ADR-033 state (c)).
+
+    Non-fatal by ruling, not by preference: it is emitted only once
+    `policies_requiring_fail_closed` has confirmed every policy that could use the
+    detector resolves it `fail_open`. The fail_closed case raises instead. Loud because
+    the boot succeeded with **less coverage than the policies describe** — a state that
+    looks identical to a healthy one in every place except the audit column.
+    """
+
+
+def _probe_scope() -> tuple[str, ...]:
+    """Which detectors ADR-033's "each registered detector" means here.
+
+    The union of both binding mechanisms, because the gateway has two and they disagree:
+    `pipeline.LIVE` is what the production path actually calls, while `_REGISTRY` exists
+    for the eval harness (`pipeline.LIVE`'s own docstring says so). Probing only the
+    registry would leave the mechanism permanently inert on the served path — it returns
+    `()` in this process — and probing only `LIVE` would miss a detector the harness
+    registered. Neither omission fails loudly, which is why the scope is the union.
+    """
+    return tuple(sorted(set(pipeline.LIVE) | set(registered_names())))
 
 
 def _sse(payload: dict[str, Any]) -> str:
@@ -185,6 +214,14 @@ class Gateway:
         # and "never checked" the same value — the M-10 mistake in a different column.
         self.canary: CanaryResult | None = None
         self.canary_error: str | None = None
+        # ADR-033 state (c), probed HERE rather than in the lifespan hook: importability
+        # is a property of the process, every request needs the answer, and a `Gateway`
+        # built without lifespan (`TestClient(app)` bare, the eval harness) must still
+        # record coverage honestly. Enforcement is the part that belongs at boot.
+        self.detector_manifest: tuple[Unavailable, ...] = probe_availability(_probe_scope())
+        self.detectors_unloadable: dict[str, str] = {
+            entry.detector: entry.missing for entry in self.detector_manifest
+        }
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -282,6 +319,12 @@ class Gateway:
         self.metrics.increment(
             "cp_requests_total", use_case=request.use_case, verdict=verdict.action.value
         )
+        # Per affected request, not once per boot (ADR-033): the manifest is process-wide,
+        # but what this counter answers is how much coverage requests actually lost. Scoped
+        # to `coverage.unavailable`, so a detector no request on this policy would have
+        # called does not inflate the figure.
+        for detector in sorted(coverage.unavailable):
+            self.metrics.increment("cp_detector_unavailable_total", detector=detector)
         overhead = latency.get("total_attributable_overhead_ms")
         if overhead is not None:
             self.metrics.observe(
@@ -344,6 +387,23 @@ async def run_startup_canary(state: Gateway) -> None:
         )
 
 
+def enforce_detector_availability(state: Gateway) -> None:
+    """Apply ADR-033 rule 2 to the manifest `Gateway.__init__` probed.
+
+    Raises `DetectorUnavailableError` when an unloadable detector is `fail_closed` in any
+    active policy, and otherwise warns per surviving entry. Both outcomes are decided by
+    `enforce_at_boot`; this adds only the policy set to read and the warning channel.
+
+    Runs BEFORE the canary. A boot that is going to refuse for a locally-knowable reason
+    should not first spend an upstream round trip proving the provider counts tokens
+    correctly — and on the fail_open path the operator wants the reduced-coverage warning
+    above the canary's output, not buried under it.
+    """
+    policies = [state.store.get(use_case) for use_case in state.store.use_cases]
+    for line in enforce_at_boot(state.detector_manifest, policies):
+        warnings.warn(line, DetectorUnavailableWarning, stacklevel=2)
+
+
 def create_app(gateway: Gateway | None = None) -> FastAPI:
     """Build the ASGI app. `gateway` is injectable so tests need no real upstream.
 
@@ -356,6 +416,7 @@ def create_app(gateway: Gateway | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        enforce_detector_availability(state)
         await run_startup_canary(state)
         yield
 
@@ -437,7 +498,7 @@ async def handle_completion(state: Gateway, http_request: Request) -> Response:
                      key_map=state.key_map, request_id=request_id)
     ingress_ms = (time.perf_counter() - ingress_started) * 1000.0
 
-    coverage = pipeline.Coverage()
+    coverage = pipeline.Coverage(unloadable=state.detectors_unloadable)
     latency: dict[str, Any] = {spans.INGRESS: ingress_ms}
 
     input_started = time.perf_counter()

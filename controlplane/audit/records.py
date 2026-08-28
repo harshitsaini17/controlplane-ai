@@ -31,6 +31,7 @@ to invent a number).
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import uuid
 from dataclasses import dataclass, field
@@ -113,15 +114,32 @@ ID_LIST_COLUMNS: tuple[str, ...] = ("contributing_signal_ids", "failure_record_i
 #: tell whether it means "never happens" or "we stopped recording it".
 NOT_RUN_REASONS: frozenset[str] = frozenset({"not_implemented"})
 
-#: Coverage column (M-10). Deliberately NOT in `CONTENT_COLUMNS`: every string it can hold
-#: is checked against a closed vocabulary below — detector names against the 04 §2 registry
-#: (`BUDGETS_MS`) and reasons against `NOT_RUN_REASONS` — which is a strictly stronger
-#: guarantee than the shape tripwire. A value that must be one of eleven known names cannot
-#: be a raw value, so scanning it would add a false-positive surface and no safety.
+#: ADR-033 deliberately does NOT add a `dependency_unavailable` member above: a boot-time
+#: environment fact restated once per request leaves unanswerable whether the coverage promise
+#: was ever keepable. It gets its own list (`unavailable[]`) and a boot check instead.
+#:
+#: `unavailable[].missing` names the absent dependency — an import name (`onnxruntime`) or a
+#: model name (`en_core_web_sm`), NEVER an exception message: a traceback can quote the very
+#: content under check, which is the NFR-SEC-001 rule `error_class` follows for the same reason.
+#: Enforced by shape because the set of dependency names is not closed.
+DEPENDENCY_NAME = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
+
+#: Coverage column (M-10). Deliberately NOT in `CONTENT_COLUMNS`: almost every string it can
+#: hold is checked against a closed vocabulary below — detector names against the 04 §2
+#: registry (`BUDGETS_MS`) and reasons against `NOT_RUN_REASONS` — which is a strictly
+#: stronger guarantee than the shape tripwire. A value that must be one of eleven known names
+#: cannot be a raw value, so scanning it would add a false-positive surface and no safety.
+#:
+#: ADR-033's `unavailable[].missing` is the **one** free-form string here, so it does not get
+#: that guarantee for free and is shape-constrained instead: an import or model name, matching
+#: `DEPENDENCY_NAME` below. The shape admits no whitespace and bounds length, which is what
+#: keeps the column's no-raw-values property true rather than merely still claimed.
 DETECTORS_COLUMN = "detectors_json"
 
 
-def serialize_detectors(*, ran: object = (), not_run: object = ()) -> str:
+def serialize_detectors(
+    *, ran: object = (), not_run: object = (), unavailable: object = ()
+) -> str:
     """Build the `detectors_json` value (05 §4). The one place this shape is constructed.
 
     `not_run` takes `(detector, reason)` pairs. Kept as a function rather than left to each
@@ -133,10 +151,19 @@ def serialize_detectors(*, ran: object = (), not_run: object = ()) -> str:
     the precise misreading this column exists to prevent, and no validation could catch it,
     since both orderings are perfectly well-formed.
     """
-    return json.dumps({
+    payload: dict[str, object] = {
         "ran": list(ran),
         "not_run": [{"detector": d, "reason": r} for d, r in not_run],
-    })
+    }
+    # Omitted when empty rather than written as `[]`, and the distinction is the one
+    # ADR-027 Amendment 1 draws: `[]` asserts "this boot loaded everything", which a
+    # record written before ADR-033 never claimed. An absent key stays silent instead of
+    # back-dating a guarantee onto older rows.
+    if list(unavailable):
+        payload["unavailable"] = [
+            {"detector": d, "missing": m} for d, m in unavailable
+        ]
+    return json.dumps(payload)
 
 
 def _check_detectors(payload: object) -> None:
@@ -153,11 +180,11 @@ def _check_detectors(payload: object) -> None:
     if not payload:
         return
 
-    unknown_keys = set(payload) - {"ran", "not_run"}
+    unknown_keys = set(payload) - {"ran", "not_run", "unavailable"}
     if unknown_keys:
         raise AuditWriteError(
             f"{DETECTORS_COLUMN} has unknown key(s) {sorted(unknown_keys)}; 05 §4 defines "
-            "`ran` and `not_run`"
+            "`ran`, `not_run` and `unavailable` (ADR-033)"
         )
 
     ran = payload.get("ran", [])
@@ -201,15 +228,62 @@ def _check_detectors(payload: object) -> None:
                 f"{sorted(NOT_RUN_REASONS)} (05 §4)"
             )
 
-    # A detector cannot both have run and not run. This is the check that makes the column
-    # trustworthy as coverage: without it a caller could satisfy every rule above and still
-    # write a record asserting both, which no reader could resolve.
-    overlap = sorted({e["detector"] for e in not_run} & set(ran))
-    if overlap:
+    # ADR-033 state (c): registered but unloadable. Absent key is legal — a record written
+    # before this ADR claims nothing about loadability, and `[]` would claim everything
+    # loaded.
+    unavailable = payload.get("unavailable", [])
+    if isinstance(unavailable, str) or not isinstance(unavailable, list):
         raise AuditWriteError(
-            f"{DETECTORS_COLUMN}: {overlap} appear in both `ran` and `not_run`; a detector "
-            "either ran for this request or it did not"
+            f"{DETECTORS_COLUMN}.unavailable must be a list of {{detector, missing}} "
+            f"objects, got {type(unavailable).__name__} (ADR-033)"
         )
+    for index, entry in enumerate(unavailable):
+        if not isinstance(entry, dict):
+            raise AuditWriteError(
+                f"{DETECTORS_COLUMN}.unavailable[{index}] must be an object with "
+                f"`detector` and `missing`, got {type(entry).__name__}"
+            )
+        if set(entry) != {"detector", "missing"}:
+            raise AuditWriteError(
+                f"{DETECTORS_COLUMN}.unavailable[{index}] must have exactly `detector` and "
+                f"`missing`, got {sorted(entry)}"
+            )
+        if entry["detector"] not in BUDGETS_MS:
+            raise AuditWriteError(
+                f"{DETECTORS_COLUMN}.unavailable[{index}].detector = "
+                f"{entry['detector']!r} is not a detector in the 04 §2 registry; "
+                f"known: {sorted(BUDGETS_MS)}"
+            )
+        missing = entry["missing"]
+        # Shape, not vocabulary: dependency names are not a closed set. What the shape
+        # buys is the column's no-raw-values property — an exception message would carry
+        # whitespace and length, and could quote the content under check (NFR-SEC-001).
+        if not isinstance(missing, str) or not DEPENDENCY_NAME.match(missing):
+            raise AuditWriteError(
+                f"{DETECTORS_COLUMN}.unavailable[{index}].missing must be a dependency "
+                f"name matching {DEPENDENCY_NAME.pattern} — an import or model name, never "
+                f"an exception message (ADR-033, NFR-SEC-001); got {missing!r}"
+            )
+
+    # A detector is in AT MOST ONE of the three lists. This is the check that makes the
+    # column trustworthy as coverage: without it a caller could satisfy every rule above
+    # and still write a record asserting two states at once, which no reader could
+    # resolve. Pairwise rather than "ran vs the rest", because `not_run` and `unavailable`
+    # are the pair a caller is most likely to confuse — both mean "no signals from this
+    # detector", for entirely different reasons.
+    lists = {
+        "ran": set(ran),
+        "not_run": {e["detector"] for e in not_run},
+        "unavailable": {e["detector"] for e in unavailable},
+    }
+    for left, right in (("ran", "not_run"), ("ran", "unavailable"),
+                        ("not_run", "unavailable")):
+        overlap = sorted(lists[left] & lists[right])
+        if overlap:
+            raise AuditWriteError(
+                f"{DETECTORS_COLUMN}: {overlap} appear in both `{left}` and `{right}`; a "
+                "detector is in at most one of `ran`, `not_run`, `unavailable` (ADR-033)"
+            )
 
 
 class AuditWriteError(ValueError):
