@@ -347,6 +347,21 @@ All fast-path signals for the current unit (input stage, or one output sentence 
    policy_version → audit.
 ```
 
+**Request-level aggregation (owner ruling, 2026-08-28).** Steps 1–5 evaluate **one unit**, but
+05 §3 has one `verdict` column per request. The stamped verdict is therefore the **most severe
+action across every evaluated unit** of that request — the input lane (§4.5), every output unit,
+and the conversation stage — under the §4.2 total order. Not the last unit's, and not the output
+lane's alone: a request whose *prompt* was redacted did not "pass" because its response happened
+to be clean. So an input-stage EDIT with a clean output stamps `verdict=edit`, counts in
+`cp_requests_total{verdict=edit}`, and renders `X-ControlPlane-Actions: edit` per 05 §1.1; an
+input EDIT alongside an output BLOCK stamps `block`.
+
+The **evidence** carried with that stamp is the *union* over units, not the winning unit's row:
+`detector_failures_json` is read off the stamped verdict, so keeping one unit's record would drop
+a §5 fault from another unit whenever the two tied on severity. `contributing_signal_ids` and
+`failure_record_ids` still filter that union against the stamped action, which is what keeps
+"recorded but not contributing" (a `fail_open` fault under a PASS) representable.
+
 ### 4.4 Streaming interaction
 - PASS/EDIT: sentence (possibly transformed) is released; stream continues.
 - BLOCK: stream terminated; `messages.block_fallback` sent; remaining upstream tokens drained & discarded (still audited).

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import sqlite3
 import tempfile
 import threading
@@ -40,11 +41,24 @@ from controlplane.gateway.app import (
     HTTP_ESCALATE,
     CanaryUnavailableWarning,
     Gateway,
+    _request_verdict,
     create_app,
 )
 from controlplane.gateway.canary import UsageSanityError, UsageSanityWarning
 from controlplane.gateway.config import load_gateway_config
-from controlplane.gateway.ingress import HEADER_REQUEST_ID, HEADER_USE_CASE, UpstreamError
+from controlplane.gateway.ingress import (
+    HEADER_ACTIONS,
+    HEADER_REQUEST_ID,
+    HEADER_USE_CASE,
+    UpstreamError,
+)
+from controlplane.policy.engine import (
+    Action,
+    FailMode,
+    FailureOutcome,
+    Verdict,
+)
+from controlplane.policy.store import PolicyStore
 from controlplane.gateway.sse_proxy import UpstreamResponse
 from controlplane.telemetry.metrics import MetricsRegistry
 
@@ -992,3 +1006,160 @@ def test_the_canary_error_carries_no_credential_material(tmp_path) -> None:
             pass
     assert "sk-" not in (gateway.canary_error or "")
     assert "Bearer" not in (gateway.canary_error or "")
+
+
+# ---------------------------------------------------------------------------
+# Request-level verdict aggregation (04 §4.3 step 5)
+#
+# Owner live-test finding, 2026-08-28 — found by manual testing, not by this suite. A
+# request whose PROMPT was redacted and whose response was clean stamped `verdict=pass`:
+# the stamp was taken from the output unit alone, so the gateway's most demonstrable
+# privacy behaviour was invisible in the record, in `cp_requests_total`, and to the
+# caller. The stamp is now the most severe action across every evaluated unit.
+#
+# `support_bot` is the only shipped policy that maps `pii.*` to `edit`, and it is
+# `streaming: true` — so the reachable input-EDIT path is the streaming one, which is
+# also why the header case below is a streaming assertion.
+# ---------------------------------------------------------------------------
+
+
+def _redactions(view: dict) -> list:
+    """The record's input-stage redactions, however `actions` arrives in the view."""
+    raw = view.get("actions_json") or view.get("actions")
+    actions = json.loads(raw) if isinstance(raw, str) else raw
+    return actions.get("input_redactions", [])
+
+
+def test_input_edit_with_a_clean_output_stamps_edit_not_pass(make_client) -> None:
+    """The owner's case, end to end: prompt redacted, response clean, verdict `edit`.
+
+    The redaction is asserted first and unconditionally. Were `tier1_pii` to stop firing
+    on this frozen case, this test must fail rather than quietly agree that a request with
+    no redactions stamped `pass` — which is exactly how the original bug survived 962
+    tests.
+    """
+    client, gateway, stub = make_client(CLEAN_INPUT["text"])
+    response = post(client, "support_bot", prompt=PII["text"])
+
+    assert response.status_code == 200
+    view = audit_of(gateway, response)
+    assert len(_redactions(view)) == 1, "no input redaction — the scenario did not occur"
+
+    assert view["verdict"] == "edit"
+    assert gateway.metrics.value_of(
+        "cp_requests_total", use_case="support_bot", verdict="edit"
+    ) == 1.0
+
+
+def test_the_input_edit_reaches_the_caller_in_both_renderings(make_client) -> None:
+    """05 §1.1: an edited request carries `X-ControlPlane-Actions: edit`.
+
+    M-12 reads the header as non-streaming-only because headers precede the body — true of
+    an *output* edit, but an input redaction is decided before dispatch, so it is known
+    before this response's status line exists. The owner's transcript lacked this header;
+    it was never reachable, since the only `pii.* -> edit` policy streams.
+    """
+    client, gateway, _ = make_client(CLEAN_INPUT["text"])
+    response = post(client, "support_bot", prompt=PII["text"])
+
+    assert response.headers.get(HEADER_ACTIONS) == "edit"
+    final = frames(response)[-1]["controlplane"]
+    assert final["verdict"] == "edit"
+    assert len(final["actions"]["input_redactions"]) == 1
+    # The body reports the input stage as the input stage, not as an output edit.
+    assert final["actions"]["applied"] == []
+    assert final["actions"]["input_redactions"][0]["stage"] == "input"
+
+
+def test_input_edit_with_an_output_block_stamps_the_more_severe_action(make_client) -> None:
+    """Most severe across units, not last-unit-wins and not first: `block` beats `edit`.
+
+    `pii.api_key -> block` (ADR-024) in the response gives two units with different
+    actions. The record must still keep the input redaction, or the stamp would be the
+    only surviving trace that the prompt was touched.
+    """
+    client, gateway, _ = make_client(case("pii.jsonl", "PII-036")["text"])
+    response = post(client, "support_bot", prompt=PII["text"])
+
+    view = audit_of(gateway, response)
+    assert view["verdict"] == "block"
+    assert len(_redactions(view)) == 1, "the input redaction was dropped by the block path"
+    assert gateway.metrics.value_of(
+        "cp_requests_total", use_case="support_bot", verdict="block"
+    ) == 1.0
+
+
+def test_aggregation_unions_the_evidence_it_does_not_pick_one_unit() -> None:
+    """A tie on severity must not silently discard the other unit's fault records.
+
+    `from_verdict` reads `detector_failures_json` straight off the stamped verdict, so
+    returning whichever unit tied first would delete a `fail_open` fault from the record
+    whenever the input unit also passed. 04 §5 requires the fault to be recorded whether
+    or not it contributed — this is the regression that behaviour caught.
+    """
+    class _Req:
+        use_case = "support_bot"
+        policy_version = 2
+
+    fault = FailureOutcome(
+        detector="tier2_toxicity", error_class="TimeoutError", fail_class="timeout",
+        fail_mode=FailMode.FAIL_OPEN, action=None, failure_id="f-1",
+    )
+    clean_input = Verdict(action=Action.PASS, use_case="support_bot", policy_version=2)
+    output_with_fault = Verdict(
+        action=Action.PASS, use_case="support_bot", policy_version=2,
+        failure_outcomes=(fault,),
+    )
+
+    stamped = _request_verdict([clean_input, output_with_fault], _Req())
+    assert stamped.action is Action.PASS
+    assert stamped.failure_outcomes == (fault,), "the fault vanished on a severity tie"
+    # fail_open contributed nothing, so it must not appear as a *reason* for the verdict.
+    assert stamped.failure_record_ids == ()
+
+
+def test_aggregation_over_no_units_is_pass_not_an_error() -> None:
+    """An empty candidate list is a real state (nothing evaluated), and PASS is truthful."""
+    class _Req:
+        use_case = "hr_copilot"
+        policy_version = 3
+
+    stamped = _request_verdict([None], _Req())
+    assert stamped.action is Action.PASS
+    assert stamped.use_case == "hr_copilot"
+    assert stamped.policy_version == 3
+
+
+def test_the_buffered_path_aggregates_the_input_edit_too(make_client, tmp_path) -> None:
+    """The same rule on the non-streaming path — which no shipped policy can reach.
+
+    `support_bot` is the only policy mapping `pii.* -> edit` and it is `streaming: true`,
+    so the buffered branch of the aggregation is unreachable from `policies/` and would
+    otherwise be untested code that only looks correct. Flipping the flag on a copy is
+    legal here because the ADR-014 guard binds `consistency: on`, and this policy is
+    `on_sampled`.
+
+    The point is that the rule is a property of the aggregation and not of a delivery
+    mode: whichever path a future policy takes, a redacted prompt must not stamp `pass`.
+    """
+    policy_dir = tmp_path / "policies"
+    policy_dir.mkdir()
+    for path in (ROOT / "policies").glob("*.yaml"):
+        shutil.copy(path, policy_dir)
+    buffered = policy_dir / "support_bot.yaml"
+    buffered.write_text(buffered.read_text().replace("streaming: true", "streaming: false", 1))
+
+    client, gateway, stub = make_client(
+        CLEAN_INPUT["text"], store=PolicyStore(policy_dir)
+    )
+    response = post(client, "support_bot", prompt=PII["text"])
+
+    assert response.status_code == 200
+    assert not response.headers["content-type"].startswith("text/event-stream"), \
+        "the policy copy did not actually take the buffered path"
+
+    body = response.json()
+    assert body["controlplane"]["verdict"] == "edit"
+    assert len(body["controlplane"]["actions"]["input_redactions"]) == 1
+    assert response.headers.get(HEADER_ACTIONS) == "edit"
+    assert audit_of(gateway, response)["verdict"] == "edit"

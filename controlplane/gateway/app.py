@@ -444,7 +444,7 @@ async def handle_completion(state: Gateway, http_request: Request) -> Response:
     common = dict(
         state=state, request=request, messages=messages, coverage=coverage,
         latency=latency, input_signals=lane.signals, input_redactions=input_redactions,
-        started=started, held_ms=held_ms,
+        input_verdict=verdict, started=started, held_ms=held_ms,
     )
     if request.policy.streaming:
         return await _stream_response(**common)
@@ -507,7 +507,7 @@ async def _input_terminal(
 
 async def _buffered_response(
     *, state: Gateway, request, messages, coverage, latency, input_signals,
-    input_redactions, started: float, held_ms: float,
+    input_redactions, input_verdict: Verdict, started: float, held_ms: float,
 ) -> Response:
     """The ADR-014 non-streaming path: buffer fully, check once, deliver atomically.
 
@@ -547,12 +547,16 @@ async def _buffered_response(
 
     review_id = str(uuid.uuid4()) if outcome.action is Action.ESCALATE else None
 
+    # The stamped verdict spans both units this path evaluates (04 §4.3 step 5). `verdict`
+    # above is the OUTPUT unit's; an input-stage EDIT is invisible in it.
+    stamped = _request_verdict([input_verdict, verdict], request)
+
     total_ms = (time.perf_counter() - started) * 1000.0
     latency["gateway_overhead_ms"] = pipeline.gateway_overhead_ms(
         total_ms=total_ms, upstream_ms=upstream_ms, held_ms=held_ms, streaming=False,
     )
     state.audit(
-        request=request, verdict=verdict, stage_summary=STAGE_COMPLETED,
+        request=request, verdict=stamped, stage_summary=STAGE_COMPLETED,
         signals=tuple(input_signals) + tuple(lane.signals),
         coverage=coverage, latency=latency,
         actions_json=serialize_actions(
@@ -589,10 +593,14 @@ async def _buffered_response(
             headers=headers,
         )
 
-    controlplane: dict[str, Any] = {"verdict": outcome.action.value}
-    if outcome.applied:
+    # 05 §1.1's `edit` rendering follows the STAMPED verdict, not the output unit's: a
+    # prompt-only redaction is still an edited request, and the header is how a client
+    # learns that without parsing the body.
+    controlplane: dict[str, Any] = {"verdict": stamped.action.value}
+    if outcome.applied or input_redactions:
         headers[HEADER_ACTIONS] = "edit"
-        controlplane["actions"] = json.loads(serialize_actions(applied=outcome.applied))
+        controlplane["actions"] = json.loads(serialize_actions(
+            applied=outcome.applied, input_redactions=input_redactions))
     return JSONResponse(
         status_code=200,
         content=_completion_body(
@@ -605,7 +613,7 @@ async def _buffered_response(
 
 async def _stream_response(
     *, state: Gateway, request, messages, coverage, latency, input_signals,
-    input_redactions, started: float, held_ms: float,
+    input_redactions, input_verdict: Verdict, started: float, held_ms: float,
 ) -> Response:
     """The 02 §4 streaming path: check each sentence, release as we go (FR-GW-002).
 
@@ -815,16 +823,26 @@ async def _stream_response(
                     yield _final_frame(request.request_id, model, "stop",
                                        {"verdict": "escalate", "review_id": review_id})
             else:
-                controlplane: dict[str, Any] = {"verdict": "pass"}
-                if actions:
-                    controlplane["verdict"] = "edit"
-                    controlplane["actions"] = json.loads(serialize_actions(applied=actions))
+                # Same aggregation as the buffered path: the final frame reports the
+                # request, and an input-stage redaction happened even if no sentence was
+                # touched. Computed here so the frame and the audit record below cannot
+                # disagree about what this request's verdict was.
+                streamed = _request_verdict([input_verdict, *verdicts], request)
+                # One source for the verdict. Reaching this branch means nothing terminated,
+                # so the aggregate is `pass` or `edit` by construction — but deriving it from
+                # the same helper the audit record uses is what keeps the frame and the record
+                # from ever disagreeing, which a literal `"edit"` here would not.
+                controlplane: dict[str, Any] = {"verdict": streamed.action.value}
+                if actions or input_redactions:
+                    controlplane["actions"] = json.loads(serialize_actions(
+                        applied=actions, input_redactions=input_redactions))
                 yield _final_frame(request.request_id, model, "stop", controlplane)
 
             yield f"data: {DONE}\n\n"
 
             # -- audit (one record per request, FR-AUD-001) -------------------
-            final = _final_verdict(terminal, verdicts, request)
+            final = _request_verdict(
+                [input_verdict, _final_verdict(terminal, verdicts, request)], request)
             finalize_latency()
             state.audit(
                 request=request, verdict=final, stage_summary=STAGE_STREAMED,
@@ -850,9 +868,61 @@ async def _stream_response(
                     # see the rescue's failure instead of the defect that caused it.
                     pass
 
+    # M-12 reads 05 §1.1's `X-ControlPlane-Actions` header as non-streaming-only, because a
+    # header is committed to the wire before the first sentence is ever checked. That holds
+    # for *output* edits — but an input-stage redaction (ADR-020) is decided BEFORE dispatch,
+    # so it is known here, before this response's status line exists. Withholding it would
+    # make the header unreachable in practice rather than mode-specific: `support_bot` is the
+    # only shipped policy mapping `pii.*` to `edit`, and it is `streaming: true`.
+    stream_headers = {HEADER_REQUEST_ID: request.request_id}
+    if input_redactions:
+        stream_headers[HEADER_ACTIONS] = "edit"
+
     return StreamingResponse(
-        body(), media_type="text/event-stream",
-        headers={HEADER_REQUEST_ID: request.request_id},
+        body(), media_type="text/event-stream", headers=stream_headers,
+    )
+
+
+def _request_verdict(candidates: list[Verdict], request) -> Verdict:
+    """The one request-level verdict: most severe across **every** evaluated unit.
+
+    04 §4.3 step 5 stamps one verdict per request, and 05 §3 has one `verdict` column, but a
+    request is evaluated in several units — the input, then every output unit, plus the
+    conversation stage once `conv_tracker` is wired. The stamp is the most severe of them
+    (04 §4.2's total order), for the same reason `_final_verdict` takes the most severe
+    sentence rather than the last: a request whose *prompt* was redacted did not "pass"
+    because its response happened to be clean.
+
+    Owner live-test finding, 2026-08-28: an input-stage EDIT (ADR-020 pre-dispatch
+    redaction) with a clean output stamped `pass`, so the redaction was invisible to
+    `cp_requests_total{verdict}` and to the caller — the gateway's most demonstrable
+    privacy behaviour, unreported.
+
+    The action is the severest across units, but the *evidence* is the union of all of
+    them — not the winning unit's row. Picking one unit's Verdict would drop the other's
+    `failure_outcomes`, and `from_verdict` reads `detector_failures_json` straight off the
+    stamped verdict: a detector that failed `fail_open` during output scoring would vanish
+    from the record whenever the input unit tied it on severity. 04 §5 requires the fault
+    to be recorded whether or not it contributed, so the union is what makes
+    "recorded but not contributing" representable at all.
+
+    `contributing_signal_ids` and `failure_record_ids` then filter that union against the
+    stamped action by themselves, which is why merging is safe: an input PASS's signals do
+    not become contributors to an output BLOCK just by sharing a record.
+    """
+    present = [v for v in candidates if v is not None]
+    if not present:
+        return Verdict(action=Action.PASS, use_case=request.use_case,
+                       policy_version=request.policy_version)
+    if len(present) == 1:
+        return present[0]
+    return Verdict(
+        action=most_severe(v.action for v in present),
+        use_case=present[0].use_case,
+        policy_version=present[0].policy_version,
+        signal_outcomes=tuple(o for v in present for o in v.signal_outcomes),
+        failure_outcomes=tuple(o for v in present for o in v.failure_outcomes),
+        edits=tuple(e for v in present for e in v.edits),
     )
 
 
