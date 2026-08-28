@@ -100,7 +100,9 @@ slugs lived scattered across doc prose, YAML comments, docstrings and test notes
 
 | `[D1-not-run-vocabulary-cannot-say-dependency-absent]` | **MAJOR** | Phase 5 | **CLOSED 2026-08-28** — ruled by **ADR-033**, which adds the third lifecycle state the vocabulary lacked: *registered but unloadable*, recorded in a new `detectors.unavailable[]` list ({detector, missing}) rather than as a `not_run` reason or a `DetectorFailureRecord`. `dependency_unavailable` was deliberately **not** added to `NOT_RUN_REASONS` — that would restate an environment fact once per request while leaving unanswerable whether the coverage promise was ever keepable. The D7 edge the filing flagged is answered by **boot-time enforcement** mirroring FR-GW-006: any active policy mapping the detector's class to `fail_closed` refuses the boot outright, so `finance_advisor`'s `tier2: fail_closed` can no longer be silently unhonoured — the process does not start. Fail-open-only policy sets boot with a loud warning and carry the entry per affected request, plus `cp_detector_unavailable_total{detector}`. Filed 2026-08-28 while landing `tier2_toxicity` (Phase 5 item 2), **before any detector code was written**. 05 §4 fixes `not_run[].reason` to a closed vocabulary whose single member `not_implemented` it defines as *"the detector has no live implementation in this phase"*, and `_check_detectors` enforces it — a probe confirms `dependency_unavailable` is refused outright. The moment a model-backed detector gains an implementation, a host without the `[ml]` extra has **no truthful value to record**: the detector exists, so `not_implemented` is a false statement, and it is the only member admitted. That host is not hypothetical — `.github/workflows/ci.yml` installs `.[dev]` only and says the model stack is *deliberately* absent, so CI is the case. Two further consequences: a binding import at module scope would break the gateway import there outright, and because 05 §4 states that a not-run entry is **not** a `DetectorFailureRecord` ("no attempt was made, so there is no fault"), `finance_advisor`'s `tier2: fail_closed` is **silently not honoured** on such a host — the request passes with a coverage note. Generic, not toxicity-specific: `rag_grounding` (sentence-transformers) and `entity_enricher` (spaCy) reach it identically, which is why it wants one ruling rather than three ad-hoc choices. **Filed D1 but carrying a D7 edge, stated so the ruling can weigh it:** "a fail-closed behaviour not honoured" is D7's own language. It is filed MAJOR rather than BLOCKER because the *behaviour* is not a regression — a detector that is not live does not honour `fail_closed` today either — so what breaks is the **record's truthfulness**, not a protection that currently works. If the ruling reads the silent non-enforcement as the primary harm rather than the record, this is a BLOCKER and the severity should be raised on that basis, not on mine |
 | `[D1-added-time-to-last-byte-has-no-server-side-vantage]` | **MAJOR** | Phase 5 | **CLOSED 2026-08-28** — ruled by **ADR-030 Amendment 1**, Recommendation B: the figure is **re-sited, not withdrawn**. 06 §4 becomes its normative home as a **benchmark-client** quantity, and it is withdrawn from 05 §3/§5 — mechanically, since `check_latency_keys` enforces that vocabulary at the write path. It **aliases and absorbs** `reference_delta_ms` rather than joining it as a second series (one subtraction under two names invited the reading that one was uncontaminated), keeping both standing caveats: an **upper bound** (`TestClient` ASGI cost) and **never the headline number**. The four-ways-closed analysis is ratified into the amendment. **M-20 closes with it**, as a specification correction rather than an emission — the emission was never constructible. The checkpoint-3 tripwire fired on the transition and was **re-pointed, not deleted** (ADR-031 consequence 5's rule), now pinning the re-siting in both directions: the enforced vocabulary must not grow the key back, and 06 §4 must keep defining it. Filed 2026-08-28 while closing out **M-20**'s remainder (Phase 5 item 10), **before any code was written**. 06 §4 defines `added_time_to_last_byte_ms` as *"client-observed last-byte time minus the same request's upstream duration"*, and 05 §3 puts it in `latency_json` — a column the **gateway** writes. The gateway has no such vantage on either path: the buffered write at `app.py:586` precedes `return JSONResponse(...)` at `:632` (an ordering **M-13** established deliberately, so "audit later" reopens a closed gap), and the streaming write at `:875` runs inside the generator after the final `yield`, where a completed ASGI `send()` means *handed to the transport*, not received. There is no second phase to carry a post-delivery figure — the table is insert-only (no `UPDATE audit_records` in `controlplane/`) and `record_status` is a crash marker. Meanwhile `eval/bench_latency.py:237` already computes 06 §4's formula client-side as `reference_delta_ms`, but publishes it as a contaminated **upper bound** (`TestClient` ASGI cost), "never the headline number" — so the two cannot be equated by a rename | Filed **D1**, not D3: nothing is targeted and nothing measured breached: the documented design is not constructible from where the doc sites it. MAJOR because the row is untargeted, so NFR-P-001 keeps its verdict and no other Phase-5 item waits on it; the §7 edge — emitting a handoff delta under a name that claims a client vantage — would justify rounding up |
-**Open: zero.** **22** deviations filed; **22** ruled and closed. The two that shared a subject — how much input `tier2_injection` may be asked to scan — **closed together** on 2026-08-28 under **ADR-032**, which is the shape that subject always had: one ruling reserved a branch for a measurement, the measurement fired it, and the second ruling accepted the cost rather than reducing coverage to hide it. The two Phase-5 filings that followed closed the same day they were ruled. The coverage-vocabulary question — what the audit record may truthfully say when a detector's dependency is absent — closed under **ADR-033**, which answered it with a third lifecycle state rather than a new `not_run` reason, and made the fail-closed case a **boot refusal**: you cannot promise fail_closed protection with the protector absent. The last-byte row closed under **ADR-030 Amendment 1** by a route worth naming, because it is neither of the two a reader expects: not by emitting the key and not by dropping the figure, but by establishing that the **gateway has no vantage from which the documented quantity is measurable** and re-siting it onto the benchmark client that does. A deviation can close by finding that one side of it was not constructible, and the honest record of that is a specification correction rather than a landed feature. The nineteenth (`[D3-tier2-injection-budget-cannot-hold-on-unbounded-input]`, filed from the ADR-031 latency spike) is the first since Step 4 to leave this count above zero, and the first filed from a **measurement of a model this repo intends to ship** rather than of our own code; its ruling overruled prefix truncation in favour of full-coverage strided windows. The twentieth (`[D3-full-coverage-windows-cost-600ms-at-the-policy-bound]`) was then filed **by that ruling's own item 5**, which required a stop-and-report if full coverage measured in the >500 ms class. It did, at both thread settings. Worth stating plainly because it is unusual: the second deviation is not a re-litigation of the first, it is the branch the first ruling explicitly reserved for this measurement. The twenty-first (`[D1-not-run-vocabulary-cannot-say-dependency-absent]`) is a different subject and a different kind: it is about the **audit record**, not a budget, and it was found by reading the coverage contract before writing the detector the phase's next item asks for — the cheapest place to find it, since the alternative was a shipped record that says `not_implemented` about code that exists. The **twenty-second** (`[D1-added-time-to-last-byte-has-no-server-side-vantage]`) was found the same way, one item later: by reading 06 §4's definition against the write path before implementing it, rather than by shipping a row whose name claims a vantage the writer does not have. The eighteenth (`[D1-tier2-budgets-cannot-coexist-with-nfr-p-001]`, closed by **ADR-030**) is the only one filed from a *projection* rather than from a measurement or a doc reading: it reported that two documents cannot both hold in a **future** state, which is why it was a D1 and not the D3 its subject matter might suggest — and why it could be ruled as a specification decision rather than as a target moved after a miss. Its own derivation then logged **M-18/M-19/M-20**, so closing it left three gaps *stated* rather than a clean slate. The Phase-5 filing
+| `[D1-windowed-injection-cannot-be-enforced-by-a-per-call-budget]` | **MAJOR** | Phase 5 | **OPEN** — filed 2026-08-28 while landing Phase 5 item 2, **before any detector code was written**. 04 §2 budgets `tier2_injection` **per 104-token window** and ADR-032 accepts ~651 ms for the 52-window bound case, but `BUDGETS_MS` is a flat per-call scalar and `pipeline.py:280` hands it straight to `asyncio.wait_for`. Measured on this interpreter: the correct (loop-yielding) detector shape is cancelled at 25 ms, while the incorrect (loop-blocking) one passes by stalling the event loop for the full duration — the two viable implementations fail in opposite directions and there is no third. A cancellation is not benign: it resolves under `fail_mode`, so `finance_advisor`'s `fail_closed` would block every multi-window input and the two `fail_open` policies would silently not scan them — reopening the 512-token blind spot ADR-032 consequence 2 claims to have closed. `tier2_toxicity` is unaffected (one window, 8.58 ms P99) |
+| `[D1-input-hold-target-cannot-survive-multi-window-injection]` | **MAJOR** | Phase 5 | **OPEN** — filed 2026-08-28, same reading. **Doc-versus-doc between two accepted ADRs**, which §3 precedence does not settle: ADR-030 derives NFR-P-001's input-lane hold (P50 < 40 ms, P99 < 50 ms) from a 30 ms worst case whose dominant term is `tier2_injection 25`, and ADR-032 then measured that term at 23.28 ms P50 for 2 windows and 651.41 for 52 — inside `input_hold_ms` by 06 §4's own definition. ADR-032 scoped **NFR-P-002** and left NFR-P-001 untouched, so the derivation still asserts a bound its own successor has measured at ~13×. Filed from a **projection** built on ADR-032's measured table, and deliberately **before** the detector exists — the same ground `[D1-tier2-budgets-cannot-coexist-with-nfr-p-001]` stood on, and the fact that makes a post-hoc scoping distinguishable from the laundering ADR-026 §5 bars |
+**Open: two.** **24** deviations filed; **22** ruled and closed; **two** open, both filed 2026-08-28 by reading the Tier-2 contracts against the runner before writing the detector Phase 5 item 2 asks for. The two that shared a subject — how much input `tier2_injection` may be asked to scan — **closed together** on 2026-08-28 under **ADR-032**, which is the shape that subject always had: one ruling reserved a branch for a measurement, the measurement fired it, and the second ruling accepted the cost rather than reducing coverage to hide it. The two Phase-5 filings that followed closed the same day they were ruled. The coverage-vocabulary question — what the audit record may truthfully say when a detector's dependency is absent — closed under **ADR-033**, which answered it with a third lifecycle state rather than a new `not_run` reason, and made the fail-closed case a **boot refusal**: you cannot promise fail_closed protection with the protector absent. The last-byte row closed under **ADR-030 Amendment 1** by a route worth naming, because it is neither of the two a reader expects: not by emitting the key and not by dropping the figure, but by establishing that the **gateway has no vantage from which the documented quantity is measurable** and re-siting it onto the benchmark client that does. A deviation can close by finding that one side of it was not constructible, and the honest record of that is a specification correction rather than a landed feature. The nineteenth (`[D3-tier2-injection-budget-cannot-hold-on-unbounded-input]`, filed from the ADR-031 latency spike) is the first since Step 4 to leave this count above zero, and the first filed from a **measurement of a model this repo intends to ship** rather than of our own code; its ruling overruled prefix truncation in favour of full-coverage strided windows. The twentieth (`[D3-full-coverage-windows-cost-600ms-at-the-policy-bound]`) was then filed **by that ruling's own item 5**, which required a stop-and-report if full coverage measured in the >500 ms class. It did, at both thread settings. Worth stating plainly because it is unusual: the second deviation is not a re-litigation of the first, it is the branch the first ruling explicitly reserved for this measurement. The twenty-first (`[D1-not-run-vocabulary-cannot-say-dependency-absent]`) is a different subject and a different kind: it is about the **audit record**, not a budget, and it was found by reading the coverage contract before writing the detector the phase's next item asks for — the cheapest place to find it, since the alternative was a shipped record that says `not_implemented` about code that exists. The **twenty-second** (`[D1-added-time-to-last-byte-has-no-server-side-vantage]`) was found the same way, one item later: by reading 06 §4's definition against the write path before implementing it, rather than by shipping a row whose name claims a vantage the writer does not have. The eighteenth (`[D1-tier2-budgets-cannot-coexist-with-nfr-p-001]`, closed by **ADR-030**) is the only one filed from a *projection* rather than from a measurement or a doc reading: it reported that two documents cannot both hold in a **future** state, which is why it was a D1 and not the D3 its subject matter might suggest — and why it could be ruled as a specification decision rather than as a target moved after a miss. Its own derivation then logged **M-18/M-19/M-20**, so closing it left three gaps *stated* rather than a clean slate. The Phase-5 filing
 (`[D2-groq-tier-ids-shut-down-no-production-qwen-exists]`) is the seventeenth, closed by **ADR-029**:
 an external event, not a defect in our specs — Groq retired both bound model ids — and the one
 filing so far whose *recommendation was overruled on economic-rationality grounds* rather than on a
@@ -125,9 +127,15 @@ measurement its ruling ordered is the **fourteenth**, and the coverage-vocabular
 while landing `tier2_toxicity` is the **fifteenth**, and the last-byte vantage gap found while
 closing out M-20 the **sixteenth**. All four have since closed — the thirteenth and fourteenth
 together under **ADR-032**, the fifteenth under **ADR-033**, and the sixteenth under
-**ADR-030 Amendment 1**. That subtotal is **scoped to
-Step-4-onward filings** — **16 closed + 0 open = 16** — and the 6 pre-Step-4 filings, all
-closed, bring the whole table to **22 closed + 0 open = 22**. Both are stated because the
+**ADR-030 Amendment 1**. The **seventeenth** and **eighteenth** are the two open ones, and
+they share a provenance worth naming: both were found by reading a settled contract against
+the mechanism that has to honour it, one item before the code existed — the budget one because
+`04 §2` says *per window* while the runner enforces *per call*, the hold one because ADR-032
+rescoped NFR-P-002 and stopped one requirement short of the target that shares its dominant
+term. Neither is a measurement of our code missing a target; both are two documents that
+cannot both be satisfied by any implementation, which is what makes them D1 rather than D3. That subtotal is **scoped to
+Step-4-onward filings** — **16 closed + 2 open = 18** — and the 6 pre-Step-4 filings, all
+closed, bring the whole table to **22 closed + 2 open = 24**. Both are stated because the
 scoped figure alone, sitting a sentence after an unscoped "22 filed", reads as arithmetic
 that cannot balance — it was reported that way once. The scope was the missing word, not the
 sum. `tests/test_deviation_ledger.py` now parses this table and fails if either identity
@@ -1036,3 +1044,144 @@ through ADR-030.
 Blocked work: **item 10's second half — the whole of M-20's remainder.** Nothing else waits on it:
 the row is untargeted, so NFR-P-001's verdict, `--check`, and every other Phase-5 item are
 unaffected.
+
+---
+
+## DEVIATION REPORT [D1-windowed-injection-cannot-be-enforced-by-a-per-call-budget]
+Severity: MAJOR
+Doc & section: **ADR-032** items 1-3 and consequence 1 ("`tier2_injection` is unblocked and
+implementable: windowed 104/26/76, MAX aggregation, batch 4"); **04 §2** registry row
+`tier2_injection` ("<25 ms **per 104-token window**"); **NFR-P-002**; the enforcement mechanism in
+`controlplane/detectors/base.py` (`BUDGETS_MS` + `run_with_budget`) and its only call site,
+`controlplane/gateway/pipeline.py:280`.
+The doc says: two things that cannot both hold. 04 §2 now budgets `tier2_injection` **per window**,
+and ADR-032 **accepts and publishes** ~651 ms P50 for the 52-window input at
+`per_request_max_tokens: 4000` — full coverage, pre-dispatch, "not negotiable" (item 3). Meanwhile
+`BUDGETS_MS["tier2_injection"] = 25.0` is a **flat per-call scalar**, and `pipeline.py:280` runs
+every detector as `await run_with_budget(detector, ctx, BUDGETS_MS[name])`, which is
+`asyncio.wait_for(detector.detect(ctx), timeout=0.025)`. A detector that is *specified* to take
+651 ms is *enforced* at 25 ms by the only runner that calls it.
+Reality says: the contradiction is not escapable by implementation choice, because the two viable
+implementations fail in opposite directions. Measured on this interpreter (Python 3.14.6), a
+`wait_for(..., timeout=0.025)` around 300 ms of work:
+
+| detector shape | outcome |
+|---|---|
+| synchronous, never awaits (blocks the loop) | **returned normally — no `TimeoutError`** (300.1 ms elapsed) |
+| yields at each window boundary (`await asyncio.sleep(0)`) | **raised `asyncio.TimeoutError`** at 36.4 ms |
+
+`run_with_budget`'s own docstring already states the mechanism ("a detector that blocks the event
+loop synchronously cannot be interrupted by `wait_for` — the timeout fires only once control
+returns"), so this is a documented property being met, not a bug. The consequence is the trap: the
+**correct** implementation — yielding between windows so a 651 ms scan does not stall every
+concurrent request on a single-threaded event loop — is exactly the one the runner cancels at
+25 ms, while the **incorrect** one passes by blocking the loop for 651 ms. There is no third shape.
+And a cancellation is not a benign miss: `DetectorTimeout` resolves under policy `fail_mode`
+(04 §5), which the shipped policies configure two ways, both wrong here —
+`finance_advisor.yaml` `tier2: fail_closed` would **block every multi-window input** on the
+highest-stakes pipeline as a detector fault, and `support_bot.yaml` / `hr_copilot.yaml`
+`tier2: fail_open` would **silently not scan** them, which is the 512-token blind spot ADR-032
+consequence 2 claims to have closed, returning in a different guise.
+Impact if we ignore it: `tier2_injection` cannot be landed in a state that matches ADR-032. Either
+it is written to block the event loop for up to 0.6 s per request (and 1.3 s at `hr_copilot`'s
+8000-token ceiling ≈ 104 windows), or it is written correctly and never completes a multi-window
+scan. FR-DET-002 and ADR-032 consequence 2 both rest on the scan completing.
+Options:
+  A) **Per-window budget enforced inside the detector; the runner's ceiling derived from ADR-032's
+     published series.** 04 §2's "<25 ms per window" becomes literal — the detector checks its own
+     per-window deadline window-by-window and raises `DetectorTimeout` itself — and `pipeline.py`
+     passes a window-count-scaled ceiling instead of `BUDGETS_MS[name]` — trade-off: `BUDGETS_MS`
+     stops being uniformly "the number `wait_for` gets" for one detector, and the scaled ceiling
+     needs a window count the runner does not have until the detector has tokenized (either the
+     detector exposes a cheap `window_count(text)`, or the ceiling comes from
+     `per_request_max_tokens`, which over-provisions on short inputs).
+  B) **Run the windows in a thread executor and leave the flat 25 ms `wait_for` in place.** The
+     scan does not block the loop, and `wait_for` can then actually cancel it — trade-off: it
+     *would* cancel it, at 25 ms, so this fixes the concurrency half and leaves the contradiction
+     untouched. Listed because it is the reflexive fix and it does not work.
+  C) **Enforce `per_request_max_tokens` as a real pre-lane token bound and set the runner budget to
+     `25 × ceil(max_tokens / 76)`.** Mechanically simple and uses the ADR-032 escape valve —
+     trade-off: on `hr_copilot`'s 8000 that is a ~1.3 s timeout, at which point the budget has
+     stopped being a guard against anything; and M-28 records that `cost.request_too_large` is
+     unmapped in all three policies, so the rejection this bound implies has no user-facing signal.
+  D) **Keep the flat 25 ms and accept the fault.** Trade-off: contradicts ADR-032 outright and
+     picks one of the two bad failure modes above per use case. Named so the ruling can reject it
+     explicitly rather than by omission.
+Recommendation: **A.** It is the only option under which the shipped code says what 04 §2 says —
+the budget *is* per window, so the mechanism that enforces it should be too — and it keeps the
+detector non-blocking, which is the property the gateway needs from every CPU-bound detector and
+not a concession to this one. The cost is real and worth stating: one detector's budget stops being
+enforced by the uniform outer wrapper, so the report should record that `run_with_budget`'s
+guarantee is now explicitly two-tier rather than let that be discovered later.
+Blocked work: **`tier2_injection`** (Phase 5 item 2's input half) and anything downstream of it —
+07 beat 7's re-point to a real `tier2` fault, and `eval/fault_injection.py`'s `tier2` coverage row.
+**`tier2_toxicity` is NOT blocked**: output sentences are segmenter-bounded at 240 characters, one
+window, 8.58 ms P99, so the flat 25 ms budget fits it as written.
+
+---
+
+## DEVIATION REPORT [D1-input-hold-target-cannot-survive-multi-window-injection]
+Severity: MAJOR
+Doc & section: **ADR-030**'s input-lane derivation ("| Input lane |
+`max(tier1_pii 2, tier1_blocklist 2, tier2_injection 25, cost_budget 1, loop_guard 1)` + engine 5 |
+**30 ms** |") and its resulting target; **01 §5 NFR-P-001** ("Input-lane hold: P50 < 40 ms,
+P99 < 50 ms"); **06 §4** (`input_hold_ms` — "**Targeted** (NFR-P-001)"); **ADR-032**'s measured
+window series.
+The doc says: NFR-P-001's input-lane hold is **P50 < 40 ms, P99 < 50 ms**, and ADR-030 states those
+are "**derived from the 04 §2 budgets** rather than chosen to fit" — specifically from a 30 ms
+worst case whose dominant term is `tier2_injection 25`. ADR-030 §"Why these and not others" is
+explicit that the 25 ms term is what sets the floor: "The input lane's *detector* composition is
+25 ms and `tier2_injection` runs on *every* request, so its P50 cannot be set below 25."
+Reality says: that 25 ms term is no longer the cost of the detector for any input above one window.
+ADR-032 measures and **accepts** 23.28 ms P50 at 2 windows, 96.52 at 8, 196.19 at 16, and 651.41 at
+the 52-window `per_request_max_tokens: 4000` bound. `input_hold_ms` is ingress + input-lane time
+before dispatch (06 §4:249) — so the injection scan is *inside* the measured quantity, by
+definition and not by accident. A 2-window input already lands the hold at ~28 ms against a
+`P99 < 50 ms` target it still clears; an 8-window input lands it at ~97 ms and breaches by ~2×; the
+bound case breaches by ~13×. `eval/bench_latency.py --check` exits nonzero on the breach, and 01 §5
+records the population as holds rather than requests, so a single long prompt in the corpus is a
+sample that decides the percentile.
+This is **doc-versus-doc between two accepted ADRs**, and §3's precedence rules do not settle it:
+ADR-030 and ADR-032 are of equal standing, and ADR-032 did not touch NFR-P-001. Its budget
+respecification section scopes **NFR-P-002** to single-window inputs and its "Docs touched" line
+names 01 (the NFR-P-002 row), 04 §2, 06 §4 and 08 — the input-hold *target* is untouched, so the
+ADR-030 derivation still stands in the docs asserting a 30 ms worst case that its own successor
+has measured at 651.
+Filed as **D1 and from a projection**, both stated rather than left to inference: no measurement of
+our code exists, because the detector this depends on is not written — but the projection is built
+on ADR-032's own measured table rather than on an estimate, so what is projected is the composition
+and not the cost. The precedent is exact and worth naming:
+`[D1-tier2-budgets-cannot-coexist-with-nfr-p-001]` was filed the same way, about the same
+requirement, and was ruled a specification decision rather than a target moved after a miss —
+because it was ruled **before** a measurement could miss.
+Impact if we ignore it: `--check` goes red the day `tier2_injection` lands and stays red, which
+makes the one gate that guards NFR-P-001 unreadable — a permanently-failing tripwire is
+indistinguishable from a broken one. Alternatively the breach is discovered during item 6's bench
+re-run, i.e. after the detector is written, when the only remaining moves are the bad ones.
+Options:
+  A) **Scope the input-hold target to single-window inputs and publish multi-window input holds as
+     an untargeted window-count series** — exactly the shape ADR-032 gave NFR-P-002, applied to the
+     requirement ADR-032 left behind — trade-off: a second target scoped after the fact, so it must
+     carry its own anti-laundering record; the distinguishing fact is that **nothing has missed it
+     yet**, since the code does not exist, which is the same ground the ADR-030 filing stood on and
+     is precisely what ADR-026 §5 bars when it is *not* true.
+  B) **Keep the target unscoped and let `--check` fail.** Trade-off: maximally honest and
+     operationally useless — see the impact line; a gate nobody can act on gets ignored, and then
+     a real regression hides behind the expected red.
+  C) **Lower `per_request_max_tokens` toward a single window in the shipped policies.** Trade-off:
+     contradicts ADR-032 item 4's stated direction (the valve exists so a pipeline needing
+     4000-token prompts can *raise* it and accept the published latency), makes the gateway unable
+     to serve realistic prompts, and inherits M-28's unmapped-rejection gap.
+  D) **Exclude injection-scan time from `input_hold_ms`.** Trade-off: rejected on sight and listed
+     only to be rejected on the record — ADR-030 defines the hold as **user-perceived**, and the
+     user waits through a pre-dispatch scan. Removing a wait that happens from a number that claims
+     to measure the wait is the number-laundering AGENTS.md §7 exists to prevent.
+Recommendation: **A**, ruled now rather than after item 6. It is the only option that keeps the
+gate meaningful without either deleting a real wait from the measurement (D) or crippling the
+documented input ceiling (C), and it makes the two ADRs consistent by finishing the scoping ADR-032
+started one requirement short of. The anti-laundering record should state, as ADR-030's did, that
+it is written **before** any measurement exists and that SL-1 and ADR-026 §5 are untouched.
+Blocked work: **item 6** (the ADR-030 parallel-lane trigger and the `bench_latency` re-run) and
+NFR-P-001's published verdict, both only once `tier2_injection` exists. Nothing blocks today, and
+that is the reason to rule it today: this is the last moment the ruling can precede the
+measurement.
