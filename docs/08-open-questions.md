@@ -37,7 +37,33 @@ Why: three things lean on it — the `fail_open` path when the upstream is unrea
 Evidence closing the previous ruling: Q-02 named `llama-3.2-3b via Ollama`, but **no such model is installed**. The single model present is `minimax-m2.7:cloud`, whose manifest carries `remote_host: https://ollama.com:443` — a cloud model reached through a local CLI, so it fails the no-`remote_host` assertion and cannot honestly be classed local. `config/gateway.yaml`'s `ollama-local` entry is therefore `STUB`-marked with both `tiers` null: it is a declared shape, not a working provider.
 Options: (a) `ollama pull` a small genuinely-local model (~2 GB) and assert no `remote_host` in its manifest before classing it; (b) drop the local provider and accept that fail-open has no fallback target and consistency sampling costs real Groq tokens; (c) keep the entry declared-but-null and let FR-GW-006's loud-fallback rule surface the gap at boot.
 Assumption: **(a)**, gated on the assertion actually passing — the entry stays `STUB` until then. Until it passes, treat fallback as unavailable rather than as working, and never report a fallback latency or cost number from it (AGENTS.md §7).
-Deadline: before the consistency detector sprint (it needs the 2nd sample) — earlier if the cost plane is demoed. Status: **OPEN**
+Deadline: before the consistency detector sprint (it needs the 2nd sample) — earlier if the cost plane is demoed. Status: **RESOLVED 2026-08-28** — option (a), on owner evidence.
+
+**Ruling (2026-08-28).** `llama3.2:3b` serves the small tier of `ollama-local`; the assertion the
+assumption was gated on **passed** — a manifest grep shows no `remote_host`, so it is local in the
+sense ADR-018 requires and the `unmetered` claim holds (its tokens are billed to no one). `frontier`
+stays null: exactly one local model is evidenced, and binding both tiers to one id would make the
+cascade a no-op while looking configured. The `STUB` markers are removed from `config/gateway.yaml`
+and **SL-4** is closed.
+
+⚠ **The evidence is host-specific, and that is recorded rather than smoothed over.** It comes from
+the **owner's** machine (Apple Silicon, Ollama **v0.33.0**): a direct probe served real usage counts
+and the FR-GW-006 canary passed as measured-class. The **development host** these docs were written
+on runs Ollama **v0.31.1** and serves exactly one model — `minimax-m2.7:cloud`, carrying
+`remote_host: https://ollama.com:443`, the original SL-4 condition, re-confirmed 2026-08-28. So on
+that host the bound id names nothing and a dispatch to this provider fails; `ollama pull llama3.2:3b`
+is the whole fix. Neither report is wrong — they describe different hosts — which is why the binding
+is recorded with the host it was verified on. Two consequences follow, and both are constraints
+rather than caveats: **no test may depend on a live local dispatch** (the config-level assertion is
+what `tests/test_gateway_config.py` pins), and **no fallback latency or cost figure from this
+provider may be reported from the development host**, since it cannot produce one — the AGENTS.md §7
+rule the original assumption stated, still in force for the same reason.
+
+Kept in place rather than relocated to *Resolved*: the housekeeping note further down records
+dependents being **stranded** under this very question's heading when it last moved, and this entry
+now has more dependents than it had then, not fewer.
+
+Status: **RESOLVED**
 
 
 ---
@@ -82,8 +108,9 @@ together: `[D5-adr-027-stamp-has-no-column-in-the-05-3-ddl]` by **ADR-027 Amendm
 defects in *settled contracts* rather than in code — the stamp one a gap in ADR-027's own audit
 representation, found while wiring the write path that ADR specified; the canary one a
 requirement whose independent reference did not exist, found by probing for it. Per the note
-below, a low `Open:` count means **little undecided**, not little missing: **five** Standing Limitations
-remain, and closing a deviation never closes the gap it documented.
+below, a low `Open:` count means **little undecided**, not little missing: **four** Standing
+Limitations remain (SL-4 closed 2026-08-28 — five filed), and closing a deviation never closes the
+gap it documented.
 
 The **eight** filed from Step 4 up to that closure account as: **two** measured-accuracy findings
 (D3, D8), **four** found while implementing the ADRs (`detector_params`, the `per` citation
@@ -91,16 +118,18 @@ marker, the NANP constraint, the `eyJ` derivation), **one** report-prose gate fo
 re-measurement, and **D5**. The **two** Phase-4 filings are the **ninth and tenth** from Step 4
 onward and are **both now closed** — 10 closed + 0 open = 10, and 6 pre-Step-4 closures bring the
 total to 16. The Phase-5 Groq rebinding is the **eleventh** from Step 4 onward, and the tier2
-budget projection the **twelfth**. The ADR-031 spike filing is the **thirteenth** and the only one still open: **12 closed + 1 open = 13**, and the 6 pre-Step-4 closures bring
-the total to **19**.
+budget projection the **twelfth**. The ADR-031 spike filing is the **thirteenth** and the
+measurement its ruling ordered is the **fourteenth**; both are still open: **12 closed + 2 open =
+14**, and the 6 pre-Step-4 closures bring the total to **20**.
 **Three of those eight were found by writing the ADR-026 spec-derived tests**, which is the
 outcome that discipline exists to produce: tests authored from the specifications rather than
 from the fixtures caught two defects in the ruled specs themselves and one in the implementer's
 reading of them, *before* any number was computed. D5 was found the same way — by implementing
 04 §5 literally and discovering the object it describes cannot exist.
 
-⚠ **Open deviations and open questions are separate counts.** Six *questions* remain OPEN
-above — **Q-01, Q-05, Q-06, Q-07, Q-08, Q-10** — while **one deviation** is open, and the two
+⚠ **Open deviations and open questions are separate counts.** Five *questions* remain OPEN
+above — **Q-01, Q-05, Q-06, Q-07, Q-08** (Q-10 **resolved 2026-08-28**) — while **two deviations**
+are open, and the two
 registers are deliberately kept apart: a deviation is a contradiction awaiting a ruling, a
 question is a decision not yet needed. Collapsing them into one "open" number would hide which
 kind of answer is owed. (The *gaps* left behind by closures are the
@@ -112,8 +141,9 @@ gap. Every such item is carried permanently in the **Standing Limitations** regi
 below, so the two numbers can never drift apart: a reader who reaches the end of the deviation
 ledger — whatever it happens to count — sees the standing limitations in the same breath.
 
-Also tracked as questions rather than deviations: **Q-10** (no genuinely local model installed —
-fallback and 2nd-sample duty unassigned, **SL-4**) and the Groq price-provenance caveat under
+Also tracked as questions rather than deviations: **Q-10** (the local model — **resolved
+2026-08-28**, **SL-4** closed with it, though the binding is verified on the owner's host only) and
+the Groq price-provenance caveat under
 **Q-02**, which constrains what the cost simulation may publish rather than blocking it (**SL-3** —
 **downgraded 2026-08-27 by ADR-029**: first-party prices now exist for the two bound ids, so the
 absolute-dollar gate is lifted for them).
@@ -203,7 +233,7 @@ itself is gone, never because it stopped being newsworthy.
 | **SL-1** | **NFR-EVAL-001 unmet** — `tier1_pii` recall below the 0.95 target | **0.8852** vs 0.95 (precision 1.000, so no over-firing). v1 baseline **0.8361** | **100% of the residual misses are the documented bare-7-digit scope exclusion** (ADR-026 §3) — 7/7, verified programmatically by stripping co-occurring SSN/card/email spans and measuring the phone candidates' digit length (all 7, none ≥10). A bare `NNN-NNNN` is indistinguishable from an order or ticket id, so matching it would trade the perfect precision away. **The target was not moved** (ADR-026 §5) | `reports/eval_report.md` §NFR-EVAL-001 + §Disclosed revision; README claims row *Tier-1 PII recall*; closed deviation `D3-tier1-pii-recall-below-target` |
 | **SL-2** | **v1-superset phone behaviour**: an invalid NANP area code still fires — e.g. `(115) 555-0123` | Documented v1-superset behaviour, **not a bug** | v1's `_PHONE` is retained deliberately and evaluated first, so it shadows the NANP `N ∈ [2–9]` rows. Narrowing it would change v1-derived behaviour and the permanent precision-1.000 baseline would no longer describe code that ships. Precision hardening is a **later freeze cycle** and must not ride along with a measurement | ADR-026 Amendment 1; 04 §2.5; `tests/test_tier1_detectors.py::test_nanp_n_constraint_rejects_leading_0_and_1` (asserts at pattern level, docstring records the shadowing) |
 | **SL-3** | **DOWNGRADED 2026-08-27 (ADR-029) — now a provenance-*freshness* reminder, no longer a publication gate.** First-party prices exist for both bound ids | `console.groq.com/docs/models` carries per-1M figures directly: `openai/gpt-oss-20b` **$0.075 in / $0.30 out**, `openai/gpt-oss-120b` **$0.15 in / $0.60 out**. Retrieved 2026-08-27. The retired llama pair now prices as "ContactSales" on that same page, which is why its old figures were never obtainable first-party | **Absolute dollar figures ARE publishable for these two ids**, carrying `source_url` + `retrieved`. Two limits stand: any comparison priced on the **retired llama pair remains barred** (never first-party, and the models no longer serve, so it can never be re-verified); and prices are **re-verified at submission packaging**, since a stale price is a wrong price. The entry stays open for that re-verification, not for a missing source | `config/gateway.yaml` (provider `groq`); ADR-022; **ADR-029**; README claims section; 06 §6 |
-| **SL-4** | **No genuinely local fallback model installed** | Ollama on `:11434` serves exactly one model, `minimax-m2.7:cloud`, whose `remote_host` is `https://ollama.com:443` — a **cloud** model behind a local daemon | It fails the no-`remote_host` assertion, so it cannot be the local fallback; binding it would also falsify the `unmetered` claim, since its tokens are billed to someone. `ollama pull <a-real-local-model>` unblocks it. **owner-decision-needed** | `config/gateway.yaml` (provider `ollama-local`, both tiers `null` + STUB); Q-10 **Re-verified 2026-08-27** (Phase-5 Step 0.3): `GET :11434/api/tags` still returns exactly one model, `minimax-m2.7:cloud`. No local model was pulled, so SL-4 **stays open** and `fast_consistency`'s second sample uses the measured-class Groq provider — real token cost, ADR-018 compliant. |
+| **SL-4** | **CLOSED 2026-08-28 (owner evidence).** ~~No genuinely local fallback model installed~~ | `llama3.2:3b` is installed on the **owner's** host (Ollama v0.33.0) and passes the no-`remote_host` assertion, so it is genuinely local and `unmetered` holds. Bound to `ollama-local`'s **small** tier; `frontier` left null (one model evidenced — binding both would make the cascade a no-op while looking configured) | The limitation itself is gone, which is the only reason a row leaves this register. **But it is gone host-by-host:** the development host still serves only `minimax-m2.7:cloud` with `remote_host` (Ollama v0.31.1, re-confirmed 2026-08-28), so there a dispatch to this provider fails and no fallback latency or cost figure can be produced — AGENTS.md §7 still bars reporting one from that host. The row is kept and struck through rather than deleted, so the closure is auditable against the condition it closed | `config/gateway.yaml` (`ollama-local`, `small` bound, STUBs removed); Q-10 **RESOLVED**; `tests/test_gateway_config.py::test_sl4_ollama_binds_the_owner_verified_local_model` pins the config-level claim — deliberately not a live dispatch |
 | **SL-5** | **The Tier-2 <25 ms budget is measured with 6 threads free for one inference**, and NFR-P-002 states no concurrency assumption | At **1 thread**, both ADR-031 picks breach at the output segmenter cap: `madhurjindal` **25.90 P50 / 26.20 P99**, `martin-ha` **34.48 / 35.50** (ONNX int8, n=50). Both still fit at corpus-typical lengths (**17.81 / 10.62 P50**) | Every Tier-2 figure this repo publishes is a **low-concurrency** figure: one inference gets the whole CPU on an idle laptop, and under concurrent requests per-request parallelism falls toward the 1-thread column, where the budget stops holding at the cap. Not tuned away and not reported as a passing number — the 1-thread column is published beside the 6-thread one so the exposure is visible rather than inferred. Bounding it properly needs a concurrency figure NFR-P-002 does not state and no harness here measures; a load test is **Phase 6+** and out of hackathon scope | ADR-031 §5; `reports/spike_tier2_models.json` (both `threads` sweeps); any Tier-2 latency claim in the README or 06 §4 |
 
 ### Prose-fix log — ADR-026 Amendment 2 clause (d)

@@ -125,22 +125,30 @@ providers:
   # `pricing: unmetered` is the affirmative claim ADR-022 defines: local compute levies
   # no per-token charge, so est_cost_usd 0.0 is a measurement here, not a placeholder.
   #
-  # STUB(no genuinely local model is installed. The Ollama daemon on :11434 serves
-  # exactly one model, `minimax-m2.7:cloud`, whose remote_host is
-  # https://ollama.com:443 — a CLOUD model reached through a local daemon. It fails the
-  # no-remote_host assertion, so it cannot serve as the local fallback, and binding it
-  # here would ALSO falsify the `unmetered` claim above, since its tokens are billed by
-  # someone. `ollama pull <a-real-local-model>` is what unblocks this;
-  # owner-decision-needed)
-  # Q-02's local fallback is REOPENED in 08 until a model passes that assertion.
+  # SL-4 / Q-10 CLOSED 2026-08-28 on owner evidence. `llama3.2:3b` passes the
+  # no-`remote_host` assertion (manifest grep clean), so it is a genuinely local model and
+  # the `unmetered` claim above holds: its tokens are billed to no one.
+  #
+  # ENVIRONMENT CAVEAT, and it is not a formality. That evidence is from the OWNER's
+  # machine — Apple Silicon, Ollama v0.33.0, direct probe served real usage counts and the
+  # FR-GW-006 canary passed as measured-class. The development machine this comment was
+  # written on runs Ollama v0.31.1 and serves exactly ONE model, `minimax-m2.7:cloud` with
+  # `remote_host: https://ollama.com:443` — so on THAT host the id below names nothing and
+  # a dispatch to this provider fails. `ollama pull llama3.2:3b` is the whole fix. Neither
+  # report is wrong; they describe different hosts, which is why the binding is recorded
+  # with the host it was verified on rather than as an unqualified fact.
   - name: ollama-local
     upstream_class: measured
     base_url: http://localhost:11434/v1
     key_env: null                          # local daemon needs no credential
     pricing: unmetered                     # local compute: no per-token charge exists
     tiers:
-      small: null                          # STUB(no local model installed)
-      frontier: null                       # STUB(no local model installed)
+      small: llama3.2:3b                   # owner-verified local; no remote_host
+      # Deliberately null, not a second copy of `small`. Exactly one local model is
+      # evidenced, and binding both tiers to one id would make the cascade a no-op while
+      # looking configured — ADR-009's forbidden substitution, arrived at from the other
+      # direction. A non-active provider may bind one tier (05 §6.1).
+      frontier: null
 
 # Which provider serves traffic. Anything eval/ or demo/ touches must be `measured`
 # class unless --allow-dev is passed (which taints the output filename).

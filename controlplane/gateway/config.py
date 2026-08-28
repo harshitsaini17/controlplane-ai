@@ -82,8 +82,14 @@ class Tiers(BaseModel):
     """Tier name -> concrete provider model id (ADR-009's two-tier cascade).
 
     `None` means the provider cannot serve that tier. Both-`None` is legal for a
-    declared-but-not-yet-working provider (see `ollama-local`, Q-10) — but not for the
-    active one, which `GatewayConfig` enforces.
+    declared-but-not-yet-working provider — a provider can be described before a model is
+    available to serve it — but not for the active one, which `GatewayConfig` enforces.
+
+    A *partial* binding is the more common shape and is equally legal: `ollama-local` binds
+    `small` and leaves `frontier` null, because exactly one local model is evidenced (Q-10).
+    Filling the second tier with the same id to look complete would make ADR-009's cascade a
+    no-op while reading as configured, so `resolve` returns None and the caller refuses
+    rather than substituting.
     """
 
     model_config = ConfigDict(extra="forbid")

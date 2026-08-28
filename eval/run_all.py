@@ -179,7 +179,8 @@ SKIPPED: tuple[SkippedDetector, ...] = (
     SkippedDetector("tier2_toxicity", ("toxicity.high", "toxicity.moderate"),
                     "not implemented — stub; Q-04 defers the checkpoint choice"),
     SkippedDetector("fast_consistency", ("hallucination.low_confidence",),
-                    "not implemented — stub; needs the 2nd-sample provider (Q-10)"),
+                    "not implemented — stub; the 2nd-sample provider is bound "
+                    "(Q-10 resolved 2026-08-28), the detector is not"),
     SkippedDetector("rag_grounding", ("hallucination.ungrounded_claim",),
                     "not implemented — stub; needs sentence-transformers"),
     SkippedDetector("entity_enricher", ("privacy.person",),

@@ -94,17 +94,28 @@ def test_groq_tiers_bind_the_verified_production_model_ids() -> None:
     assert groq.tiers.frontier == GROQ_FRONTIER == "openai/gpt-oss-120b"
 
 
-def test_q10_ollama_provider_is_declared_but_binds_no_model() -> None:
-    """Characterization test for the open Q-10 gap — update it when a model lands.
+def test_sl4_ollama_binds_the_owner_verified_local_model() -> None:
+    """SL-4/Q-10 closed 2026-08-28: a genuinely local model now serves the small tier.
 
-    `ollama-local` is a declared shape, not a working provider: no genuinely local model
-    is installed (the one present carries `remote_host`, so it is a cloud model reached
-    through a local CLI). Both tiers are null, which is legal for a non-active provider
-    and is what stops it being mistaken for a working fallback.
+    The predecessor of this test characterized the *gap* and said in its own docstring to
+    update it when a model landed. `llama3.2:3b` passes the no-`remote_host` assertion, so
+    it is local in the sense ADR-018 requires and the `unmetered` claim holds — its tokens
+    are billed to no one.
+
+    `frontier` stays null deliberately. Exactly one local model is evidenced, and binding
+    both tiers to one id would make the cascade a no-op while looking configured — the
+    ADR-009 substitution reached from the other direction.
+
+    This asserts the *config*, not the daemon. The binding was verified on the owner's
+    machine (Ollama v0.33.0); the development host serves only a `remote_host`-carrying
+    cloud model, so a live dispatch there fails and no test may depend on one.
     """
     ollama = load_gateway_config().provider("ollama-local")
-    assert ollama.tiers.small is None and ollama.tiers.frontier is None
-    assert ollama.tiers.resolve("small") is None
+    assert ollama.tiers.small == "llama3.2:3b"
+    assert ollama.tiers.frontier is None
+    assert ollama.tiers.resolve("frontier") is None
+    # `unmetered` is an affirmative measurement claim (ADR-022), not a missing price.
+    assert ollama.est_cost_usd("llama3.2:3b", 1000, 1000) == 0.0
 
 
 @pytest.mark.parametrize("attribute", ["model_config", "dict", "json", "copy"])
@@ -317,10 +328,14 @@ def test_measured_provider_with_null_pricing_warns_by_name(
 ) -> None:
     """The warning row of 05 §6.1: legal, but never silent.
 
-    Uses `ollama-local`, whose tiers are null — so it trips the warning without also
-    tripping the fatal routed-model rule, which is what separates the two rows.
+    The shape under test is measured-class + unpriced + **no tier on a routing path**: that
+    combination warns, while binding a tier to an unpriceable model is the *fatal* row. The
+    two must stay distinguishable, so this test constructs the shape rather than borrowing
+    it — since SL-4 closed, `ollama-local` binds `small`, and merely nulling its pricing
+    now trips the fatal rule instead of this one (which is itself the correct behaviour).
     """
     valid_config_dict["providers"][2]["pricing"] = None
+    valid_config_dict["providers"][2]["tiers"] = {"small": None, "frontier": None}
     with pytest.warns(PricingWarning, match="ollama-local"):
         GatewayConfig(**valid_config_dict)
 
@@ -371,15 +386,29 @@ def test_duplicate_provider_names_rejected(valid_config_dict: dict[str, Any]) ->
 def test_active_provider_must_bind_at_least_one_tier(
     valid_config_dict: dict[str, Any],
 ) -> None:
-    """A tier-less active provider can serve no request at all."""
+    """A tier-less active provider can serve no request at all.
+
+    The tier-less provider is constructed here: every provider in the shipped config now
+    binds at least one tier, so this rule has no ready-made subject left. Nulling the tiers
+    first is what keeps the assertion about the rule rather than about the config.
+    """
+    valid_config_dict["providers"][2]["tiers"] = {"small": None, "frontier": None}
     valid_config_dict["active_provider"] = "ollama-local"
     with pytest.raises(ValidationError, match="binds no tier"):
         GatewayConfig(**valid_config_dict)
 
 
 def test_non_active_provider_may_bind_no_tier(valid_config_dict: dict[str, Any]) -> None:
-    """The converse of the rule above — this is the shipped `ollama-local` case."""
-    assert GatewayConfig(**valid_config_dict).provider("ollama-local").tiers.small is None
+    """The converse of the rule above: only the *active* provider must bind a tier.
+
+    No longer the shipped `ollama-local` case — SL-4 closed and it binds `small` — so the
+    permission is asserted on a constructed provider. It is still worth pinning: it is what
+    lets a declared-but-unused provider sit in the config without blocking boot.
+    """
+    valid_config_dict["providers"][2]["tiers"] = {"small": None, "frontier": None}
+    config = GatewayConfig(**valid_config_dict)
+    assert config.provider("ollama-local").tiers.small is None
+    assert config.active_provider != "ollama-local"
 
 
 def test_unknown_key_rejected(valid_config_dict: dict[str, Any]) -> None:
