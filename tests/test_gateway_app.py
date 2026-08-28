@@ -29,6 +29,7 @@ import shutil
 import sqlite3
 import tempfile
 import threading
+import uuid
 from pathlib import Path
 
 import pytest
@@ -1258,3 +1259,65 @@ def test_a_dispatched_unpriceable_request_is_still_null_on_the_measured_class(
     assert view["model"]["used"] == "stub-model"
     assert view["cost"]["est_usd"] is None
     assert (view["cost"]["tokens_in"], view["cost"]["tokens_out"]) == (11, 22)
+
+
+# ---------------------------------------------------------------------------
+# Ingress rejections carry a correlation id (owner live-test finding, 2026-08-28)
+#
+# `ingest` minted the request id on its own last line — after both rejections it can
+# raise — so an ERR-CFG-001/002 body reached the caller with `"request_id": ""` and no
+# `X-ControlPlane-Request-Id` header, against 05 §1.1's "All responses carry" promise. It
+# is now minted in the handler before use-case resolution.
+#
+# An id is a correlation handle for one exchange, not a property of a successfully
+# resolved policy: the request an operator most needs to look up is the one that was
+# refused.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "use_case, body, code",
+    [
+        ("no_such_pipeline", {}, "ERR-CFG-001"),          # rejected before any policy loads
+        ("finance_advisor", {"stream": True}, "ERR-CFG-002"),  # rejected against a policy
+    ],
+)
+def test_an_ingress_rejection_carries_a_real_request_id(
+    make_client, use_case: str, body: dict, code: str
+) -> None:
+    """Both ingress rejections, because they fail at different points in `ingest`.
+
+    ERR-CFG-001 is raised before a policy is resolved at all and ERR-CFG-002 relative to
+    one, so a mint that happened anywhere inside `ingest` would fix at most one of them.
+    """
+    client, _, _ = make_client()
+    response = post(client, use_case, prompt=CLEAN_INPUT["text"], **body)
+
+    assert response.status_code == 400
+    request_id = response.json()["error"]["request_id"]
+    assert request_id, f"{code} body carried an empty request_id"
+    # A real id, not a placeholder that merely satisfies "non-empty".
+    assert uuid.UUID(request_id)
+    assert response.headers[HEADER_REQUEST_ID] == request_id, \
+        "05 §1.1: all responses carry the header, and it must match the body"
+
+
+def test_each_rejection_gets_its_own_id(make_client) -> None:
+    """A constant would satisfy every other assertion here and correlate nothing."""
+    client, _, _ = make_client()
+    ids = {post(client, "no_such_pipeline").json()["error"]["request_id"] for _ in range(3)}
+    assert len(ids) == 3
+
+
+def test_the_id_still_correlates_the_header_with_the_audit_record(make_client) -> None:
+    """The property that could have regressed: the mint moved OUT of `ingest`.
+
+    Two ids — one minted in the handler and one inside `ingest` — would leave the header
+    naming a request the audit table has never heard of, which is worse than the empty
+    string this change removed: an operator would follow it to a confident dead end.
+    """
+    client, gateway, _ = make_client("Fine.")
+    response = post(client, "support_bot", prompt=CLEAN_INPUT["text"])
+
+    assert response.status_code == 200
+    assert audit_of(gateway, response)["request_id"] == response.headers[HEADER_REQUEST_ID]

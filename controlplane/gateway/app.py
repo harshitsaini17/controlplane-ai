@@ -420,13 +420,22 @@ async def handle_completion(state: Gateway, http_request: Request) -> Response:
     """
     started = time.perf_counter()
     body = await http_request.json()
+    # Minted HERE, before use-case resolution, and published to request.state immediately
+    # (owner live-test finding, 2026-08-28). `ingest` used to mint it on its own last line,
+    # which is *after* both rejections it can raise — so an ERR-CFG-001/002 body reached the
+    # caller with `"request_id": ""` and no `X-ControlPlane-Request-Id` header, against
+    # 05 §1.1's "All responses carry" promise. An id is a correlation handle for the one
+    # exchange, not a property of a successfully resolved policy: the request the operator
+    # most needs to look up is the one that was refused.
+    request_id = str(uuid.uuid4())
+    http_request.state.request_id = request_id
     # `cp.ingress` (02 §4 step t0) is resolve-use-case + load-policy — NOT the body read
     # above, which is client transport the gateway does not control and which 06 §4 keeps
     # out of the headline for the same reason it keeps the reference row separate.
     ingress_started = time.perf_counter()
-    request = ingest(dict(http_request.headers), body, state.store, key_map=state.key_map)
+    request = ingest(dict(http_request.headers), body, state.store,
+                     key_map=state.key_map, request_id=request_id)
     ingress_ms = (time.perf_counter() - ingress_started) * 1000.0
-    http_request.state.request_id = request.request_id
 
     coverage = pipeline.Coverage()
     latency: dict[str, Any] = {spans.INGRESS: ingress_ms}

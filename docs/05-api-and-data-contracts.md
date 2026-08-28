@@ -33,6 +33,14 @@ OpenAI-compatible request body, passed through with these gateway extensions:
 | ERR-GW-001 | 500 | internal gateway error | yes |
 Error body: `{error:{code, message, request_id}}`. Never include prompt/response content in error bodies.
 
+`request_id` is **always populated**, including on the two ingress rejections above, and the
+matching `X-ControlPlane-Request-Id` header is present per §1.1's "All responses carry" rule.
+The id is therefore minted *before* use-case resolution: an id is a correlation handle for
+one exchange, not a property of a successfully resolved policy, and the request an operator
+most needs to look up is the one that was refused. It is the same id the audit record carries
+whenever the request got far enough to produce one — a rejected request has no record, which
+is why the id on a 400 correlates a log line rather than a row.
+
 ## 2. Admin API (localhost/demo only — no auth in v1, stated limitation)
 
 | Endpoint | Purpose |
