@@ -1,15 +1,15 @@
 """Latency benchmark -> reports/latency_report.md.
 
-Implements 06 §4, incl. the NORMATIVE `gateway_overhead_ms` definition and `--check`
+Implements 06 §4, incl. the NORMATIVE `total_attributable_overhead_ms` definition and `--check`
 assertion mode (the NFR-P-001/002 D3 tripwire).
 
 **Every overhead figure is read back out of the audit record, never recomputed here.**
-`controlplane.gateway.pipeline.gateway_overhead_ms` is the single implementation of the 06 §4
+`controlplane.gateway.pipeline.total_attributable_overhead_ms` is the single implementation of the 06 §4
 formula, and 06 §4 says that definition is used by "05 §5, the audit record, and every report
 — no ad-hoc variants". A benchmark that re-derived the number from its own stopwatch would be
 measuring a second, unspecified quantity that happened to look similar, and the two could
 drift without either being wrong on its own terms. So this module fires requests and reads
-`latency_json.gateway_overhead_ms` back out of `audit_records`.
+`latency_json.total_attributable_overhead_ms` back out of `audit_records`.
 
 **Streaming and non-streaming are tabulated separately because they are different
 quantities**, not merely different configurations (06 §4): streaming sums measured hold
@@ -20,7 +20,7 @@ non-streaming table is reported in full and gated by NFR-P-002 alone. Applying a
 threshold to a subtraction-derived figure would be inventing a requirement.
 
 **The headline number is cadence-independent by construction, and that is verified rather
-than asserted.** 06 §4 excludes upstream token wait from `gateway_overhead_ms`, so changing
+than asserted.** 06 §4 excludes upstream token wait from `total_attributable_overhead_ms`, so changing
 the stub's inter-token delay must not move the figure. `--cadence-ms` exists so that property
 is testable (`test_overhead_is_independent_of_token_cadence`), which is also what makes a
 fast default defensible: a slow "realistic" cadence would buy realism only in the one
@@ -238,7 +238,7 @@ class Sample:
         """`wall − upstream`: the 06 §4 reference row, explicitly NOT the headline number.
 
         For a streaming pipeline this exceeds `overhead_ms` by the relay and transport time
-        that is neither a per-sentence hold nor a token wait. `pipeline.gateway_overhead_ms`
+        that is neither a per-sentence hold nor a token wait. `pipeline.total_attributable_overhead_ms`
         declines to clamp that gap away and says it belongs here as a reported row, so here it
         is — as an upper bound a reader can see, rather than a discrepancy they have to infer.
         """
@@ -352,12 +352,12 @@ def run_batch(
                 continue
 
             latency = view["latency"]
-            overhead = latency.get("gateway_overhead_ms")
+            overhead = latency.get("total_attributable_overhead_ms")
             if overhead is None:
                 # Recorded as an error rather than skipped silently: a missing overhead value
                 # means the audit write path changed, and a percentile computed over the
                 # survivors would hide that behind a plausible number.
-                batch.errors.append(f"{case['case_id']}/{use_case}: no gateway_overhead_ms")
+                batch.errors.append(f"{case['case_id']}/{use_case}: no total_attributable_overhead_ms")
                 continue
             upstream = float(latency.get("upstream_ms", 0.0))
             batch.samples.append(
@@ -749,7 +749,7 @@ def render(
         "gateway overhead is isolated from provider variance (06 §4). Word-by-word matters: a "
         "single-chunk response would collapse every per-sentence hold into one and report the "
         "overhead of a pipeline nobody runs.",
-        "3. `gateway_overhead_ms` is read from each request's audit record. **Streaming and "
+        "3. `total_attributable_overhead_ms` is read from each request's audit record. **Streaming and "
         "non-streaming are tabulated separately because they are different quantities** — "
         "streaming sums measured hold intervals, non-streaming subtracts the upstream call "
         "from wall-clock (06 §4).",
@@ -811,7 +811,7 @@ def render(
         "### Reference row — client wall-clock − upstream (streaming)",
         "",
         "06 §4 requires this be reported **separately and never as the headline number**, so it "
-        "sits here rather than above. It exceeds `gateway_overhead_ms` by relay and "
+        "sits here rather than above. It exceeds `total_attributable_overhead_ms` by relay and "
         "`TestClient` ASGI transport time — neither a per-sentence hold nor a token wait, and "
         "the harness's own cost rather than the gateway's. Treat it as an upper bound.",
         "",
@@ -1026,7 +1026,7 @@ def render(
         "## Scope and limitations",
         "",
         "**The headline figure is cadence-independent by construction**, because 06 §4 excludes "
-        "upstream token wait from `gateway_overhead_ms`. That is verified, not assumed: "
+        "upstream token wait from `total_attributable_overhead_ms`. That is verified, not assumed: "
         "`test_overhead_is_independent_of_token_cadence` runs the same mix at two cadences and "
         "asserts the figure does not track the change.",
         "",

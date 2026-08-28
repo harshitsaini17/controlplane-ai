@@ -60,7 +60,8 @@ SCHEMA_DDL: tuple[str, ...] = (
       upstream_class TEXT CHECK(upstream_class IN ('dev','measured')),
       cascade_escalated INTEGER,
       tokens_in INTEGER, tokens_out INTEGER, est_cost_usd REAL,
-      latency_json TEXT,            -- per-detector ms + gateway_overhead_ms + upstream_ms
+      latency_json TEXT,            -- per-detector ms + total_attributable_overhead_ms
+      --   + upstream_ms + the ADR-030 series
       -- Coverage (M-10): {"ran": [name], "not_run": [{detector, reason}]}. A detector that
       -- runs and finds nothing emits no Signal, so a short `signals_json` cannot distinguish
       -- "checked, clean" from "never checked". This column states which it was. A not-run

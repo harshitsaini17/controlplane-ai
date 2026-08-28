@@ -282,7 +282,7 @@ class Gateway:
         self.metrics.increment(
             "cp_requests_total", use_case=request.use_case, verdict=verdict.action.value
         )
-        overhead = latency.get("gateway_overhead_ms")
+        overhead = latency.get("total_attributable_overhead_ms")
         if overhead is not None:
             self.metrics.observe(
                 "cp_gateway_overhead_ms", overhead, use_case=request.use_case
@@ -493,7 +493,7 @@ async def _input_terminal(
     review_id = str(uuid.uuid4()) if outcome.action is Action.ESCALATE else None
 
     total_ms = (time.perf_counter() - started) * 1000.0
-    latency["gateway_overhead_ms"] = pipeline.gateway_overhead_ms(
+    latency["total_attributable_overhead_ms"] = pipeline.total_attributable_overhead_ms(
         total_ms=total_ms, upstream_ms=0.0, held_ms=held_ms,
         streaming=request.policy.streaming,
     )
@@ -580,7 +580,7 @@ async def _buffered_response(
     stamped = _request_verdict([input_verdict, verdict], request)
 
     total_ms = (time.perf_counter() - started) * 1000.0
-    latency["gateway_overhead_ms"] = pipeline.gateway_overhead_ms(
+    latency["total_attributable_overhead_ms"] = pipeline.total_attributable_overhead_ms(
         total_ms=total_ms, upstream_ms=upstream_ms, held_ms=held_ms, streaming=False,
     )
     state.audit(
@@ -725,7 +725,7 @@ async def _stream_response(
             total_ms = (time.perf_counter() - started) * 1000.0
             stream_ms = (time.perf_counter() - stream_started) * 1000.0
             latency["upstream_ms"] = round(max(0.0, stream_ms - stream_hold_ms), 3)
-            latency["gateway_overhead_ms"] = pipeline.gateway_overhead_ms(
+            latency["total_attributable_overhead_ms"] = pipeline.total_attributable_overhead_ms(
                 total_ms=total_ms, upstream_ms=latency["upstream_ms"],
                 held_ms=held_ms, streaming=True,
             )

@@ -24,7 +24,7 @@ erDiagram
     INTEGER tokens_in
     INTEGER tokens_out
     REAL est_cost_usd
-    TEXT latency_json "per-detector ms + gateway_overhead_ms + upstream_ms"
+    TEXT latency_json "per-detector ms + total_attributable_overhead_ms + upstream_ms + ADR-030 series"
     INTEGER sampled_deep "was it handed to the deep lane"
   }
 

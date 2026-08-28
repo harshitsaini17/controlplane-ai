@@ -426,10 +426,15 @@ def unit_stage(policy: Policy) -> Stage:
     return Stage.OUTPUT_SENTENCE if policy.streaming else Stage.OUTPUT_FULL
 
 
-def gateway_overhead_ms(
+def total_attributable_overhead_ms(
     *, total_ms: float, upstream_ms: float, held_ms: float, streaming: bool
 ) -> float:
-    """`gateway_overhead_ms` per the **normative** 06 §4 definition. Two formulas, two paths.
+    """`total_attributable_overhead_ms` per the **normative** 06 §4 definition. Two formulas, two paths.
+
+    Renamed from `gateway_overhead_ms` by ADR-030 — **the formula is unchanged**; it lost
+    its target, not its visibility, and the old name read as the headline. The function is
+    renamed with the key deliberately: a helper still called `gateway_overhead_ms` while
+    writing the new key is the exact drift M-20 was filed for.
 
     * **non-streaming** — "total wall-clock − upstream call duration". A subtraction, and
       it is exact: the request is either our work or the one blocking call.

@@ -498,14 +498,14 @@ def test_streaming_overhead_excludes_token_wait_time(make_client) -> None:
 
     latency = audit_of(gateway, response)["latency"]
     assert latency["upstream_ms"] > 50.0, "the injected token-wait should dominate"
-    assert latency["gateway_overhead_ms"] < latency["upstream_ms"] / 2
+    assert latency["total_attributable_overhead_ms"] < latency["upstream_ms"] / 2
 
 
 def test_the_two_overhead_formulas_are_not_the_same_function() -> None:
     """06 §4 defines two formulas; a single implementation would be one of them."""
-    streaming = pipeline.gateway_overhead_ms(
+    streaming = pipeline.total_attributable_overhead_ms(
         total_ms=100.0, upstream_ms=80.0, held_ms=5.0, streaming=True)
-    buffered = pipeline.gateway_overhead_ms(
+    buffered = pipeline.total_attributable_overhead_ms(
         total_ms=100.0, upstream_ms=80.0, held_ms=5.0, streaming=False)
     assert streaming == 5.0 and buffered == 20.0
 
@@ -710,7 +710,7 @@ def test_m13_a_post_release_crash_still_writes_an_audit_record(tmp_path, monkeyp
     assert rows[0]["record_status"] == "partial"
     # Real measurements, not nulls: the row is kept out of aggregates by its status, so
     # there is no reason to blank fields that were genuinely observed (AGENTS.md §7).
-    assert set(json.loads(rows[0]["latency_json"])) >= {"gateway_overhead_ms", "upstream_ms"}
+    assert set(json.loads(rows[0]["latency_json"])) >= {"total_attributable_overhead_ms", "upstream_ms"}
     assert json.loads(rows[0]["detectors_json"])["ran"], "coverage records what had run"
 
 

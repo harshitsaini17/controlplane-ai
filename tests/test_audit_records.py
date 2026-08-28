@@ -94,7 +94,7 @@ def test_fr_aud_001_writes_one_record_readable_as_the_05_4_view(conn) -> None:
         tokens_in=812,
         tokens_out=344,
         est_cost_usd=0.0041,
-        latency_json=json.dumps({spans.INGRESS: 1.0, "gateway_overhead_ms": 46.1,
+        latency_json=json.dumps({spans.INGRESS: 1.0, "total_attributable_overhead_ms": 46.1,
                                  "upstream_ms": 1240.0}),
     ))
     view = canonical_view(conn, "req-1")
@@ -103,7 +103,7 @@ def test_fr_aud_001_writes_one_record_readable_as_the_05_4_view(conn) -> None:
     assert view["model"] == {"tier_requested": "small", "used": "openai/gpt-oss-20b",
                             "upstream_class": "measured", "cascade_escalated": False}
     assert view["cost"] == {"tokens_in": 812, "tokens_out": 344, "est_usd": 0.0041}
-    assert view["latency"]["gateway_overhead_ms"] == 46.1
+    assert view["latency"]["total_attributable_overhead_ms"] == 46.1
     assert view["signals"][0]["labels"] == ["pii.ssn"]
     assert "override" not in view, "an absent override must not render as a null decision"
 

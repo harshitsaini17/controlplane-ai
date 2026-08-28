@@ -95,9 +95,8 @@ CREATE TABLE audit_records (
   latency_json TEXT,            -- per-detector ms + total_attributable_overhead_ms +
                                 --   upstream_ms + input_hold_ms + sentence_holds_ms[] +
                                 --   added_time_to_last_byte_ms   (ADR-030). The two per-hold
-                                --   series ARE emitted; the rename and the last-byte row are
-                                --   not yet (remainder of M-20) -- code still writes
-                                --   gateway_overhead_ms.
+                                --   series and the rename ARE emitted; added_time_to_last_byte_ms
+                                --   is not yet (the last of M-20's remainder).
   -- Coverage: which detectors RAN for this request, and which were expected and did not
   -- (M-10). Absence of coverage is a fact a reader must be able to see, not infer from a
   -- short `signals_json`. `{}` means "coverage not recorded" and is distinct from
@@ -248,7 +247,7 @@ cp_enrichment_skipped_total{use_case,reason}                    # 04 §2.2 cap
 ```
 The definition of `cp_gateway_overhead_ms` / `latency_json.total_attributable_overhead_ms` is **normative in 06 §4** — implementations and dashboards must use that formula, not an ad-hoc one.
 
-**ADR-030 renamed that key** (`gateway_overhead_ms` → `total_attributable_overhead_ms`; same formula, no longer the targeted figure) and added three series: `input_hold_ms`, `sentence_holds_ms` (a **list**, one entry per sentence — the only non-scalar in this vocabulary, because NFR-P-001 now takes percentiles over holds rather than over requests) and `added_time_to_last_byte_ms`. This vocabulary is **enforced at the audit write path** by `check_latency_keys`, so all four are the contract here. `input_hold_ms` and `sentence_holds_ms` **are emitted** on both delivery paths (ADR-030's targeted series; the list carries one entry per released unit, and one for the buffered response on a non-streaming pipeline per M-11). The **rename** and `added_time_to_last_byte_ms` are **not yet emitted** — code still writes `gateway_overhead_ms` — which is the remainder of **M-20**; both are untargeted publication rows, so neither gates NFR-P-001. The metric name `cp_gateway_overhead_ms` is **unchanged**: renaming a metric would orphan history for a figure whose definition did not change.
+**ADR-030 renamed that key** (`gateway_overhead_ms` → `total_attributable_overhead_ms`; same formula, no longer the targeted figure) and added three series: `input_hold_ms`, `sentence_holds_ms` (a **list**, one entry per sentence — the only non-scalar in this vocabulary, because NFR-P-001 now takes percentiles over holds rather than over requests) and `added_time_to_last_byte_ms`. This vocabulary is **enforced at the audit write path** by `check_latency_keys`, so all four are the contract here. `input_hold_ms` and `sentence_holds_ms` **are emitted** on both delivery paths (ADR-030's targeted series; the list carries one entry per released unit, and one for the buffered response on a non-streaming pipeline per M-11). The **rename is emitted** as of 2026-08-28: the write path, `spans.py`'s enforced vocabulary and the single 06 §4 formula implementation all carry `total_attributable_overhead_ms`, and the function computing it was renamed with the key — a helper still called `gateway_overhead_ms` while writing the new key is the drift **M-20** was filed for. `added_time_to_last_byte_ms` is **still not emitted** and is the last of that remainder; it is an untargeted publication row, so it does not gate NFR-P-001. The metric name `cp_gateway_overhead_ms` is **unchanged**: renaming a metric would orphan history for a figure whose definition did not change.
 
 ## 6. Config files
 

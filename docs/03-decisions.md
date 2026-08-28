@@ -885,13 +885,24 @@ non-streaming pipeline one entry for the buffered response, which M-11 makes the
 population is **holds, not requests** — a 10-segment response contributes 10 samples, which is
 what a per-hold target means.
 
-Still not emitted, and tracked as the remainder of **M-20**: the **rename**
-(`app.py` writes `gateway_overhead_ms`, not `total_attributable_overhead_ms` — the code's enforced
-vocabulary in `spans.py` still carries the old name) and **`added_time_to_last_byte_ms`**. Both
-are untargeted publication rows, so neither blocks NFR-P-001; the divergence is between this ADR's
-documented vocabulary and `check_latency_keys`' enforced one, and it is not caught by a test —
-`tests/test_telemetry.py` parses the 05 §5 **span** and **metric** tables from the doc, but the
-`latency_json` key names are not doc-parsed.
+**Updated 2026-08-28 — the rename landed; one untargeted row remains.** `app.py`, `spans.py`'s
+enforced vocabulary and the single 06 §4 formula implementation all carry
+`total_attributable_overhead_ms`, and `pipeline.gateway_overhead_ms` was renamed **with** the key:
+a helper still bearing the old name while writing the new one is precisely the drift **M-20**
+records. The metric `cp_gateway_overhead_ms` is deliberately **not** renamed (05 §5) — renaming it
+would orphan history for a figure whose definition did not change.
+
+Still not emitted, and now the whole of **M-20**'s remainder: **`added_time_to_last_byte_ms`**. It
+is an untargeted publication row, so it does not block NFR-P-001.
+
+The gap that let the rename sit undetected is closed rather than noted: `latency_json` key names
+are still not doc-parsed (`tests/test_telemetry.py` parses the 05 §5 **span** and **metric**
+tables, and these keys are neither), so
+`tests/review/test_checkpoint3_latency_keys.py` now asserts the doc's emission claim and the
+enforced vocabulary agree **in both directions** for the remaining key. That test is what fired on
+this rename instead of letting the code drift from the persisted rows — the outcome a tripwire
+exists for — and it was re-pointed rather than deleted (ADR-031 consequence 5's rule, applied to a
+different tripwire for the same reason).
 
 What the original caveat here said, kept because it is the reasoning the fix had to satisfy:
 NFR-P-001 was `not measured` from this ADR until the instrumentation landed — the old per-request

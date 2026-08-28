@@ -9,7 +9,7 @@ zero, and that the NFR gates fire on the requirement each one actually scopes.
 
 One test is a **property** rather than a mechanic:
 `test_overhead_is_independent_of_token_cadence`. 06 §4 excludes upstream token wait from
-`gateway_overhead_ms`, so the headline figure must not move when the stub's cadence does. The
+`total_attributable_overhead_ms`, so the headline figure must not move when the stub's cadence does. The
 report cites this test by name as the evidence for that claim, so it must exist and must mean
 what the report says.
 
@@ -103,7 +103,7 @@ def test_overhead_is_independent_of_token_cadence(corpus):
     )
     delta_overhead = abs(ov_slow.p50 - ov_fast.p50)
     assert delta_overhead < 0.25 * delta_upstream, (
-        f"gateway_overhead_ms tracked the token cadence ({ov_fast.p50:.3f} -> "
+        f"total_attributable_overhead_ms tracked the token cadence ({ov_fast.p50:.3f} -> "
         f"{ov_slow.p50:.3f} ms against {delta_upstream:.1f} ms of added upstream wait); "
         "06 §4 excludes token wait from that figure"
     )
@@ -148,7 +148,7 @@ def test_the_harness_reads_only_keys_in_the_05_5_vocabulary():
     the report looks fine.
     """
     source = (ROOT / "eval" / "bench_latency.py").read_text()
-    for key in ("gateway_overhead_ms", "upstream_ms"):
+    for key in ("total_attributable_overhead_ms", "upstream_ms"):
         assert f'"{key}"' in source
         assert key in LATENCY_KEYS
     # `wall_ms` is the harness's own stopwatch and must NOT be presented as a latency key.
@@ -156,14 +156,14 @@ def test_the_harness_reads_only_keys_in_the_05_5_vocabulary():
 
 
 def test_a_missing_overhead_is_an_error_not_a_zero_sample():
-    """A row without `gateway_overhead_ms` is recorded as an error, never sampled as 0.0.
+    """A row without `total_attributable_overhead_ms` is recorded as an error, never sampled as 0.0.
 
     Structural, because provoking it needs a broken write path. A zero would be indexed into
     the percentiles as the fastest request in the run.
     """
     source = (ROOT / "eval" / "bench_latency.py").read_text()
-    assert "no gateway_overhead_ms" in source
-    assert 'overhead = latency.get("gateway_overhead_ms")' in source
+    assert "no total_attributable_overhead_ms" in source
+    assert 'overhead = latency.get("total_attributable_overhead_ms")' in source
     assert "if overhead is None:" in source
 
 
