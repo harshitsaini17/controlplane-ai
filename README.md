@@ -18,20 +18,29 @@ This is a **hackathon prototype**, and this README will not pretend otherwise wh
 
 | Area | State |
 |---|---|
-| Specification (`docs/00`–`08`) | complete — 23 ADRs ruled |
+| Specification (`docs/00`–`08`) | complete — **31** ADRs ruled in `docs/03` (count pinned by `tests/test_readme_status.py`, not maintained by hand) |
 | Policy schema + 3 use-case policies | implemented, validated, tested |
 | Detector contract (`Signal`, budgets, failure vocabulary) | implemented, tested |
 | Deterministic detectors — `tier1_pii`, `tier1_blocklist`, `numeric_claims` | implemented, tested (3 of the 11 rows in `docs/04` §2) |
 | Labeled eval dataset (280 cases) | authored and **frozen**; passes the consistency gate, **label review pending** |
 | Audit DB schema | implemented |
 | Model-backed detectors — injection, toxicity, consistency, grounding, NER enrichment | **not yet implemented** |
-| Gateway hot path, policy engine, cost detectors | **not yet implemented** |
+| Gateway hot path — ingress lane, sentence buffer, buffered + streaming delivery, SSE proxy, startup canary | implemented, tested |
+| Policy engine — Pass/Edit/Block/Escalate, band logic, fail-open/fail-closed resolution | implemented, tested |
+| Cost detectors (`cost_budget`) | **not yet implemented** |
 | Detector eval harness (`eval/run_all.py`) | implemented, tested — **3 of 11 detectors scored** |
-| Latency / fault-injection / cost / leak-scan harnesses, dashboard, demo runner | **not yet implemented** |
+| Latency benchmark + fault-injection harness | implemented, tested — committed evidence in `reports/` |
+| Cost-simulation / PII-leak-scan harnesses, dashboard, demo runner | **not yet implemented** |
 
-`python -m eval.validate_dataset` passes. `python -m pytest` passes (433 collected: 431
-pass, 2 `xfail`). Nothing in
-`docs/07-demo-script.md` runs end to end yet.
+`python -m eval.validate_dataset` passes, and so does `python -m pytest`. There is
+deliberately **no literal test count here.** One goes stale the moment a test is added, and
+three stale copies of the same number is exactly what `docs/08` **M-23** was filed for — so
+the count now lives where it cannot drift: `.github/workflows/ci.yml` runs the suite, the
+dataset freeze gate, the fault-injection invariants and the latency tripwire on py3.12 and
+py3.14. A gate's current result is whatever that run reports, not whatever this file last
+claimed.
+
+Nothing in `docs/07-demo-script.md` runs end to end yet.
 
 **The three deterministic detectors were scored, two of them missed, and both were then
 revised under disclosure rather than silently.** They were built from the `docs/04` §2
@@ -103,7 +112,7 @@ lifted: these figures are citable provided they are labelled v1 or v2.
 ```sh
 python -m venv .venv
 .venv/bin/pip install -e ".[dev]"
-.venv/bin/python -m pytest -q                       # 433: 431 pass, 2 xfail
+.venv/bin/python -m pytest -q                       # the suite; CI runs it on 3.12 + 3.14
 .venv/bin/python -m eval.validate_dataset           # consistency gate (06 §2.4)
 .venv/bin/python -m eval.validate_dataset --freeze  # + assert the dataset is the frozen one
 ```
@@ -195,7 +204,7 @@ controlplane/  gateway, detectors, policy engine, audit, telemetry
 policies/      one YAML per use case — the behaviour lives here, not in Python
 config/        upstream providers + price table (05 §6.1)
 eval/          labeled dataset + evaluation harness (06)
-tests/         433 tests, named against the requirement IDs they cover
+tests/         named against the requirement IDs they cover (`test_fr012_…`)
 tests/review/  independent checkpoint-review tests; its 2 xfail cases are documented
                limitations (Unicode homoglyph + zero-width email evasion), not
                pending fixes. The third was the comma-grouped-card false positive,
