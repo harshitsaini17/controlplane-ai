@@ -745,7 +745,9 @@ It breached under **both** readings, so the finding never rested on the sequenti
    publication by this ADR.**
 3. **`added_time_to_last_byte_ms` is added as a measured, untargeted row** — the honest
    end-to-end quantity, and the one a user's stopwatch would agree with. Untargeted because it
-   contains upstream token cadence, which the gateway does not control.
+   contains upstream token cadence, which the gateway does not control. *(Amendment 1 keeps this
+   row and moves where it is measured: 06 §4's benchmark client, not `latency_json`. The
+   gateway has no client vantage, which this item assumed without checking.)*
 4. **The per-sentence lane goes parallel when Tier-2 lands** (below), not before.
 
 ### Derivation of the targets — from the documented budgets, not from convenience
@@ -892,14 +894,16 @@ a helper still bearing the old name while writing the new one is precisely the d
 records. The metric `cp_gateway_overhead_ms` is deliberately **not** renamed (05 §5) — renaming it
 would orphan history for a figure whose definition did not change.
 
-Still not emitted, and now the whole of **M-20**'s remainder: **`added_time_to_last_byte_ms`**. It
-is an untargeted publication row, so it does not block NFR-P-001.
+**Updated 2026-08-28 — M-20's remainder closes by re-siting, not by emission.** See
+**Amendment 1**: `added_time_to_last_byte_ms` is not a `latency_json` key, because the gateway
+cannot occupy the vantage its definition names. It stays published, from the benchmark client.
 
 The gap that let the rename sit undetected is closed rather than noted: `latency_json` key names
 are still not doc-parsed (`tests/test_telemetry.py` parses the 05 §5 **span** and **metric**
 tables, and these keys are neither), so
-`tests/review/test_checkpoint3_latency_keys.py` now asserts the doc's emission claim and the
-enforced vocabulary agree **in both directions** for the remaining key. That test is what fired on
+`tests/review/test_checkpoint3_latency_keys.py` now asserts the doc and the enforced vocabulary
+agree **in both directions** for the remaining key — re-pointed by Amendment 1 onto the re-siting,
+since "documented but not yet emitted" stopped being a state that key can be in. That test is what fired on
 this rename instead of letting the code drift from the persisted rows — the outcome a tripwire
 exists for — and it was re-pointed rather than deleted (ADR-031 consequence 5's rule, applied to a
 different tripwire for the same reason).
@@ -923,6 +927,59 @@ percentile far from the cause.
 **Docs touched:** 01 (NFR-P-001 row), 02 §3 (parallel-at-Tier-2 trigger), 05 §3/§5 (`latency_json`
 vocabulary: the rename plus the two new series), 06 §4 (formula gains the per-hold series and the
 last-byte row; the sum retained under its new name), 08 (deviation closed; M-18/M-19 logged).
+
+### Amendment 1 — 2026-08-28: `added_time_to_last_byte_ms` is a benchmark-client quantity, not a `latency_json` key (resolves `[D1-added-time-to-last-byte-has-no-server-side-vantage]`)
+
+Item 3 above added this row and sited it in `latency_json`, a column the **gateway** writes. Its
+own definition opens "client-observed". The gateway is not a client, and the deviation that found
+this closed all four ways it might still have been reachable:
+
+1. **A completed ASGI `send()` is handed-to-transport, not client-received.** Whatever the
+   streaming generator measures after its final `yield` is a handoff delta. Publishing that under
+   a name promising a client stopwatch overstates what was measured (AGENTS.md §7) — and it would
+   overstate it *invisibly*, since the number is plausible either way.
+2. **The buffered path writes the record before the response exists.** `app.py`'s audit write
+   precedes `return JSONResponse(...)`, an ordering **M-13** established deliberately so a crash
+   after content release still leaves a row.
+3. **Deferring the write to obtain the figure reopens M-13.** The gap that ordering closed is
+   exactly a request whose record is written after delivery and therefore not at all.
+4. **The table is insert-only.** No `UPDATE audit_records` exists in `controlplane/`, and
+   `record_status` is a crash marker, not a second phase — so there is no later moment in which a
+   post-delivery figure could arrive.
+
+**Ruling.** The figure is **re-sited, not withdrawn.** Nothing leaves publication:
+
+1. **06 §4 becomes its normative home**, defined as a quantity of the benchmark client — the one
+   process in this repo that genuinely holds the vantage. **Withdrawn from 05 §3/§5**, whose
+   vocabulary is enforced at the write path, so the withdrawal is mechanical rather than editorial:
+   `check_latency_keys` refuses the key.
+2. **It aliases and absorbs `reference_delta_ms`**, the `wall − upstream` row `eval/bench_latency.py`
+   already computed, rather than joining it as a second series. One subtraction under two names
+   invites the reading that one of them is the uncontaminated version. Both of that row's caveats
+   travel with the name and are non-negotiable: it is an **upper bound** (it carries `TestClient`
+   ASGI transport cost a real client would not pay) and it is **never the headline number**.
+3. **M-20's remainder closes here.** The rename landed in `ab06917`; this was the rest, and it
+   closes as a specification correction rather than as an emission — which is the honest outcome,
+   since the emission was never constructible.
+
+**Why an amendment and not a new ADR.** It reverses no decision of ADR-030 — the row is still
+published, still untargeted, still the end-to-end figure the trade-off paragraph leans on. What
+moves is *which process measures it*, which ADR-030 assumed rather than chose. Recording that as a
+separate ADR would leave item 3 reading correct in isolation.
+
+**Not a target movement (ADR-026 §5).** This row never had a target. NFR-P-001's verdict is
+untouched, and SL-1 stays unmet and unmoved.
+
+**Consequence — the tripwire fired and was re-pointed for the second time.**
+`tests/review/test_checkpoint3_latency_keys.py` asserted "05 §5 says not-yet-emitted" against
+"absent from the enforced vocabulary". This amendment voids that premise rather than satisfying it,
+so the test now pins the re-siting in both directions: the enforced vocabulary must not grow the key
+back, **and** 06 §4 must keep defining it. Re-pointed rather than deleted, per ADR-031
+consequence 5's rule — a tripwire's job outlives the transition it caught.
+
+**Docs touched:** 05 §3/§4/§5 (key withdrawn from `latency_json`, the DDL comment and the record
+example), 06 §4 (normative home; absorbs the reference row), 01 (NFR-P-001 row notes the vantage),
+08 (deviation closed; M-20 closed).
 
 ---
 

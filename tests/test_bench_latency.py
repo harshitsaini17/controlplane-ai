@@ -517,15 +517,26 @@ def test_a_short_run_says_it_is_not_the_specified_benchmark(batch):
     assert "not the specified benchmark" in body
 
 
-def test_the_reference_row_is_labelled_as_not_the_headline(batch):
-    """06 §4 requires the wall-minus-upstream row be reported and never headlined."""
+def test_the_last_byte_row_is_labelled_as_not_the_headline(batch):
+    """06 §4 requires the wall-minus-upstream row be reported and never headlined.
+
+    The section anchor moved with **ADR-030 Amendment 1**, which absorbed the row formerly
+    called `reference_delta_ms` into `added_time_to_last_byte_ms` — one subtraction that had
+    been carrying two names. Every assertion below predates that and is unchanged: what the
+    amendment altered is the heading this test locates, not the caveats it enforces.
+    """
     body = bl.render(batch, dataset_dir=bl.DATASET_DIR, provenance_note="",
                      cadence_ms=0.5, violations=[], live_note="")
     assert "never as the headline number" in body
     assert "upper bound" in body
     headline_at = body.index("`total_attributable_overhead_ms` — streaming pipelines")
-    reference_at = body.index("Reference row")
-    assert headline_at < reference_at, "the reference row must not precede the headline table"
+    reference_at = body.index("### `added_time_to_last_byte_ms`")
+    assert headline_at < reference_at, "the untargeted row must not precede the headline table"
+    # The absorption itself: one name for one subtraction, and the old one retired.
+    assert "reference_delta_ms" not in body or "previously reported under the name" in body
+    assert "not read back from `latency_json`" in body, (
+        "the row must say it is client-measured; the gateway has no such vantage"
+    )
 
 
 def test_violations_render_as_a_d3_instruction_not_a_relaxed_target(batch):

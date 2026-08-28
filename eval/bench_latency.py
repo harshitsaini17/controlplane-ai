@@ -234,13 +234,26 @@ class Sample:
     input_hold_ms: float | None = None
 
     @property
-    def reference_delta_ms(self) -> float:
-        """`wall − upstream`: the 06 §4 reference row, explicitly NOT the headline number.
+    def added_time_to_last_byte_ms(self) -> float:
+        """06 §4's `added_time_to_last_byte_ms`: `wall − upstream`, from the client vantage.
 
-        For a streaming pipeline this exceeds `overhead_ms` by the relay and transport time
-        that is neither a per-sentence hold nor a token wait. `pipeline.total_attributable_overhead_ms`
-        declines to clamp that gap away and says it belongs here as a reported row, so here it
-        is — as an upper bound a reader can see, rather than a discrepancy they have to infer.
+        **This property IS that figure, not an approximation of it** (ADR-030 Amendment 1).
+        The name previously used here was `reference_delta_ms`, and the amendment absorbed the
+        two into one: the quantity 06 §4 defines is client-observed last-byte time minus the
+        same request's upstream duration, and this benchmark — holding a stopwatch around the
+        call — is the only process in this repo that can measure it. The gateway cannot, which
+        is why the key was withdrawn from `latency_json`. Two names for one subtraction invited
+        the reading that one of them was the uncontaminated version.
+
+        Both caveats are permanent and travel with the name:
+
+        * **An upper bound.** It carries `TestClient`'s ASGI transport cost, which is harness
+          overhead a real client would not pay. For a streaming pipeline it therefore exceeds
+          `overhead_ms` by relay and transport time that is neither a per-sentence hold nor a
+          token wait — `pipeline.total_attributable_overhead_ms` declines to clamp that gap
+          away and says it belongs here, so here it is, visible rather than inferred.
+        * **Never the headline number** (06 §4). It contains upstream token cadence, which the
+          gateway does not control, and it is untargeted for that reason.
         """
         return max(0.0, self.wall_ms - self.upstream_ms)
 
@@ -805,19 +818,26 @@ def render(
         lines.append(_row(f"{UC_LABEL[uc]} `{uc}`", Stats.of(batch.overheads(uc, streaming=False))))
     lines.append(_row("**all non-streaming**", Stats.of(batch.overheads(streaming=False))))
 
-    ref = Stats.of([s.reference_delta_ms for s in batch.by_stream_mode(True)])
+    ref = Stats.of([s.added_time_to_last_byte_ms for s in batch.by_stream_mode(True)])
     lines += [
         "",
-        "### Reference row — client wall-clock − upstream (streaming)",
+        "### `added_time_to_last_byte_ms` — client wall-clock − upstream (streaming)",
         "",
         "06 §4 requires this be reported **separately and never as the headline number**, so it "
         "sits here rather than above. It exceeds `total_attributable_overhead_ms` by relay and "
         "`TestClient` ASGI transport time — neither a per-sentence hold nor a token wait, and "
         "the harness's own cost rather than the gateway's. Treat it as an upper bound.",
         "",
+        "**Measured here, by the client, and not read back from `latency_json`** (ADR-030 "
+        "Amendment 1). The figure is defined as *client-observed* last-byte time minus the "
+        "request's upstream duration, and the gateway has no client vantage: a completed ASGI "
+        "`send()` means handed to the transport, not received. So this row is the quantity "
+        "itself rather than a stand-in for a column the gateway writes — it was previously "
+        "reported under the name `reference_delta_ms`, and the two were one subtraction.",
+        "",
         "| Series | n | P50 | P95 | P99 | min | max |",
         "|---|---|---|---|---|---|---|",
-        _row("wall − upstream (upper bound)", ref),
+        _row("`added_time_to_last_byte_ms` (upper bound)", ref),
         "",
         "## Per-detector latency vs NFR-P-002 budgets",
         "",

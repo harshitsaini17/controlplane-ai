@@ -40,10 +40,10 @@ def _documented_current_keys() -> set[str]:
     The set stays explicit instead of being scraped from the paragraph, because the
     paragraph is prose about a transition and does not enumerate the emitted keys:
     `upstream_ms` never appears in it (it predates ADR-030 and was never in question),
-    while `added_time_to_last_byte_ms` does appear and is **not** emitted — so parsing
-    every name out of it would be wrong in both directions at once. What *is* derived is
-    the transition state itself, asserted against the code in `test_the_last_m20_key_is_
-    still_absent_from_the_enforced_vocabulary` below.
+    while `added_time_to_last_byte_ms` appears there only to say it is **not a key of this
+    column** — so parsing every name out of it would be wrong in both directions at once.
+    What *is* derived is the re-siting itself, asserted against the code in
+    `test_the_last_byte_quantity_is_sited_where_the_vantage_exists` below.
     """
     paragraph = _emission_paragraph()
     rename = "`gateway_overhead_ms` → `total_attributable_overhead_ms`"
@@ -59,25 +59,44 @@ def _documented_current_keys() -> set[str]:
     }
 
 
-def test_the_last_m20_key_is_still_absent_from_the_enforced_vocabulary() -> None:
-    """The other half of M-20, kept tripwired the same way the rename was.
+def test_the_last_byte_quantity_is_sited_where_the_vantage_exists() -> None:
+    """★ **This test fired on 2026-08-28 and was re-pointed — the second time.**
 
-    `added_time_to_last_byte_ms` is documented by ADR-030 and 05 §3 but is still not
-    written, so it is deliberately absent from `check_latency_keys`' enforced set. This
-    asserts the doc's claim and the code agree **in both directions**: when that key lands,
-    this test fails and points at the sentence in 05 §5 that has to change with it.
+    Its previous premise was that `added_time_to_last_byte_ms` was documented-but-pending:
+    a transition state, asserted as `doc_says_absent == code_says_absent` so that emitting
+    the key would fail here until 05 §5 changed with it. **ADR-030 Amendment 1 voided that
+    premise** rather than resolving it — the key is not a `latency_json` key at all now, so
+    "not yet emitted" is no longer a state the doc can be in, and a test asserting that
+    sentence exists would demand prose the ruling removed.
+
+    Re-pointed, not deleted, for the reason ADR-031 consequence 5 gives: the tripwire's job
+    survives the transition it detected. Its job now is that the re-siting holds on **both**
+    sides and in **both** directions — the enforced vocabulary must not grow the key back
+    (that would restore a row whose label promises a vantage the writer lacks), and 06 §4
+    must keep defining it (silently dropping it would withdraw a published figure, which the
+    amendment explicitly does not do).
     """
     from controlplane.telemetry import spans
 
-    paragraph = _emission_paragraph()
-    doc_says_absent = "`added_time_to_last_byte_ms` is **still not emitted**" in paragraph
-    code_says_absent = "added_time_to_last_byte_ms" not in spans.LATENCY_KEYS
-    assert doc_says_absent == code_says_absent, (
-        f"05 §5 says added_time_to_last_byte_ms is unemitted={doc_says_absent}, but "
-        f"spans.LATENCY_KEYS says unemitted={code_says_absent} — M-20's remaining half "
-        "moved on one side only"
+    doc_05_says_not_a_key = (
+        "`added_time_to_last_byte_ms` is **not a key of this column at all**"
+        in _emission_paragraph()
     )
-    # And the rename's own half is now the opposite state, in the same enforced set.
+    code_says_not_a_key = "added_time_to_last_byte_ms" not in spans.LATENCY_KEYS
+    assert doc_05_says_not_a_key == code_says_not_a_key, (
+        f"05 §5 says added_time_to_last_byte_ms is not a latency_json key="
+        f"{doc_05_says_not_a_key}, but spans.LATENCY_KEYS says={code_says_not_a_key} — "
+        "ADR-030 Amendment 1's re-siting moved on one side only"
+    )
+
+    # Re-sited, NOT withdrawn: 06 §4 must still define it, and as a client quantity.
+    doc_06 = (ROOT / "docs" / "06-evaluation-plan.md").read_text()
+    assert "`added_time_to_last_byte_ms`" in doc_06, (
+        "the amendment re-sites this figure into 06 §4; it must not vanish from publication"
+    )
+    assert "**A benchmark-client quantity, defined here and NOT a `latency_json` key**" in doc_06
+
+    # And the rename's own half stays the opposite state, in the same enforced set.
     assert "total_attributable_overhead_ms" in spans.LATENCY_EXTRA_KEYS
     assert "gateway_overhead_ms" not in spans.LATENCY_KEYS
 
