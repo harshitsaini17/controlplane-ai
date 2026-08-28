@@ -368,7 +368,10 @@ a §5 fault from another unit whenever the two tied on severity. `contributing_s
 - ESCALATE: stream terminated; **entire response** (released + unreleased parts) quarantined as a review item; user gets `escalate_user_notice`.
 
 ### 4.5 Input-stage verdicts
-Input BLOCK/ESCALATE short-circuits before dispatch (no upstream call, no cost).
+Input BLOCK/ESCALATE short-circuits before dispatch (no upstream call, no cost). "No cost"
+is recorded as such rather than as an absence: the record carries `tokens_in`/`tokens_out`
+of **0/0** and, on a `measured`-class provider, `est_cost_usd` of **0.0** — see the
+no-dispatch rows in 05 §3.
 
 **Input EDIT is supported, as pre-dispatch redaction (ADR-020).** Spans are replaced in the prompt *before* the upstream call, the categories are audited, and dispatch proceeds — so the provider never receives the raw value. The input is fully buffered before dispatch, so this is strictly simpler than the mid-stream output-sentence case: no partial release, no recall problem, no latency race.
 

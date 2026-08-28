@@ -1163,3 +1163,98 @@ def test_the_buffered_path_aggregates_the_input_edit_too(make_client, tmp_path) 
     assert len(body["controlplane"]["actions"]["input_redactions"]) == 1
     assert response.headers.get(HEADER_ACTIONS) == "edit"
     assert audit_of(gateway, response)["verdict"] == "edit"
+
+
+# ---------------------------------------------------------------------------
+# Pre-dispatch cost accounting (owner ruling, 2026-08-28)
+#
+# 04 §4.5 answers an input BLOCK/ESCALATE without calling a provider. The record used to
+# leave tokens and cost null, reasoning that a zero "would claim a free upstream call
+# happened". The ruling inverts that for the quantities we actually know: nothing was
+# sent, so 0 tokens is a COUNT, and on a measured-class provider the cost is a *counted*
+# zero. Null is excluded from an average, so leaving it null deletes the saving — a
+# pipeline blocking half its traffic pre-dispatch would report the same mean cost as one
+# blocking none. `model_used` stays null: no model answered.
+#
+# The class split is the trap in testing this. The shipped `active_provider` is
+# `kiro-local`, which is DEV class, so an `est_usd is None` assertion against the default
+# config passes both before and after the change and pins nothing. The measured branch is
+# therefore tested against a measured-class config, not the default one.
+# ---------------------------------------------------------------------------
+
+
+def measured_config(tmp_path):
+    """The shipped config with a measured-class provider made active (ADR-018)."""
+    text = (ROOT / "config" / "gateway.yaml").read_text()
+    assert "active_provider: kiro-local" in text, "config drift: the dev default moved"
+    path = tmp_path / "gateway.yaml"
+    path.write_text(text.replace("active_provider: kiro-local", "active_provider: groq", 1))
+    config = load_gateway_config(path)
+    assert config.active.upstream_class.value == "measured"
+    return config
+
+
+def test_a_pre_dispatch_block_counts_zero_tokens_rather_than_unknown(make_client) -> None:
+    """0/0 is what we know, not what we failed to observe (04 §4.5)."""
+    client, gateway, stub = make_client("never reached")
+    response = post(client, "hr_copilot", prompt=PII["text"])
+
+    view = audit_of(gateway, response)
+    assert view["verdict"] == "block", "the scenario requires an input-stage terminal"
+    assert stub.calls == 0, "something dispatched — then 0/0 would be a false claim"
+    assert (view["cost"]["tokens_in"], view["cost"]["tokens_out"]) == (0, 0)
+    # No model answered, and naming one would invent the dispatch this test just ruled out.
+    assert view["model"]["used"] is None
+
+
+def test_the_measured_class_records_the_saving_as_a_counted_zero(make_client, tmp_path) -> None:
+    """`est_cost_usd = 0.0` on a measured provider: the request demonstrably cost nothing.
+
+    Asserted against a measured-class config because the shipped default is `dev`, where
+    the expected value is `None` — so this claim is untestable on the default config and a
+    test that used it would be reporting the dev branch's behaviour under the measured
+    branch's name.
+    """
+    client, gateway, _ = make_client("never reached", config=measured_config(tmp_path))
+    response = post(client, "hr_copilot", prompt=PII["text"])
+
+    view = audit_of(gateway, response)
+    assert view["verdict"] == "block"
+    assert view["cost"]["est_usd"] == 0.0
+    assert view["cost"]["est_usd"] is not None, "null would drop the saving from the mean"
+
+
+def test_the_dev_class_stays_null_even_pre_dispatch(make_client) -> None:
+    """ADR-018: `dev` accounting is not a measurement, so it has no zero to report.
+
+    The arithmetic is available here — 0 tokens times any price is 0 — and is deliberately
+    not used. A 0.0 from a dev provider is a figure barred from every judge-facing
+    artifact, sitting in the column those artifacts read.
+    """
+    client, gateway, _ = make_client("never reached")
+    assert gateway.config.active.upstream_class.value == "dev"
+
+    view = audit_of(gateway, post(client, "hr_copilot", prompt=PII["text"]))
+    assert view["cost"]["est_usd"] is None
+    # The counts are still real: they are observations, not prices.
+    assert (view["cost"]["tokens_in"], view["cost"]["tokens_out"]) == (0, 0)
+
+
+def test_a_dispatched_unpriceable_request_is_still_null_on_the_measured_class(
+    make_client, tmp_path
+) -> None:
+    """ADR-022 null-not-zero, where it still governs — the case the ruling did NOT touch.
+
+    The stub model is in no price table, so a dispatched request's cost is *unknown*. This
+    is the assertion that keeps the new rule scoped to the short-circuit: if the
+    counted-zero branch ever widened to cover dispatches, this would flip to 0.0 and claim
+    a real upstream call was free.
+    """
+    client, gateway, stub = make_client("Markets closed higher.",
+                                       config=measured_config(tmp_path))
+    view = audit_of(gateway, post(client, "finance_advisor"))
+
+    assert stub.calls == 1, "the scenario requires a real dispatch"
+    assert view["model"]["used"] == "stub-model"
+    assert view["cost"]["est_usd"] is None
+    assert (view["cost"]["tokens_in"], view["cost"]["tokens_out"]) == (11, 22)

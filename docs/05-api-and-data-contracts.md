@@ -318,8 +318,22 @@ a gap loud rather than silent:
 | situation | behaviour |
 |---|---|
 | model missing from `pricing.models` at runtime | `est_cost_usd` = **null** (not 0.0, not a guess) + `cp_pricing_missing_total` |
+| **no dispatch** (04 §4.5 short-circuit), `measured` class | `tokens_in`/`tokens_out` = **0/0** and `est_cost_usd` = **0.0** — a *counted* zero, not an estimate; `model_used` stays null |
+| **no dispatch**, `dev` class | `tokens_in`/`tokens_out` = **0/0**, `est_cost_usd` = **null** |
 | provider declares `pricing: null`, `measured` class | boot **warning** naming the provider |
 | model missing at boot **and** named in `tiers`, `measured` class | **hard boot failure** — it is on a routing path, so it will answer requests and produce unpriceable audit records |
+
+The two **no dispatch** rows are the one place the null-not-zero rule inverts, and it
+inverts because the quantity changes rather than the policy (owner ruling, 2026-08-28).
+Row 1 is null because the cost is *unknown*; a short-circuited request sent nothing, so 0
+tokens is a **count** and — on a provider whose accounting is trustworthy — 0.0 is a
+**measurement** of what blocking before dispatch saved. Null there would delete the saving:
+null is excluded from an average, so a pipeline blocking half its traffic pre-dispatch
+would report the same mean cost as one blocking none. `dev` class stays null for the
+ADR-018 reason and not for want of arithmetic — its figures are barred from every
+judge-facing artifact, so a 0.0 from it would sit in the column those artifacts read.
+`model_used` is null on both rows: no model answered, and naming one would invent a
+dispatch.
 
 Both boot rows are **measured-class only**, and that scope is load-bearing rather than an
 omission. A `dev`-class provider exists under ADR-018 precisely to be usable *while*

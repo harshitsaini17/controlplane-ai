@@ -54,7 +54,7 @@ from controlplane.audit.records import (
 from controlplane.detectors.base import Signal, Stage
 from controlplane.gateway import pipeline
 from controlplane.gateway.canary import CanaryResult, canary_on_startup
-from controlplane.gateway.config import GatewayConfig, load_gateway_config
+from controlplane.gateway.config import GatewayConfig, UpstreamClass, load_gateway_config
 from controlplane.gateway.ingress import (
     HEADER_ACTIONS,
     HEADER_REQUEST_ID,
@@ -229,6 +229,7 @@ class Gateway:
         tier_requested: str | None = None,
         tokens_in: int | None = None,
         tokens_out: int | None = None,
+        no_dispatch: bool = False,
         record_status: str = RECORD_STATUS_COMPLETE,
     ) -> None:
         """Write the one record for this request (FR-AUD-001).
@@ -239,9 +240,25 @@ class Gateway:
         `est_cost_usd` stays `None` unless the active provider can price the model that
         actually answered — ADR-022's null-not-zero rule. A zero would read as "this was
         free" rather than "we cannot price this", and the cost plane would average it in.
+
+        `no_dispatch` marks the 04 §4.5 short-circuit, where that rule inverts (owner
+        ruling, 2026-08-28). Nothing was sent upstream, so 0 tokens is a **count** rather
+        than a missing value, and on a `measured`-class provider the cost is a *counted*
+        zero — the request demonstrably cost nothing, which is the whole point of blocking
+        before dispatch. Leaving it null would delete the saving from the cost plane:
+        null is excluded from an average, so a pipeline that blocked half its traffic
+        pre-dispatch would report the same mean cost as one that blocked none.
+
+        Dev class stays null even here, and not for want of arithmetic — ADR-018 makes
+        `dev` accounting *not a measurement*, so a 0.0 from it would be a figure barred
+        from every judge-facing artifact sitting in the column those artifacts read.
         """
         est = None
-        if model_used and tokens_in is not None and tokens_out is not None:
+        if no_dispatch:
+            tokens_in, tokens_out = 0, 0
+            if self.config.active.upstream_class is UpstreamClass.MEASURED:
+                est = 0.0
+        elif model_used and tokens_in is not None and tokens_out is not None:
             est = self.config.active.est_cost_usd(model_used, tokens_in, tokens_out)
 
         record = AuditRecord.from_verdict(
@@ -457,9 +474,10 @@ async def _input_terminal(
 ) -> Response:
     """An input-stage BLOCK or ESCALATE: answered without ever calling a provider.
 
-    `model_used`, `tokens_*` and `est_cost_usd` are all left null, which is the honest
-    record of 04 §4.5: there was no dispatch, so there is no model and no cost. A zero
-    would claim a free upstream call happened.
+    `model_used` is null — no model answered, and naming one would invent a dispatch.
+    The token counts are `0/0` and the cost is a counted zero on a measured-class
+    provider (`no_dispatch=True`; see `Gateway.audit`), because "we sent nothing" is a
+    quantity we know exactly rather than one we failed to observe.
     """
     # Minted before either write, because the audit record's `actions_json` names it while
     # the review row REFERENCES the audit record — see `Gateway.quarantine`.
@@ -483,6 +501,7 @@ async def _input_terminal(
             rescan_findings=outcome.rescan_findings,
             notes=outcome.notes,
         ),
+        no_dispatch=True,
     )
     if review_id is not None:
         await state.quarantine(request, outcome.quarantined_text or "", review_id)
