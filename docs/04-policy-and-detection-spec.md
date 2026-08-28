@@ -55,7 +55,7 @@ Common contract: `async detect(ctx) -> list[Signal]`; must respect its latency b
 |---|---|---|---|---|
 | `tier1_pii` | input + output_sentence | <2 ms | `pii.*` | compiled regex + Aho-Corasick keyword sets; span-accurate for redaction. **Pattern set is normative in §2.5 (ADR-026), including two documented scope exclusions** |
 | `tier1_blocklist` | input + output_sentence | <2 ms | `security.blocklist` | per-use-case extra terms via policy `blocklist_extra` |
-| `tier2_injection` | input | <25 ms | `security.prompt_injection` | small transformer, CPU/ONNX; score = model prob |
+| `tier2_injection` | input | <25 ms **per 104-token window** (ADR-032) | `security.prompt_injection` | small transformer, CPU/ONNX; score = **MAX over strided windows** (104 tokens / overlap 26 / step 76), full input coverage — no prefix privileged, no 512-token blind spot. `window_count` + max-window index in signal meta; multi-window cost published untargeted |
 | `tier2_toxicity` | output_sentence | <25 ms | `toxicity.*` | moderate vs high via detector-internal cutoffs (0.5/0.8 defaults; overridable in policy `detector_params`) |
 | `fast_consistency` | output_full* | <60 ms | `hallucination.low_confidence` | 2nd sample at temperature; embedding cosine; *runs on accumulated response so far at each sentence boundary using the parallel-sample stream (see §2.3) |
 | `rag_grounding` | output_sentence | <30 ms | `hallucination.ungrounded_claim` | only when request carries `context` docs; sentence-vs-context embedding entailment proxy |

@@ -18,7 +18,7 @@ This is a **hackathon prototype**, and this README will not pretend otherwise wh
 
 | Area | State |
 |---|---|
-| Specification (`docs/00`–`08`) | complete — **31** ADRs ruled in `docs/03` (count pinned by `tests/test_readme_status.py`, not maintained by hand) |
+| Specification (`docs/00`–`08`) | complete — **32** ADRs ruled in `docs/03` (count pinned by `tests/test_readme_status.py`, not maintained by hand) |
 | Policy schema + 3 use-case policies | implemented, validated, tested |
 | Detector contract (`Signal`, budgets, failure vocabulary) | implemented, tested |
 | Deterministic detectors — `tier1_pii`, `tier1_blocklist`, `numeric_claims` | implemented, tested (3 of the 11 rows in `docs/04` §2) |

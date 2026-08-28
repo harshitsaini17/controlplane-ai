@@ -1043,3 +1043,142 @@ number from a model card may be presented as ours. 06 §3's blind eval measures 
 **Docs touched:** 08 (Q-04 closed with the pick; SL-5 added; the deviation filed), `pyproject.toml`
 (the §2 dependency note), 04 §2 unchanged — the registry rows already say CPU/ONNX and this ADR
 fills in which checkpoint.
+
+---
+
+## ADR-032 — `tier2_injection` scores the whole input as strided windows; the multi-window cost is published, not truncated away (resolves `[D3-tier2-injection-budget-cannot-hold-on-unbounded-input]` and `[D3-full-coverage-windows-cost-600ms-at-the-policy-bound]`)
+
+**Status:** Accepted 2026-08-28.
+**Context.** Two deviations, one subject. The first measured `tier2_injection`'s <25 ms budget
+(04 §2, NFR-P-002) breaching between 400 and 600 characters, with nothing in the gateway bounding
+input length and the tokenizer silently truncating at 512 tokens — so an injection payload past
+token 512 was never scored at all. Prefix truncation (its option A, the recommendation) was
+**overruled**: a documented "we score the first N tokens" is an evasion recipe, and the
+interception guarantee is the product. Full coverage via strided windows was ruled instead, with
+an explicit stop condition: *measure batched inference at the policy bound before concluding
+anything, and if full coverage lands in the >500 ms class, stop and report rather than truncate
+silently.* It did land there, which produced the second deviation. This ADR is that ruling
+completed, with the measured cost accepted.
+
+### Decision
+
+1. **Window geometry: 104 tokens, overlap 26, step 76.** Every window is scored; no input is
+   skipped and no prefix is privileged. 104 is the largest window that fits the budget as a
+   single call, and small windows are *more* token-efficient than large ones — measured cost per
+   content token is **0.111 ms** at 104 tokens against **0.187 ms** at 512, because attention is
+   quadratic in sequence length. So no window geometry rescues the bound: full coverage of 4000
+   tokens is inherently ~52 × ~12 ms. The overlap exists so a payload straddling a boundary is
+   whole in some window.
+2. **Aggregation is MAX over windows**, with `window_count` and the index of the max-scoring
+   window in the signal meta. MAX and not mean: a mean over 52 windows dilutes a single malicious
+   window below any threshold, which is padding-as-evasion by arithmetic.
+3. **The position is pre-dispatch, and that is not negotiable.** Optimistic dispatch — call the
+   provider while scoring — would deliver the payload upstream, which is the exact event the gate
+   exists to prevent. The cost is therefore paid on the input lane, buffered, before the provider
+   is called.
+4. **`budget.per_request_max_tokens` is the escape valve, in policy rather than code.** A pipeline
+   needing a hard input-latency ceiling lowers its own value; one needing 4000-token prompts
+   raises it and accepts the published latency. 04 §9 puts thresholds in per-use-case config, and
+   this is one.
+
+### Measurement outcome — the ~600 ms bound case is accepted and published
+
+`eval/spike_window_latency.py`, raw in `reports/spike_window_latency.json`. Ryzen 5 5600H
+(12 logical CPUs), Linux 7.1.2, Python 3.14.6, onnxruntime 1.29.0, `madhurjindal/Jailbreak-Detector`
+65.8 M on ONNX Runtime **int8**, synthetic deterministic filler (no corpus text), window 104/26/76,
+52 windows at the `per_request_max_tokens: 4000` bound. P50 / P99 ms, 6 threads:
+
+| windows | input tokens | sequential | batched (all in one call) |
+|---|---|---|---|
+| 1 | 102 | 11.30 / 13.01 | 11.62 / 12.90 |
+| 2 | ~178 | 23.28 / **25.13** | 21.45 / **26.10** |
+| 4 | 330 | 47.20 / 51.40 | 43.52 / 54.13 |
+| 8 | 634 | 96.52 / 99.50 | 91.99 / 98.42 |
+| 16 | 1546 | 196.19 / 201.91 | 203.88 / 235.27 |
+| 32 | ~3100 | 397.39 / 409.54 | 457.89 / 474.63 |
+| **52** | **4082** | **651.41 / 657.04** | **800.75 / 819.96** |
+
+**The cost is accepted, with the reason recorded rather than left to inference.** It scales with
+window count, and window count scales with input length — so the guard's cost concentrates
+precisely on long inputs, which is where pad-then-inject attacks live. A typical single-window
+prompt pays **11.30 ms P50 / 13.01 ms P99**. The pathological 4000-token prompt pays ~0.6 s, and it
+is the shape an attacker uses to dilute or outrun a scanner. Spending the most time on the most
+suspicious inputs is the correct allocation, not an unfortunate one.
+
+**Relative context, stated once and not leaned on.** A 4000-token prompt takes an LLM multiple
+seconds to answer; ~0.6 s of pre-dispatch scoring is a fraction of a wait the user already has.
+This is context for the magnitude, **not** a target and not a claim the cost is negligible — the
+figure is published in full and untargeted so a reader can judge it themselves.
+
+**Hardware, stated once.** All figures are CPU int8 with **6 threads** available to one inference.
+**SL-5's caveat applies in full**: at **1 thread** a *single* window costs **49.81 / 50.55 ms** —
+NFR-P-002 breaches even single-window — and the bound case costs **2566.68 ms**. GPU or dedicated
+serving hardware is roadmap, not claimed anywhere in this repo.
+
+**Batching does not amortise, and past a small batch it hurts.** Measured at the bound (6 threads,
+52 windows, P50): batch **2 → 599.20 ms** (the minimum), batch 4 → 602.66, batch 8 → 631.45,
+batch 16 → 667.03, batch 32 → 727.18, all-52-in-one-call → **800.58** — *worse* than 52 separate
+calls at 653.65. The cause is measurable rather than speculative: one window costs 49.81 ms at
+1 thread and 11.30 ms at 6, a **4.41×** speedup, so ONNX Runtime already spreads a single window
+across the cores. There is no idle parallelism for a batch to exploit; a larger tensor only queues
+more work at a saturated pipeline. **Bound batch size: 4.** Not 2, though 2 is the nominal minimum:
+599.20 and 602.66 differ by 0.6%, which is inside this harness's own run-to-run spread (below), so
+picking the minimum over-fits one run. Batch 4 sits in the same flat basin with half the call
+count, and costs ~0.6% at 1 thread where the curve is monotonically worse.
+
+#### Correction — the deviation's cross-validation note is wrong in both directions
+
+`[D3-full-coverage-windows-cost-600ms-at-the-policy-bound]` states: *"ADR-031's crossover measured
+this checkpoint on 104 tokens of real, ragged text at 14.27 ms; this harness measures 104 tokens of
+synthetic, padded text at 11.30 ms — same order, and the padded figure is the conservative one per
+window."* Two errors, corrected here rather than by rewriting a filed report:
+
+- **11.30 is not the conservative figure**; it is the *faster* of the two, so it understates
+  per-window cost.
+- **The gap is not a synthetic-vs-real content effect.** Both harnesses time `sess.run` only, with
+  tokenization outside the clock (`spike_window_latency.py:144`, `spike_tier2_models.py:381`), and
+  at a fixed 104-token tensor shape a BERT-class encoder's FLOPs do not depend on which tokens
+  fill it. Identical work measured at 11.30 and 14.27 ms in two separate runs is **run-to-run
+  variance (~26%)** — thermal state, background load, a separate quantization pass — and is
+  disclosed as a measurement band, not explained away as content.
+
+Consequently the single-window figure this ADR treats as authoritative for the budget decision is
+the **higher** one where they disagree, and the ~26% band applies to every figure in the table.
+The conclusions are unchanged: 1 window fits with margin on either figure, 2 windows breach on
+either, and the bound case is in the >500 ms class on either.
+
+### Budget respecification (04 §2 / NFR-P-002)
+
+- **NFR-P-002's <25 ms is scoped to single-window inputs** (≤104 tokens), where it is measured to
+  hold at 13.01 ms P99. The boundary is not a conservative choice — it is exactly where the
+  measurement puts it: two windows measure **25.13 ms P99** against a 25 ms budget, so the target
+  fails at the first multi-window input.
+- **Multi-window cost is published as a window-count-bucketed, length-parametric, untargeted
+  series** — the table above is its shape — with the bound case stated as a figure, not a range.
+- **Anti-laundering record.** This scopes a target *after* a measurement missed it, which is what
+  ADR-026 §5 bars, so the distinction is recorded explicitly rather than asserted. What §5 forbids
+  is moving a target so a missed measurement passes; NFR-P-002 is **not** moved: <25 ms stays
+  exactly where it was for the inputs it was measured against, and every input that breached it
+  still breaches it. What changes is that the breaching class is **published with its own figures
+  instead of being hidden by truncation** — the alternative on offer was to make the number look
+  better by scoring less, which is the laundering §5 exists to prevent. SL-1 remains unmet and
+  unmoved; ADR-026 §5's single re-measurement stays consumed.
+
+### Consequences
+
+1. `tier2_injection` is unblocked and implementable: windowed 104/26/76, MAX aggregation, batch 4,
+   `window_count` + max-window index in signal meta.
+2. **The 512-token blind spot closes.** Full coverage is the point: an injection at token 3000 is
+   now scored, where before it was outside the tokenizer's reach entirely.
+3. `cost.request_too_large` remains unmapped in all three shipped policies. That is a **cost-plane
+   gap (Phase 6)**, not this ADR's business — item 4 makes `per_request_max_tokens` the latency
+   control, and a policy that lowers it needs the signal mapped to see a rejection. Logged as an
+   M-row, not left implicit.
+4. Both injection D3s close citing this ADR.
+5. ADR-031 consequence 5 still binds: `test_ovlp01_is_not_yet_wired` and
+   `test_tier2_is_not_yet_injectable` must be **re-pointed in the commit that lands these
+   detectors, not deleted**.
+
+**Docs touched:** 01 (NFR-P-002 gains the single-window scope), 04 §2 (`tier2_injection` row),
+06 §4 (the untargeted window-count series joins the reported set), 08 (both D3s closed; the
+`cost.request_too_large` M-row).
