@@ -230,8 +230,7 @@ Stubs, marked `STUB(...)` in source. A stub must never satisfy a test, and no nu
 reported from one:
 
 `eval.cost_simulation` · `eval.pii_leak_scan` · `eval.override_report` ·
-`eval.suggest_thresholds` · `demo/run_script.py` · `dashboard/app.py` ·
-`controlplane/detectors/entity_enricher.py`
+`eval.suggest_thresholds` · `demo/run_script.py` · `dashboard/app.py`
 
 `demo/run_script.py` being a stub has a consequence worth knowing: the demo path in
 `docs/07-demo-script.md` currently has **no automated runner**, so "the demo still passes"

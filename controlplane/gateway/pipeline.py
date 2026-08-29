@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from controlplane.audit.records import serialize_detectors
+from controlplane.detectors import entity_enricher
 from controlplane.detectors import numeric_claims as numeric_claims_mod
 from controlplane.detectors import tier1_patterns
 from controlplane.detectors import tier2_injection as tier2_injection_mod
@@ -537,10 +538,15 @@ def total_attributable_overhead_ms(
     return max(0.0, held_ms)
 
 
-def note_enrichment(
-    signals: Iterable[Signal], coverage: Coverage
+async def enrich_lane(
+    lane: LaneResult,
+    text: str,
+    request: ResolvedRequest,
+    coverage: Coverage,
+    *,
+    metrics: MetricsRegistry | None = None,
 ) -> None:
-    """Record `entity_enricher` coverage (04 §2.2, ADR-011).
+    """Run the 04 §2.2 enrichment stage over `lane` and record its coverage. Mutates `lane`.
 
     Not a lane member — 04 §2.2 makes enrichment its own stage between detection and the
     policy engine — so `LANES` rightly omits it and `expected_for` never yields it. But it
@@ -553,13 +559,34 @@ def note_enrichment(
     When no span-bearing `hallucination.*` signal exists, enrichment was not expected and
     is therefore neither `ran` nor `not_run` — the same rule that keeps a policy-disabled
     detector out of the list (05 §4).
+
+    **Running the stage and claiming its coverage are one call, deliberately.** These were
+    two: a `note_enrichment` that recorded the gap, with no enricher to run. Left split,
+    the first request to enrich would have recorded `not_run` for a stage that had just
+    run — a false statement in an append-only table, which is the defect ADR-033's third
+    state exists to prevent, one column over. Fusing them removes the ordering a caller
+    could get wrong rather than documenting it.
+
+    The `unloadable` branch is checked **before** calling the enricher, not after catching
+    its failure: on an `.[dev]`-only host the answer is already in the boot manifest, and
+    `note_missing` routes it to `unavailable` — "exists, this host could not load it" —
+    where an attempt-then-fail would report the vaguer `enrichment_failure` for a
+    condition the process knew at boot. A failure *after* that check is a runtime fault,
+    and 04 §2.2 gives it its own counter rather than a coverage entry.
     """
-    if any(
-        signal.span is not None
-        and any(label.startswith("hallucination.") for label in signal.labels)
-        for signal in signals
-    ):
-        coverage.note_missing("entity_enricher")
+    if not any(entity_enricher.is_enrichment_target(signal) for signal in lane.signals):
+        return
+
+    if entity_enricher.NAME in coverage.unloadable:
+        coverage.note_missing(entity_enricher.NAME)
+        return
+
+    lane.signals = tuple(
+        await entity_enricher.enrich(
+            list(lane.signals), text, use_case=request.use_case, metrics=metrics
+        )
+    )
+    coverage.note_ran(entity_enricher.NAME)
 
 
 def clamp_latency(latency: dict[str, Any]) -> dict[str, Any]:

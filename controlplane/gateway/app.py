@@ -57,6 +57,7 @@ from controlplane.detectors.availability import (
     enforce_at_boot,
     probe_availability,
 )
+from controlplane.detectors import entity_enricher
 from controlplane.detectors.base import Signal, Stage, registered_names
 from controlplane.detectors.onnx_models import warm_models
 from controlplane.gateway import pipeline
@@ -129,7 +130,9 @@ def _probe_scope() -> tuple[str, ...]:
     `()` in this process — and probing only `LIVE` would miss a detector the harness
     registered. Neither omission fails loudly, which is why the scope is the union.
     """
-    return tuple(sorted(set(pipeline.LIVE) | set(registered_names())))
+    return tuple(
+        sorted(set(pipeline.LIVE) | set(registered_names()) | {entity_enricher.NAME})
+    )
 
 
 def _sse(payload: dict[str, Any]) -> str:
@@ -409,7 +412,7 @@ def enforce_detector_availability(state: Gateway) -> None:
         warnings.warn(line, DetectorUnavailableWarning, stacklevel=2)
 
 
-def warm_detector_models(state: Gateway) -> None:
+async def warm_detector_models(state: Gateway) -> None:
     """Build every served ONNX graph at boot and log the cost (ADR-035 item 4).
 
     **The build cannot happen inside a request.** It measures ~7.8 s for `tier2_injection` on
@@ -435,6 +438,17 @@ def warm_detector_models(state: Gateway) -> None:
         detail = ", ".join(f"{name} {ms:.0f} ms" for name, ms in sorted(built.items()))
         _LOG.info("model graphs built at boot: %s", detail)
 
+    # `entity_enricher` warms separately because it is not an ONNX detector: `warm_models`
+    # intersects with `SERVED`, so the wider scope above reaches it not at all. Skipped via
+    # the boot manifest rather than a caught ImportError — the manifest already answered
+    # "can this host load spaCy", and ADR-033 has already decided whether that absence
+    # warns or refuses. Its 10 ms budget is unreachable cold: `import spacy` plus
+    # `spacy.load` measured ~1.8 s, and the first NER call a further 11.76 ms even warm,
+    # which is why `warm()` also runs one throwaway inference.
+    if entity_enricher.NAME not in state.detectors_unloadable:
+        enrich_ms = await entity_enricher.warm()
+        _LOG.info("entity_enricher NER pipeline warmed in %.0f ms", enrich_ms)
+
 
 def create_app(gateway: Gateway | None = None) -> FastAPI:
     """Build the ASGI app. `gateway` is injectable so tests need no real upstream.
@@ -450,7 +464,7 @@ def create_app(gateway: Gateway | None = None) -> FastAPI:
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         enforce_detector_availability(state)
         await run_startup_canary(state)
-        warm_detector_models(state)
+        await warm_detector_models(state)
         yield
 
     app = FastAPI(title="ControlPlane.ai", version="1", lifespan=lifespan)
@@ -536,7 +550,6 @@ async def handle_completion(state: Gateway, http_request: Request) -> Response:
 
     input_started = time.perf_counter()
     verdict, outcome, lane = await pipeline.input_lane(request, coverage, metrics=state.metrics)
-    pipeline.note_enrichment(lane.signals, coverage)
     # ADR-030 `input_hold_ms`: 06 §4 defines it as **ingress + input-lane time, before
     # dispatch**, so ingress is inside it. `held_ms` starts from the same point for the same
     # reason — the 06 §4 streaming formula also opens with "ingress + input-lane time", and
@@ -646,7 +659,9 @@ async def _buffered_response(
     stage = pipeline.unit_stage(request.policy)
     lane = await pipeline.run_lane(stage, response.text, request, coverage,
                                   metrics=state.metrics)
-    pipeline.note_enrichment(lane.signals, coverage)
+    await pipeline.enrich_lane(
+        lane, response.text, request, coverage, metrics=state.metrics
+    )
     engine_started = time.perf_counter()
     verdict = pipeline.converge(lane, request.policy, metrics=state.metrics)
     policy_ms = (time.perf_counter() - engine_started) * 1000.0
@@ -865,7 +880,9 @@ async def _stream_response(
                 Stage.OUTPUT_SENTENCE, segment_text, request, coverage,
                 metrics=state.metrics,
             )
-            pipeline.note_enrichment(lane.signals, coverage)
+            await pipeline.enrich_lane(
+                lane, segment_text, request, coverage, metrics=state.metrics
+            )
             engine_started = time.perf_counter()
             verdict = pipeline.converge(lane, request.policy, metrics=state.metrics)
             policy_ms = (time.perf_counter() - engine_started) * 1000.0

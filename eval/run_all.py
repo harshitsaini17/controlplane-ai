@@ -35,6 +35,7 @@ from typing import Any, Iterable, Sequence
 from controlplane.detectors._v1_numeric_claims import numeric_claims as v1_numeric_claims
 from controlplane.detectors._v1_tier1_patterns import tier1_pii as v1_tier1_pii
 from controlplane.detectors.availability import probe_availability
+from controlplane.detectors import entity_enricher
 from controlplane.detectors.base import DetectorContext, Signal, Stage
 from controlplane.detectors.numeric_claims import numeric_claims
 from controlplane.detectors.tier1_patterns import tier1_blocklist, tier1_pii
@@ -94,7 +95,15 @@ class DetectorUnderTest:
 
 @dataclass
 class SkippedDetector:
-    """A 04 §2 row with no implementation. Reported, never scored (rule 1)."""
+    """A 04 §2 row that is reported but never scored (rule 1).
+
+    Three distinct reasons reach this type, and the `reason` string is the only place the
+    difference survives into the table: **no implementation** (a stub), **implemented but
+    unloadable on this host** (ADR-033 state (c), built by `_demote_unloadable`), and
+    **implemented and loadable but unreachable by any corpus case** (`entity_enricher` —
+    its host-signal producer is absent). Scoring any of the three would publish a
+    precision/recall of 0.0 for a detector that was never asked a question.
+    """
 
     name: str
     labels: tuple[str, ...]
@@ -174,6 +183,40 @@ V1_BASELINE: tuple[DetectorUnderTest, ...] = (
 )
 
 
+#: 04 §2 registry name of the enrichment stage, from the module that implements it.
+ENRICHER_NAME = entity_enricher.NAME
+
+
+def _enricher_reason() -> str:
+    """Why `entity_enricher` is reported and not scored — read from this host, not typed.
+
+    Two host configurations give two true answers, and the earlier single hand-written
+    string ("not implemented — stub") went false the moment the stage landed while still
+    rendering into `reports/eval_report.md`. That is the M-42/M-43 class — a claim
+    described by a premise it no longer comes from — in a judge-facing generator, so the
+    string is derived from the same probe every other row's comes from.
+
+    Carries no figures deliberately. The count of unscored positives is computed by the
+    report itself from `label_counts`; a number written into this sentence would be a
+    second, unverifiable copy of it (AGENTS.md §7).
+    """
+    missing = probe_availability([ENRICHER_NAME])
+    if missing:
+        return (
+            f"**implemented but unloadable on this host** — missing "
+            f"`{missing[0].missing}` (ADR-033 state (c)). Not scored: a stage that could "
+            f"not load answers no question"
+        )
+    return (
+        "**implemented and loadable; not reachable by any corpus case** — 04 §2.2 appends "
+        "`privacy.person` to a span-bearing `hallucination.*` host signal, and every "
+        "corpus case carrying that label expects `hallucination.ungrounded_claim`, whose "
+        "only producer (`rag_grounding`) is absent. Landing this stage therefore widens "
+        "the end-to-end scorable set by nothing, and it emits on no scorable case — both "
+        "measured, not assumed (M-44)"
+    )
+
+
 SKIPPED: tuple[SkippedDetector, ...] = (
     SkippedDetector("tier2_injection", ("security.prompt_injection",),
                     "not implemented — stub; Q-04 defers the checkpoint choice"),
@@ -184,8 +227,13 @@ SKIPPED: tuple[SkippedDetector, ...] = (
                     "(Q-10 resolved 2026-08-28), the detector is not"),
     SkippedDetector("rag_grounding", ("hallucination.ungrounded_claim",),
                     "not implemented — stub; needs sentence-transformers"),
-    SkippedDetector("entity_enricher", ("privacy.person",),
-                    "not implemented — stub; needs spaCy en_core_web_sm (ADR-011)"),
+    # Reason deferred to `_enricher_reason()`: the row was "not implemented — stub" until
+    # the stage landed, and a hand-typed string cannot be right on both an ml-bearing and
+    # an ml-less host. It stays in SKIPPED rather than becoming a `DetectorUnderTest`
+    # because `_run` calls `detect(ctx)` and enrichment's entry point is
+    # `enrich(signals, text, ...)` — giving it a `detect` to be scorable would be a type
+    # lie, and it would still score 0.0 over an empty denominator.
+    SkippedDetector("entity_enricher", ("privacy.person",), _enricher_reason()),
     SkippedDetector("conv_tracker", ("conversation.cumulative_risk",),
                     "not implemented — stub (ADR-021 scope is specified, code is not)"),
     SkippedDetector("cost_budget", ("cost.budget_exceeded", "cost.request_too_large"),
@@ -200,7 +248,14 @@ SKIPPED: tuple[SkippedDetector, ...] = (
 #: the same question a few thousand times.
 UNLOADABLE: dict[str, str] = {
     entry.detector: entry.missing
-    for entry in probe_availability([dut.name for dut in (*IMPLEMENTED, *V1_BASELINE)])
+    for entry in probe_availability(
+        # `entity_enricher` is included although it is in neither list: 04 §2.2 makes
+        # enrichment its own stage, so it is not a `DetectorUnderTest` (it has no
+        # `detect`), yet its row still has to say whether *this* host could load it.
+        # Probing it here keeps that answer in the same single declaration as every
+        # other row's rather than hand-typing it beside a `REQUIREMENTS` entry.
+        [dut.name for dut in (*IMPLEMENTED, *V1_BASELINE)] + [ENRICHER_NAME]
+    )
 }
 
 
