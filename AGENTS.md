@@ -286,8 +286,36 @@ enumeration rule still applies in full — every MINOR resolution is *logged*, s
 count stays honest rather than merely low. A gap resolved in place and never written down is
 indistinguishable from a gap that was missed.
 
+#### Endgame mode — in effect from 2026-08-29 through submission
+
+Phase 5 runs to submission against a real deadline, and the lightened protocol above still stops
+more often than that leaves room for. So the **stop frequency** narrows once more. For the
+duration, the following replaces §5.1's stop conditions; the rest of §5 stands unchanged.
+
+1. **Halt only for:** (a) a contradiction that no documented precedent, decision rule or
+   conservative default can resolve; (b) anything touching the measurement integrity of an
+   **already-published** number; (c) a security regression. **Everything else** is resolved with
+   the recommendation you would have filed *plus the most conservative reading*, marked
+   **`PROVISIONAL — batch review at phase end`** on the ADR or M-row, and then you keep moving.
+2. **Provisional resolutions get their own section in the phase-end report**, so they are
+   adjudicated retroactively in one pass instead of one interruption at a time. A provisional
+   resolution missing from that section has silently become permanent — which is the whole failure
+   this item exists to prevent, and the reason the marker is written into the doc rather than
+   remembered.
+3. **First-contact discipline on blind numbers is UNCHANGED.** Report whatever the five detectors
+   measure on first contact, tune nothing toward a target, and let a miss become an SL. §5.4 and §7
+   are untouched: no weakened tests, no skipped failures, no mocked measurements, no self-approved
+   deviations, no adjusted harness. **Only stop-frequency lightens. The honesty rules never do** —
+   they are what makes a faster protocol safe rather than merely faster.
+4. **Doc updates may batch at phase end, except ledger rows and anything a published number
+   cites.** Those stay in the same commit as the change they describe: a count that is briefly
+   wrong, and a figure whose source is briefly absent, are each indistinguishable from the defect
+   class this repo keeps finding — *a figure described by a derivation it does not come from*.
+
 ---
 
-*Last updated: 2026-08-29 (§10: `eval.check_derivations` added, plus the quiet-host rule
-for measurement runs — ADR-032 Correction 1). When this file changes, note it in the session
-summary so the human knows the agent contract shifted.*
+*Last updated: 2026-08-29 (§11.1: **endgame mode** added — stop conditions narrowed to three,
+provisional resolutions batch-reviewed at phase end, honesty rules explicitly unchanged. Earlier
+the same day, §10: `eval.check_derivations` added, plus the quiet-host rule for measurement runs —
+ADR-032 Correction 1). When this file changes, note it in the session summary so the human knows
+the agent contract shifted.*
