@@ -604,8 +604,24 @@ def sentence_counts(cases: Sequence[dict[str, Any]]) -> list[int]:
     return counts
 
 
+def projected_not_yet_live() -> tuple[str, ...]:
+    """Hot-path detectors this projection composes that are **not** live yet.
+
+    Derived, because the prose around the projection kept saying "these detectors do not exist
+    yet" while naming them in a string literal — and that went false the moment `tier2_injection`
+    shipped, in a paragraph the published report renders. A sentence that names a fact must read
+    the fact (the M-36/M-40 lesson applied to report prose rather than to code anchors).
+    """
+    lanes = (*LANES[Stage.INPUT], *LANES[Stage.OUTPUT_SENTENCE])
+    return tuple(sorted({d for d in lanes if d in BUDGETS_MS and d not in LIVE}))
+
+
 def project_tier2(cases: Sequence[dict[str, Any]]) -> dict[str, Any]:
-    """Budget-based forward projection for the two unimplemented tier2 detectors.
+    """Budget-based forward projection for the hot-path detectors that are not live yet.
+
+    **Said "the two unimplemented tier2 detectors" until `tier2_injection` shipped.** It is live
+    and measured now, so the projection's subject is whatever `projected_not_yet_live()` reports
+    rather than a pair named in prose; the arithmetic never depended on the count.
 
     **A projection, not a measurement**, and derived rather than written down: lane
     membership comes from `LANES` and every figure from `BUDGETS_MS`, so a budget or lane
@@ -752,6 +768,9 @@ def render(
     dstats = detector_stats(batch)
     stream_stats = Stats.of(batch.overheads(streaming=True))
     projection = project_tier2(cases if cases is not None else load_corpus(dataset_dir))
+    # Read once, used by both the NFR-verdict caveat and the projection header, so the two
+    # cannot disagree about which detectors are still hypothetical.
+    pending = projected_not_yet_live()
     # `eval/host_load.py` owns this now. It was duplicated in FOUR harnesses and had drifted
     # (differing `cwd`/`timeout`), and the spike artifact recorded no commit at all
     # (AGENTS.md §7).
@@ -938,9 +957,16 @@ def render(
             "**No violation.** Both requirements were evaluated against emitted series: "
             "NFR-P-001 on the two per-hold series above (ADR-030 scope), NFR-P-002 on the "
             "per-detector budgets. `--check` exits zero on this state and nonzero on any row "
-            "above appearing. **Coverage is what bounds this, not the verdict:** the budgets "
-            "the projection below composes belong to detectors that do not exist yet, so this "
-            "is a pass at the current detector set, not a pass at the documented one."
+            "above appearing. **Coverage is what bounds this, not the verdict:** "
+            + (
+                "the projection below still composes budgets for "
+                + ", ".join(f"`{d}`" for d in pending)
+                + ", which are not live, so this is a pass at the current detector set, not a "
+                "pass at the documented one."
+                if pending
+                else "every hot-path detector with a budget is now live and exercised above, so "
+                "this verdict covers the documented detector set."
+            )
         )
     else:
         lines.append(
@@ -974,9 +1000,18 @@ def render(
         "## Forward projection — what happens when the remaining hot-path detectors land",
         "",
         "**This section is a PROJECTION, not a measurement.** Every figure is arithmetic over "
-        "the 04 §2 declared budgets, not an observation: `tier2_toxicity` and `tier2_injection` "
-        "are unimplemented, so nothing here has been run. It is derived from `LANES` and "
-        "`BUDGETS_MS` rather than written down, so a budget or lane change moves it.",
+        "the 04 §2 declared budgets, not an observation. It is derived from `LANES` and "
+        "`BUDGETS_MS` rather than written down, so a budget or lane change moves it."
+        + (
+            " Still unimplemented, and therefore genuinely unmeasurable here: "
+            + ", ".join(f"`{d}`" for d in pending)
+            + ". Detectors that ARE live appear as measurements in the per-detector table "
+            "above; their budgets are projected here only to keep this arithmetic comparable "
+            "to the pre-ADR-030 figures it is kept to justify."
+            if pending
+            else " Every detector it composes is now live and measured above, so this section "
+            "is retained as the historical basis for ADR-030 rather than as a forecast."
+        ),
         "",
         "This section is also **the evidence that motivated ADR-030**, which re-scoped NFR-P-001 "
         "onto the per-hold series after this arithmetic showed the old per-request target could "
