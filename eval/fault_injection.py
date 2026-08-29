@@ -53,6 +53,7 @@ evaluated and recorded as non-binding, the same scoping `run_all.py` applies and
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import platform
 import sys
@@ -66,6 +67,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from controlplane.audit.records import canonical_view
+from controlplane.detectors import rag_grounding as rag_grounding_mod
 from controlplane.detectors.base import DetectorTimeout, Stage
 from controlplane.gateway import pipeline
 from controlplane.detectors.onnx_models import warm_models
@@ -75,7 +77,7 @@ from controlplane.gateway.config import (
     load_gateway_config,
     require_measured_upstream,
 )
-from controlplane.gateway.ingress import HEADER_REQUEST_ID, HEADER_USE_CASE
+from controlplane.gateway.ingress import CONTEXT_KEY, HEADER_REQUEST_ID, HEADER_USE_CASE
 from controlplane.gateway.sse_proxy import UpstreamResponse
 from controlplane.policy.engine import DETECTOR_FAIL_CLASS
 from controlplane.policy.store import PolicyStore
@@ -299,11 +301,38 @@ def run_probe(
             # caught the defect: the *control* probe, with no fault injected, reported
             # `failures=['tier2_injection']` because the build blew the ceiling.
             warm_models(pipeline.LIVE)
+            # `rag_grounding` warms SEPARATELY, and for the same reason the comment above
+            # exists: `warm_models` intersects with `onnx_models.SERVED`, and this detector is
+            # a sentence-transformers bi-encoder, not an ONNX-served graph — so that call
+            # reaches it not at all. Its cold load is seconds of *attributable in-thread CPU*
+            # under ADR-036, which inside the request is a 30 ms budget breach and a fabricated
+            # `performance` fault in the CONTROL probe. Exactly the tier2 defect, one detector
+            # later. Warmed via the module, not `pipeline.LIVE[...]`, so an injected `_Faulty`
+            # wrapper does not stop the real encoder being built.
+            if rag_grounding_mod.NAME in pipeline.LIVE:
+                try:
+                    asyncio.run(rag_grounding_mod.warm())
+                except Exception as exc:  # unloadable host (ADR-033) — not a probe failure
+                    print(f"  note: rag_grounding warm skipped ({exc})", file=sys.stderr)
             client = TestClient(create_app(gateway), raise_server_exceptions=False)
             response = client.post(
                 "/v1/chat/completions",
                 headers={HEADER_USE_CASE: use_case},
-                json={"messages": [{"role": "user", "content": text}]},
+                json={
+                    "messages": [{"role": "user", "content": text}],
+                    # `rag_grounding` is context-gated per 04 §2 ("only when request carries
+                    # context docs"), so without this key the pipeline skips it and `_Faulty`
+                    # never raises: the probe would report `failures=[]` for the `performance`
+                    # class while stamped as having injected into it.
+                    #
+                    # The doc is the probe text VERBATIM. Cosine of identical text is 1.0 — the
+                    # maximum a bounded [0, 1] score can take — so no τ that 06 §3 calibration
+                    # can produce puts this signal below `tau_high`, and the control probe stays
+                    # a clean pass. A merely related doc measured 0.07 and would fire a real
+                    # signal, changing the very verdicts these invariants assert on. It is also
+                    # not an invented fixture: it comes from the same frozen `PROBE_CASE`.
+                    CONTEXT_KEY: {"context": [text]},
+                },
             )
             view = canonical_view(gateway.conn, response.headers[HEADER_REQUEST_ID])
             policy = store.get(use_case)

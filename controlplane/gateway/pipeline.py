@@ -34,6 +34,7 @@ from typing import Any
 from controlplane.audit.records import serialize_detectors
 from controlplane.detectors import entity_enricher
 from controlplane.detectors import numeric_claims as numeric_claims_mod
+from controlplane.detectors import rag_grounding as rag_grounding_mod
 from controlplane.detectors import tier1_patterns
 from controlplane.detectors import tier2_injection as tier2_injection_mod
 from controlplane.detectors import tier2_toxicity as tier2_toxicity_mod
@@ -68,6 +69,7 @@ LIVE: dict[str, Detector] = {
     "numeric_claims": numeric_claims_mod.numeric_claims,
     "tier2_injection": tier2_injection_mod.tier2_injection,
     "tier2_toxicity": tier2_toxicity_mod.tier2_toxicity,
+    "rag_grounding": rag_grounding_mod.rag_grounding,
 }
 
 #: 04 §2 Stage column, transcribed. Order within a stage is the table's order, so a

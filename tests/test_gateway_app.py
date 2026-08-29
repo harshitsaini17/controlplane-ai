@@ -422,13 +422,22 @@ def test_rag_grounding_is_not_listed_when_no_context_docs_were_sent(make_client)
     assert "rag_grounding" not in names
 
 
-def test_rag_grounding_is_listed_as_a_gap_when_context_docs_were_sent(make_client) -> None:
+def test_rag_grounding_runs_when_context_docs_were_sent(make_client) -> None:
+    """05 §4: expected AND implemented, so it reports as `ran` rather than as a gap.
+
+    Was `..._is_listed_as_a_gap_...` and asserted the opposite. That is a transition, not a
+    weakened assertion (AGENTS.md §5.4): the old test pinned the *unimplemented* state, and its
+    premise expired the moment `rag_grounding` landed in `pipeline.LIVE` — a gap assertion that
+    still passed here would mean the detector had been registered and then silently skipped.
+    Asserting `ran` is strictly stronger: it excludes both `not_run` and absence, where the old
+    form excluded only one of the three states.
+    """
     client, gateway, _ = make_client("All good.")
     response = post(client, "support_bot",
                     **{"controlplane": {"context": ["a source document"]}})
     detectors = audit_of(gateway, response)["detectors"]
-    gaps = {e["detector"] for e in detectors["not_run"]}
-    assert "rag_grounding" in gaps
+    assert "rag_grounding" in set(detectors["ran"])
+    assert "rag_grounding" not in {e["detector"] for e in detectors["not_run"]}
 
 
 # ---------------------------------------------------------------------------

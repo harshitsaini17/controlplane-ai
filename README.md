@@ -24,7 +24,7 @@ This is a **hackathon prototype**, and this README will not pretend otherwise wh
 | Deterministic detectors — `tier1_pii`, `tier1_blocklist`, `numeric_claims` | implemented, tested (3 of the 11 rows in `docs/04` §2) |
 | Labeled eval dataset (280 cases) | authored and **frozen**; passes the consistency gate, **label review pending** |
 | Audit DB schema | implemented |
-| Model-backed detectors — injection, toxicity, consistency, grounding, NER enrichment | **not yet implemented** |
+| Model-backed detectors — injection, toxicity, grounding, NER enrichment | implemented, tested — `fast_consistency` is **cut to roadmap** (SL-6), so it is the one model-backed row that does not ship |
 | Gateway hot path — ingress lane, sentence buffer, buffered + streaming delivery, SSE proxy, startup canary | implemented, tested |
 | Policy engine — Pass/Edit/Block/Escalate, band logic, fail-open/fail-closed resolution | implemented, tested |
 | Cost detectors (`cost_budget`) | **not yet implemented** |

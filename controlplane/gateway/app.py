@@ -58,6 +58,7 @@ from controlplane.detectors.availability import (
     probe_availability,
 )
 from controlplane.detectors import entity_enricher
+from controlplane.detectors import rag_grounding
 from controlplane.detectors.base import Signal, Stage, registered_names
 from controlplane.detectors.onnx_models import warm_models
 from controlplane.gateway import pipeline
@@ -448,6 +449,15 @@ async def warm_detector_models(state: Gateway) -> None:
     if entity_enricher.NAME not in state.detectors_unloadable:
         enrich_ms = await entity_enricher.warm()
         _LOG.info("entity_enricher NER pipeline warmed in %.0f ms", enrich_ms)
+
+    # `rag_grounding` warms here for the same reason and by the same guard: it is a
+    # sentence-transformers bi-encoder, not an ONNX-served graph, so `warm_models` — which
+    # intersects with `SERVED` — reaches it not at all. Under ADR-036 the cold load is
+    # *attributable in-thread CPU*, which makes an unwarmed first sentence a 30 ms budget
+    # breach and a `performance` fail_mode firing rather than merely a slow response.
+    if rag_grounding.NAME not in state.detectors_unloadable:
+        grounding_ms = await rag_grounding.warm()
+        _LOG.info("rag_grounding encoder warmed in %.0f ms", grounding_ms)
 
 
 def create_app(gateway: Gateway | None = None) -> FastAPI:

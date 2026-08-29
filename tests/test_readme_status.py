@@ -113,7 +113,10 @@ def test_the_readme_points_at_the_gate_that_holds_the_count() -> None:
     )
 
 
-@pytest.mark.parametrize("claim", ["Gateway hot path", "Policy engine", "Latency benchmark"])
+@pytest.mark.parametrize(
+    "claim",
+    ["Gateway hot path", "Policy engine", "Latency benchmark", "Model-backed detectors"],
+)
 def test_shipped_subsystems_are_no_longer_advertised_as_unbuilt(claim: str) -> None:
     """M-23's third drift: rows saying `not yet implemented` for code that ships.
 
