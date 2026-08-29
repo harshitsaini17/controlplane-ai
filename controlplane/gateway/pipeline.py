@@ -34,6 +34,7 @@ from typing import Any
 from controlplane.audit.records import serialize_detectors
 from controlplane.detectors import numeric_claims as numeric_claims_mod
 from controlplane.detectors import tier1_patterns
+from controlplane.detectors import tier2_injection as tier2_injection_mod
 from controlplane.detectors.base import (
     Detector,
     DetectorContext,
@@ -63,6 +64,7 @@ LIVE: dict[str, Detector] = {
     "tier1_pii": tier1_patterns.tier1_pii,
     "tier1_blocklist": tier1_patterns.tier1_blocklist,
     "numeric_claims": numeric_claims_mod.numeric_claims,
+    "tier2_injection": tier2_injection_mod.tier2_injection,
 }
 
 #: 04 §2 Stage column, transcribed. Order within a stage is the table's order, so a
@@ -218,14 +220,21 @@ class Coverage:
     def note_missing(self, detector: str, reason: str = NOT_IMPLEMENTED) -> None:
         """File an expected-but-absent detector into `not_run` — or `unavailable`.
 
-        The branch is ADR-033's whole point. Both states reach this call site identically
-        (`LIVE` has no entry either way), but they are different claims: `not_implemented`
+        The branch is ADR-033's whole point. Both states reach this call site identically,
+        but they are different claims: `not_implemented`
         says this phase never wrote the detector, while `unavailable` says it exists and
         this host could not load it. Recording state (c) as `not_implemented` would be a
         false statement in an append-only table, and recording it as nothing at all would
         drop a coverage promise silently — the two failures the third state exists to
         separate. `reason` is ignored on that branch: the manifest names the dependency,
         which is strictly more than a reason code can say.
+
+        **The two states no longer share one arrival path.** This docstring used to add "(`LIVE`
+        has no entry either way)", which was true while state (c) existed only as absence. A live
+        detector whose dependencies are missing is in `LIVE` *and* unloadable, so `run_lane` now
+        checks the manifest as well as membership — see the two-reasons comment there. The branch
+        below is unchanged by that: it keys on `unloadable`, which is what decides the claim,
+        never on how the caller noticed.
         """
         if detector in self.ran:
             return
@@ -298,7 +307,16 @@ async def run_lane(
 
     for name in expected_for(stage, request):
         detector = LIVE.get(name)
-        if detector is None:
+        # **Two independent reasons not to run**, and `LIVE` only answers the first.
+        # Membership was a sufficient loadability test for exactly as long as ADR-033 state (c)
+        # could only be expressed by absence — true while every live detector was a regex pass
+        # importing nothing. A live detector with real dependencies makes state (c) reachable
+        # *with* membership: on an `.[dev]`-only host the boot manifest correctly reports
+        # `tier2_injection` unloadable, yet this loop would still call `detect()`, and the
+        # ImportError would be filed as a per-request `DetectorFailureRecord` — a transient
+        # fault — when it is a host-level absence the process already knows about, re-discovered
+        # once per request. `note_missing` routes it to `unavailable` instead (ADR-033).
+        if detector is None or name in coverage.unloadable:
             coverage.note_missing(name)
             continue
 

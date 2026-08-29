@@ -52,6 +52,7 @@ from fastapi.testclient import TestClient
 
 from controlplane.audit.records import canonical_view
 from controlplane.detectors.base import BUDGETS_MS, Stage, budget_ms
+from controlplane.detectors.onnx_models import warm_models
 from controlplane.gateway.app import Gateway, create_app
 from controlplane.gateway.config import (
     TaintedDataError,
@@ -346,6 +347,13 @@ def run_batch(
             db_path=str(Path(tmp) / "bench.db"),
             key_map={},
         )
+        # Build the served graphs BEFORE the first timed request. `TestClient` is not
+        # context-managed (see the docstring), so the lifespan warm-up never fires — and an
+        # ~8 s graph export inside request #1 would be TIMED, silently corrupting every
+        # percentile this harness publishes. Warming here is not a tuning choice: it puts the
+        # one-time provisioning cost outside the measured span, where ADR-035 item 4 already
+        # says it belongs. The build cost is reported at boot, not folded into a latency figure.
+        warm_models(LIVE)
         client = TestClient(create_app(gateway), raise_server_exceptions=False)
 
         for use_case, case in mix:

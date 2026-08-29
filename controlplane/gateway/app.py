@@ -30,6 +30,7 @@ verdict the gateway will subsequently make.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 import time
@@ -57,6 +58,7 @@ from controlplane.detectors.availability import (
     probe_availability,
 )
 from controlplane.detectors.base import Signal, Stage, registered_names
+from controlplane.detectors.onnx_models import warm_models
 from controlplane.gateway import pipeline
 from controlplane.gateway.canary import CanaryResult, canary_on_startup
 from controlplane.gateway.config import GatewayConfig, UpstreamClass, load_gateway_config
@@ -92,6 +94,9 @@ STAGE_INPUT, STAGE_STREAMED, STAGE_COMPLETED = "input", "streamed", "completed"
 #: selection) is Phase 6, and recording a tier we did not choose would make
 #: `tier_requested` fiction. "small" is what `_dispatch` actually asks for.
 TIER = "small"
+
+
+_LOG = logging.getLogger(__name__)
 
 
 class CanaryUnavailableWarning(UserWarning):
@@ -404,6 +409,33 @@ def enforce_detector_availability(state: Gateway) -> None:
         warnings.warn(line, DetectorUnavailableWarning, stacklevel=2)
 
 
+def warm_detector_models(state: Gateway) -> None:
+    """Build every served ONNX graph at boot and log the cost (ADR-035 item 4).
+
+    **The build cannot happen inside a request.** It measures ~7.8 s for `tier2_injection` on
+    this host, against a 25 ms per-window budget and a 5611 ms bound-case ceiling — and it would
+    run inline on the event loop, where `wait_for` cannot fire until control returns (04 §2.1(a),
+    the trap ADR-034 was filed about). ADR-035 item 4 rules build-at-boot with the duration
+    "logged at startup as one line beside the FR-GW-006 canary result", which is this.
+
+    **Runs AFTER the canary**, for the mirror of the reason `enforce_detector_availability` runs
+    before it: that check can *refuse* the boot, so it should not first spend an upstream round
+    trip. This one cannot refuse anything, so it should not spend ~8 s of graph export on a boot
+    the canary is about to reject.
+
+    Never raises for an absent dependency — `warm_models` skips what this host cannot load, and
+    ADR-033's manifest has already decided whether that absence refuses the boot or warns.
+    """
+    # Scoped to what this process actually serves, via the SAME helper ADR-033's probe uses:
+    # a checkpoint in `SERVED` but wired into no lane would otherwise cost ~8 s of graph export
+    # at every boot for a graph no request can reach. `warm_models` intersects with `SERVED`, so
+    # passing the wider scope is safe and keeps one definition of "detectors this process calls".
+    built = warm_models(_probe_scope())
+    if built:
+        detail = ", ".join(f"{name} {ms:.0f} ms" for name, ms in sorted(built.items()))
+        _LOG.info("model graphs built at boot: %s", detail)
+
+
 def create_app(gateway: Gateway | None = None) -> FastAPI:
     """Build the ASGI app. `gateway` is injectable so tests need no real upstream.
 
@@ -418,6 +450,7 @@ def create_app(gateway: Gateway | None = None) -> FastAPI:
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         enforce_detector_availability(state)
         await run_startup_canary(state)
+        warm_detector_models(state)
         yield
 
     app = FastAPI(title="ControlPlane.ai", version="1", lifespan=lifespan)

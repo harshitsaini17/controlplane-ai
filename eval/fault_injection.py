@@ -10,9 +10,14 @@ the audit record rather than from the HTTP response — the response says what t
 and 04 §5's claim is about what the system *recorded* about its own failure.
 
 **The class 06 §5 names is not the class that can carry it this phase, and that is stated
-rather than quietly substituted.** §5 and 07 beat 7 both say `tier2`. Neither `tier2`
-detector (`tier2_injection`, `tier2_toxicity`) is live yet, so a tier2 fault cannot be
-injected at all — there is nothing to monkeypatch. What *is* live is `numeric_claims`, whose
+rather than quietly substituted.** §5 and 07 beat 7 both say `tier2`. `tier2_injection` is now
+live, so the original reason for the substitution ("nothing to monkeypatch") no longer holds and
+is superseded: it is an **INPUT-stage** detector (04 §2), and this harness injects faults only at
+`FAULT_STAGES` — see `_Faulty` for why the input lane is a different phenomenon rather than an
+oversight. So a tier2 fault still cannot be injected, for a narrower reason than before.
+`tier2_toxicity` sits in `OUTPUT_SENTENCE` and will carry the class properly when it lands; the
+harness needs no edit for that, only `faultable()` to include it. What *is* faultable is
+`numeric_claims`, whose
 04 §2 class is `performance`, and the shipped policies give it the identical asymmetry the
 beat exists to show:
 
@@ -22,9 +27,10 @@ beat exists to show:
 Same two-sided contrast, same requirement (FR-POL-006 is *per detector class*, not per
 detector). So SC-3 is demonstrable now on `performance`, and `tier2` is pinned as deferred by
 `test_tier2_is_not_yet_injectable` — the tripwire pattern ratified for OVLP-01/beat 4. When a
-tier2 detector lands, `CLASS_CARRIERS` picks it up automatically (it is derived, not listed)
-and that test fails, forcing 07 beat 7 back into review rather than letting the substitution
-become permanent.
+*faultable* tier2 detector lands, `class_carriers()` picks it up automatically (it is derived,
+not listed) and that test fails, forcing 07 beat 7 back into review rather than letting the
+substitution become permanent. `tier2_injection` going live already fired it once, which is how
+the stage precondition was found.
 
 `tier1` is live but cannot carry the beat for the opposite reason: all three policies set
 `tier1: fail_closed`, so it has no fail-open side. It is still exercised and reported, because
@@ -63,6 +69,7 @@ from fastapi.testclient import TestClient
 from controlplane.audit.records import canonical_view
 from controlplane.detectors.base import DetectorTimeout, Stage
 from controlplane.gateway import pipeline
+from controlplane.detectors.onnx_models import warm_models
 from controlplane.gateway.app import Gateway, create_app
 from controlplane.gateway.config import (
     TaintedDataError,
@@ -99,6 +106,26 @@ PROBE_CASE = "CLN-001"
 #: them identically; picking the one the doc names keeps the harness answerable to it.
 FAULT = DetectorTimeout
 
+#: The stages at which `_Faulty` raises — and therefore the only stages at which a fault can
+#: actually be injected. **Shared with `class_carriers()` so the fault site and the coverage
+#: derivation cannot drift.** A carrier chosen outside these stages is selected, reported as
+#: covering its class, and then never faults. That is not hypothetical: it is what happened the
+#: moment `tier2_injection` (an INPUT-only detector, 04 §2) went live — every tier2 assertion
+#: failed with `failures=[]` while the report still claimed tier2 was carried. The precondition
+#: was always there; it was satisfied by accident while every carrier happened to be output-lane.
+FAULT_STAGES: tuple[Stage, ...] = (Stage.OUTPUT_SENTENCE, Stage.OUTPUT_FULL)
+
+
+def faultable() -> frozenset[str]:
+    """Live detectors `_Faulty` can actually raise for: those in a `FAULT_STAGES` lane.
+
+    Membership only — ordering is left to `DETECTOR_FAIL_CLASS`, which preserves the 04 §2
+    registry order the carrier tie-break depends on.
+    """
+    return frozenset(
+        d for st in FAULT_STAGES for d in pipeline.LANES[st] if d in pipeline.LIVE
+    )
+
 
 def probe_text(dataset_dir: Path = DATASET_DIR) -> str:
     """`PROBE_CASE`'s text, straight from the frozen dataset.
@@ -117,14 +144,21 @@ def probe_text(dataset_dir: Path = DATASET_DIR) -> str:
 def class_carriers() -> dict[str, str]:
     """`{fail_class: live detector able to carry a fault for it}`.
 
-    **Derived from `DETECTOR_FAIL_CLASS` ∩ `pipeline.LIVE`, never listed.** A hardcoded map
+    **Derived from `DETECTOR_FAIL_CLASS` ∩ `faultable()`, never listed.** A hardcoded map
     would keep reporting `tier2` as unexercisable after a tier2 detector landed, which is the
     one way this harness could lie: it would under-report coverage while every assertion still
     passed. Ties break on the 04 §2 registry order, which `DETECTOR_FAIL_CLASS` preserves.
+
+    **The intersection is with `faultable()`, not with `pipeline.LIVE`**, and the difference is
+    load-bearing: being live is not enough to carry a fault, the detector must also sit in a lane
+    where `_Faulty` raises. Selecting on liveness alone over-reports in the opposite direction to
+    the hardcoded map — it would claim a class was covered while its assertions failed with an
+    empty failure list, which is how `tier2_injection` surfaced this.
     """
     carriers: dict[str, str] = {}
+    injectable = faultable()
     for detector, fail_class in DETECTOR_FAIL_CLASS.items():
-        if detector in pipeline.LIVE and fail_class not in carriers:
+        if detector in injectable and fail_class not in carriers:
             carriers[fail_class] = detector
     return carriers
 
@@ -174,7 +208,7 @@ class _Faulty:
         self._real = real
 
     async def detect(self, ctx):
-        if ctx.stage in (Stage.OUTPUT_SENTENCE, Stage.OUTPUT_FULL):
+        if ctx.stage in FAULT_STAGES:
             raise FAULT(self.name, "injected by eval.fault_injection (06 §5)")
         return await self._real.detect(ctx)
 
@@ -239,6 +273,17 @@ def run_probe(
     if inject:
         if original is None:
             raise SystemExit(f"cannot inject into {inject!r}: not a live detector")
+        # Live is necessary but NOT sufficient: `_Faulty` raises only at `FAULT_STAGES`, so
+        # wrapping a detector outside those lanes yields a probe stamped `injected=<name>`
+        # whose `failures` is empty — a control run mislabelled as a faulted one, which is the
+        # exact misreport the dead-detector guard above exists to prevent. `tier2_injection`
+        # (INPUT-only) made that reachable, so the guard covers both reasons rather than one.
+        if inject not in faultable():
+            raise SystemExit(
+                f"cannot inject into {inject!r}: live but not faultable — it runs at no stage "
+                f"in {[s.name for s in FAULT_STAGES]}, so the fault would never fire and the "
+                "probe would report a control run as faulted"
+            )
         pipeline.LIVE[inject] = _Faulty(inject, original)
     try:
         with tempfile.TemporaryDirectory() as tmp:
@@ -249,6 +294,12 @@ def run_probe(
                 db_path=str(Path(tmp) / "audit.db"),
                 key_map={},
             )
+            # Build the served graphs BEFORE the request. `TestClient` is not
+            # context-managed here (see below), so the lifespan warm-up never fires and a
+            # lazy build would land ~8 s inside the request — which is how this harness
+            # caught the defect: the *control* probe, with no fault injected, reported
+            # `failures=['tier2_injection']` because the build blew the ceiling.
+            warm_models(pipeline.LIVE)
             client = TestClient(create_app(gateway), raise_server_exceptions=False)
             response = client.post(
                 "/v1/chat/completions",
@@ -559,9 +610,13 @@ def render(run: Run, dataset_dir: Path, provenance_note: str) -> str:
         "## Scope and limitations",
         "",
         f"**06 §5 and 07 beat 7 both name `tier2`; this run carries SC-3 on "
-        f"`{two_sided[0] if two_sided else 'nothing'}` instead.** Neither tier2 detector "
-        "(`tier2_injection`, `tier2_toxicity`) is implemented yet, so a tier2 fault cannot be "
-        "injected — there is nothing to monkeypatch. FR-POL-006 is stated per detector "
+        f"`{two_sided[0] if two_sided else 'nothing'}` instead.** `tier2_injection` is live, so "
+        "the earlier reason for this substitution (\"nothing to monkeypatch\") no longer applies. "
+        "It is an INPUT-stage detector (04 §2) and faults are injected only at the OUTPUT stages "
+        "(`FAULT_STAGES`), where a fault is a response-in-flight decision rather than a "
+        "short-circuit before dispatch — so a tier2 fault still cannot be injected, for a "
+        "narrower reason. `tier2_toxicity` (OUTPUT_SENTENCE) will carry the class when it lands. "
+        "FR-POL-006 is stated per detector "
         "*class*, and the class used here has the identical two-sided configuration "
         "(fail_open on UC-1/UC-2, fail_closed on UC-3), so the requirement is verified on a "
         "live class rather than asserted on an absent one. "

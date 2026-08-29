@@ -43,24 +43,48 @@ def text():
 def test_tier2_is_not_yet_injectable() -> None:
     """★ Pins the substitution the report declares: SC-3 runs on `performance`, not `tier2`.
 
-    06 §5 and 07 beat 7 both name `tier2`. Neither tier2 detector is live, so no tier2 fault
+    06 §5 and 07 beat 7 both name `tier2`. No tier2 detector is *faultable*, so no tier2 fault
     can be injected — the report says so, and this is what keeps that statement true rather
     than merely written down once.
 
-    **This test is meant to fail when a tier2 detector lands.** That failure is the signal to
-    re-point 07 beat 7 and the report's scope section at `tier2`, which is the class the docs
+    **Re-pointed once already, and the reason it asserts matters.** It first read "no tier2
+    detector is live" and fired exactly as designed when `tier2_injection` shipped. The
+    substitution nonetheless still stands, for a narrower reason: `tier2_injection` runs at
+    `Stage.INPUT` only, and faults are injected at `FAULT_STAGES` (the OUTPUT stages), because
+    an input-lane fault short-circuits before dispatch — a different verdict path from the
+    response-in-flight case 06 §5 asserts about. So the condition is now *faultable*, not
+    *live*, which is the honest form: being live was never sufficient.
+
+    **This test is meant to fail when a faultable tier2 detector lands** — `tier2_toxicity`
+    sits in `OUTPUT_SENTENCE`, so it will trip this the moment it goes live. That failure is the
+    signal to re-point 07 beat 7 and the report's scope section at `tier2`, the class the docs
     actually specify. Do not delete it to get green — deleting it silently makes a
     documented-as-temporary substitution permanent, and the report would go on citing a test
     that no longer exists.
     """
     tier2 = [d for d, c in DETECTOR_FAIL_CLASS.items() if c == "tier2"]
     assert tier2, "the 04 §2 registry must still declare tier2 detectors"
-    live = [d for d in tier2 if d in pipeline.LIVE]
-    assert live == [], (
-        f"tier2 detector(s) {live} are now live — 06 §5's own class can carry SC-3. Re-point "
-        "07 beat 7 and eval/fault_injection.py's scope section at `tier2`, then update this "
-        "test to assert the real thing rather than the substitution."
+    faultable = [d for d in tier2 if d in fi.faultable()]
+    assert faultable == [], (
+        f"tier2 detector(s) {faultable} are now faultable — 06 §5's own class can carry SC-3. "
+        "Re-point 07 beat 7 and eval/fault_injection.py's scope section at `tier2`, then update "
+        "this test to assert the real thing rather than the substitution."
     )
+
+
+def test_a_live_tier2_detector_is_not_silently_counted_as_covering_tier2() -> None:
+    """The failure mode the re-point above was found by: covered-on-paper, empty in practice.
+
+    `class_carriers()` selecting on liveness alone put `tier2_injection` under `tier2`, so the
+    report claimed the class was carried while every tier2 assertion failed with `failures=[]`.
+    Over-reporting coverage is the mirror of the hardcoded map's under-reporting, and it is the
+    worse half: under-reporting is visible in the report, over-reporting reads as success.
+    """
+    for fail_class, detector in fi.class_carriers().items():
+        assert detector in fi.faultable(), (
+            f"{detector} is claimed to carry `{fail_class}` but sits in no FAULT_STAGES lane, "
+            "so its fault would never fire"
+        )
 
 
 def test_the_report_only_cites_tests_that_exist() -> None:
@@ -140,9 +164,35 @@ def test_injection_restores_even_when_the_probe_raises(text, monkeypatch) -> Non
 
 
 def test_injecting_into_a_dead_detector_is_refused(text) -> None:
-    """Silently probing without a fault would report a control run as a faulted one."""
+    """Silently probing without a fault would report a control run as a faulted one.
+
+    **The stand-in is derived, not named.** This test used to hardcode `tier2_injection`, which
+    stopped being dead the moment that detector shipped — the test then failed for a reason
+    having nothing to do with what it asserts. Any declared-but-not-live detector proves the
+    same point, so it picks one; a synthetic name covers the case where none is left.
+    """
+    dead = next(
+        (d for d in DETECTOR_FAIL_CLASS if d not in pipeline.LIVE),
+        "no_such_detector_in_the_04_registry",
+    )
     with pytest.raises(SystemExit):
-        fi.run_probe("support_bot", text, inject="tier2_injection")
+        fi.run_probe("support_bot", text, inject=dead)
+
+
+def test_injecting_into_a_live_but_unfaultable_detector_is_refused(text) -> None:
+    """Live is necessary but not sufficient — the second half of `run_probe`'s guard.
+
+    A detector outside every `FAULT_STAGES` lane can be wrapped without error, and the probe
+    would come back stamped `injected=<name>` with an empty `failures` tuple: a control run
+    labelled as a faulted one, the precise misreport the dead-detector guard prevents. Skips
+    rather than passes vacuously when no such detector exists, so it never reports as coverage
+    it did not provide.
+    """
+    unfaultable = [d for d in pipeline.LIVE if d not in fi.faultable()]
+    if not unfaultable:
+        pytest.skip("no live-but-unfaultable detector to exercise the guard with")
+    with pytest.raises(SystemExit, match="live but not faultable"):
+        fi.run_probe("support_bot", text, inject=unfaultable[0])
 
 
 def test_the_input_lane_still_works_under_an_output_fault(text) -> None:

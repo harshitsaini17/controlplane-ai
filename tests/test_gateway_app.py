@@ -24,6 +24,7 @@ provider key, which is also what makes it safe to run in CI (06 §4's stub-upstr
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import shutil
 import sqlite3
@@ -893,18 +894,32 @@ class CanaryStub(Stub):
 
 
 def canary_app(tmp_path, prompt_tokens: int | None = 64, *, provider: str | None = None,
-               enabled: bool = True, fail: bool = False):
+               enabled: bool = True, fail: bool = False, store=None):
     """An app whose upstream reports `prompt_tokens`, returning (app, gateway).
 
     `provider` switches `active_provider`, which is how the dev/measured asymmetry is
     reached: the shipped active provider is `kiro-local` (dev), so a measured-class test
     must repoint the config rather than hand-build a `Provider`.
+
+    **`store` defaults to the fail-open policy set, and that default is load-bearing.** The
+    ADR-033 availability gate runs BEFORE the canary (`run_availability_gate`, deliberately, so
+    a boot that will refuse for a locally-knowable reason does not first spend an upstream round
+    trip). The shipped `finance_advisor` maps `tier2: fail_closed`, so on a host without the
+    `.[ml]` stack — CI's `verify` matrix installs `.[dev]` only — that gate raises before the
+    canary ever runs, and all seven canary tests fail on an assertion about `gateway.canary`
+    for a reason that has nothing to do with the canary. Every test here posts to no use case
+    (they hit `/metrics` or nothing), so a two-policy store is sufficient.
+
+    ADR-033 rule 4 permits exactly this — re-pointing a test at a fail-open fixture — and
+    forbids the other move, editing `finance_advisor`'s `fail_mode` to something nobody ships.
+    The refusal itself keeps its own tests: `test_a_fail_closed_policy_refuses_the_boot`.
     """
     config = load_gateway_config().model_copy(deep=True)
     if provider is not None:
         config.active_provider = provider
     config.usage_sanity.canary_on_startup = enabled
     gateway = Gateway(
+        store=fail_open_policies(tmp_path) if store is None else store,
         dispatcher=CanaryStub(prompt_tokens, fail=fail),
         config=config,
         metrics=MetricsRegistry(),
@@ -1335,6 +1350,31 @@ def test_the_id_still_correlates_the_header_with_the_audit_record(make_client) -
 ABSENT_DEP = "onnxruntime_absent_on_purpose"
 
 
+def _genuinely_unloadable() -> dict[str, str]:
+    """`{detector: first missing module}` for the probe scope, computed WITHOUT the probe.
+
+    Deliberately not a call to `probe_availability`: a test that asked the probe whether it
+    agrees with itself would pass on any host and assert nothing. This reads `REQUIREMENTS` —
+    the declared contract — and resolves each name with `find_spec`, so the assertion compares
+    the probe's output against the declaration it is supposed to implement.
+
+    The two could in principle disagree on resolution semantics (metadata presence, namespace
+    packages). That would fail the caller, which is the correct outcome: a divergence between
+    "declared present" and "probe says present" is a finding, not noise to be tolerated.
+    """
+    out: dict[str, str] = {}
+    for detector in app_module._probe_scope():
+        for module in availability.REQUIREMENTS.get(detector, ()):
+            try:
+                found = importlib.util.find_spec(module) is not None
+            except (ImportError, ValueError):
+                found = False
+            if not found:
+                out[detector] = module
+                break
+    return out
+
+
 @pytest.fixture
 def unloadable_tier2(monkeypatch):
     """Make `tier2_injection` genuinely unloadable, without faking a load (ADR-033 rule 4).
@@ -1377,16 +1417,26 @@ def test_the_probe_scope_is_the_union_of_both_binding_mechanisms() -> None:
     assert set(registered_names()) <= set(app_module._probe_scope())
 
 
-def test_a_healthy_host_produces_an_empty_manifest(make_client) -> None:
+def test_the_manifest_names_exactly_the_dependencies_this_host_is_missing(make_client) -> None:
     """The mechanism must be INERT until a detector actually fails to load.
 
-    Every detector in `LIVE` today is a regex pass that imports nothing, so a non-empty
-    manifest here would mean the probe is inventing absences — and every request would carry
-    a false `unavailable[]` entry.
+    **The premise stopped being universal, so the claim became two-sided.** This test was
+    `test_a_healthy_host_produces_an_empty_manifest` and asserted `manifest == ()`, justified by
+    "every detector in `LIVE` today is a regex pass that imports nothing". `tier2_injection`
+    ended that: it is live and needs `onnxruntime`/`transformers`/`onnx`. On CI's `verify` matrix
+    (`.[dev]` only) the manifest is correctly NON-empty, and asserting `()` there would assert
+    the probe is broken.
+
+    What the test always meant — the probe invents no absences — survives intact and now also
+    catches the opposite error, an absence the probe fails to report. `_genuinely_unloadable`
+    recomputes the expectation from `REQUIREMENTS` rather than from the probe, so this is not
+    the probe agreeing with itself. On a full `.[dev,ml]` host `expected` is empty and this
+    asserts exactly what the old test did.
     """
     _, gateway, _ = make_client()
-    assert gateway.detector_manifest == ()
-    assert gateway.detectors_unloadable == {}
+    expected = _genuinely_unloadable()
+    assert gateway.detectors_unloadable == expected
+    assert {e.detector: e.missing for e in gateway.detector_manifest} == expected
 
 
 def test_a_fail_closed_policy_refuses_the_boot(unloadable_tier2, tmp_path) -> None:
@@ -1440,10 +1490,16 @@ def test_an_unloadable_detector_is_recorded_as_unavailable_not_not_run(
 ) -> None:
     """★ The distinction the third state exists for (05 §4).
 
-    `tier2_injection` is in the input lane and absent from `LIVE`, so it reaches
-    `note_missing` exactly as an unimplemented detector would. Filing it as
-    `not_implemented` would be a false statement in an append-only table: the detector
-    exists, and what is missing is a dependency this record can name.
+    `tier2_injection` is in the input lane, so it reaches `note_missing` on a host that cannot
+    load it. Filing it as `not_implemented` would be a false statement in an append-only table:
+    the detector exists, and what is missing is a dependency this record can name.
+
+    **This docstring used to say "and absent from `LIVE`", which is how it reached
+    `note_missing` before the detector shipped.** That route is gone — `tier2_injection` is in
+    `LIVE` now — and the test failed with `KeyError: 'unavailable'` when it did, because
+    `run_lane` treated membership as proof of loadability and called `detect()` anyway. The
+    manifest check there is what this asserts today; `test_the_lane_never_calls_a_detector_the
+    _boot_manifest_says_cannot_load` pins that it is load-bearing rather than incidental.
     """
     gateway = Gateway(
         store=fail_open_policies(tmp_path), dispatcher=Stub("All good here."),
@@ -1463,6 +1519,52 @@ def test_an_unloadable_detector_is_recorded_as_unavailable_not_not_run(
     assert gateway.metrics.value_of(
         "cp_detector_unavailable_total", detector="tier2_injection"
     ) == 1.0
+
+
+def test_the_lane_never_calls_a_detector_the_boot_manifest_says_cannot_load(
+    unloadable_tier2, tmp_path, monkeypatch
+) -> None:
+    """★ The production defect wiring `tier2_injection` exposed, pinned by a spy.
+
+    `run_lane`'s loadability test was `LIVE.get(name) is None`, which was sufficient only while
+    ADR-033 state (c) could *only* be expressed by absence from `LIVE` — true while every live
+    detector was a dependency-free regex pass. A live detector with real imports makes state (c)
+    reachable *with* membership, and the lane then called `detect()` on a host the boot manifest
+    had already declared unable to load it: the ImportError would be filed as a per-request
+    transient fault, re-discovered on every request, instead of the host-level absence ADR-033
+    separates it from.
+
+    A spy rather than an assertion on the audit record, because the record cannot tell the two
+    apart once the reason is normalized — the claim here is specifically that **no call is
+    made**. `detect()` succeeds on this host (onnxruntime is installed), so without the manifest
+    check the spy fires and this test fails rather than passing for the wrong reason.
+    """
+    called: list[str] = []
+    real = pipeline.LIVE["tier2_injection"]
+
+    class Spy:
+        name = real.name
+
+        async def detect(self, ctx):
+            called.append(ctx.stage.name)
+            return await real.detect(ctx)
+
+    monkeypatch.setitem(pipeline.LIVE, "tier2_injection", Spy())
+    gateway = Gateway(
+        store=fail_open_policies(tmp_path), dispatcher=Stub("All good here."),
+        metrics=MetricsRegistry(), db_path=str(tmp_path / "audit.db"), key_map={},
+    )
+    with pytest.warns(DetectorUnavailableWarning):
+        with TestClient(create_app(gateway), raise_server_exceptions=False) as client:
+            response = post(client, "support_bot", prompt=CLEAN_INPUT["text"])
+
+    assert called == [], (
+        f"the manifest says tier2_injection cannot load here, yet the lane called it at {called}"
+    )
+    detectors = audit_of(gateway, response)["detectors"]
+    assert detectors["unavailable"] == [
+        {"detector": "tier2_injection", "missing": ABSENT_DEP}
+    ]
 
 
 def test_the_missing_dependency_is_an_import_name_never_a_traceback(
@@ -1487,13 +1589,25 @@ def test_the_missing_dependency_is_an_import_name_never_a_traceback(
 
 
 def test_a_healthy_boot_omits_the_key_rather_than_writing_an_empty_list(
-    make_client,
+    make_client, monkeypatch
 ) -> None:
     """`[]` would assert "this boot loaded everything" — a claim older rows never made.
 
     The ADR-027 Amendment 1 distinction between `[]` and absent, applied to this column: an
     absent key stays silent instead of back-dating a guarantee.
+
+    **The empty manifest is arranged now, not assumed.** It used to come for free — every live
+    detector imported nothing — and `tier2_injection` ended that, so on a host without `.[ml]`
+    this asserted the absence of a key ADR-033 correctly writes. Narrowing the probe to the
+    dependency-free detectors makes the premise structural rather than host-dependent, which is
+    the honest fix: the subject here is the serialize-time distinction between an absent key and
+    an empty list, and that has nothing to do with which host runs it.
     """
+    monkeypatch.setattr(
+        app_module, "_probe_scope",
+        lambda: ("tier1_pii", "tier1_blocklist", "numeric_claims"),
+    )
     client, gateway, _ = make_client("All good here.")
+    assert gateway.detector_manifest == (), "the narrowed scope must leave nothing unavailable"
     response = post(client, "support_bot", prompt=CLEAN_INPUT["text"])
     assert "unavailable" not in audit_of(gateway, response)["detectors"]
