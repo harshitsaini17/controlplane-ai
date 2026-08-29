@@ -1,0 +1,111 @@
+{
+  "spike": "04 \u00a72.2 \u2014 the 10 ms aggregate enrichment cap, measured",
+  "code": {
+    "commit": "b0f1451ff5d024658fd7f5f514d8ef6329d2cd66",
+    "dirty": true
+  },
+  "budget_ms": 10.0,
+  "span_counts": [
+    1,
+    2,
+    3,
+    4,
+    8
+  ],
+  "quiet_gate_polls": [],
+  "quiet_gate_waited_s": 0.0,
+  "load_at_process_start": {
+    "load1": 0.69,
+    "load5": 0.84,
+    "load15": 0.94,
+    "cpus": 12
+  },
+  "cold": {
+    "first_call_ms": 1615.2,
+    "n": 1,
+    "note": "import spacy + spacy.load + deferred first inference; paid by warm() at boot"
+  },
+  "window": {
+    "chars": 114,
+    "n": 40,
+    "p50": 4.635,
+    "p99": 5.29,
+    "max": 5.29
+  },
+  "curve": [
+    {
+      "spans": 1,
+      "chars": 114,
+      "n": 40,
+      "total_p50": 4.703,
+      "total_p99": 5.994,
+      "total_max": 5.994,
+      "per_span_p50": 4.703,
+      "enriched_p50": 1.0,
+      "skipped_per_call": 0.0
+    },
+    {
+      "spans": 2,
+      "chars": 129,
+      "n": 40,
+      "total_p50": 9.457,
+      "total_p99": 11.132,
+      "total_max": 11.132,
+      "per_span_p50": 4.728,
+      "enriched_p50": 2.0,
+      "skipped_per_call": 0.0
+    },
+    {
+      "spans": 3,
+      "chars": 144,
+      "n": 40,
+      "total_p50": 14.52,
+      "total_p99": 15.73,
+      "total_max": 15.73,
+      "per_span_p50": 4.84,
+      "enriched_p50": 3.0,
+      "skipped_per_call": 0.15
+    },
+    {
+      "spans": 4,
+      "chars": 159,
+      "n": 40,
+      "total_p50": 11.017,
+      "total_p99": 15.767,
+      "total_max": 15.767,
+      "per_span_p50": 2.754,
+      "enriched_p50": 2.0,
+      "skipped_per_call": 1.8
+    },
+    {
+      "spans": 8,
+      "chars": 221,
+      "n": 40,
+      "total_p50": 12.954,
+      "total_p99": 15.064,
+      "total_max": 15.064,
+      "per_span_p50": 1.619,
+      "enriched_p50": 2.0,
+      "skipped_per_call": 6.0
+    }
+  ],
+  "load_at_end": {
+    "load1": 0.79,
+    "load5": 0.86,
+    "load15": 0.95,
+    "cpus": 12
+  },
+  "verdict": {
+    "status": "UNBOUNDED",
+    "ceiling_ms": 15.29,
+    "worst_total_p99_ms": 15.767,
+    "ceiling_basis": "budget + the k=1 total P99 as a stand-in for one window's cost. A k=1 total also carries fixed per-call overhead (executor dispatch, signal rebuild), so this ceiling is mildly GENEROUS \u2014 stated because a gate that flatters itself silently is worse than a looser gate that says so.",
+    "detail": "worst total P99 15.767 ms against a ceiling of budget 10.0 + one k=1 call P99 5.290 = 15.290 ms (ceiling mildly generous \u2014 see ceiling_basis)"
+  },
+  "superseded": {
+    "by": "reports/spike_enrichment_latency.json",
+    "figures_are_valid": true,
+    "verdict_is_withdrawn": true,
+    "why": "Measured on a genuinely quiet host (load1 0.69) and the per-window/cold figures stand. TWO things about it must not be cited. (1) Every `p99` here IS the `max`: at n=40 an interpolated P99 sits at rank 38.61 of 0..39 with no sample above it, which is why the p99 and max columns are identical in all five curve rows. (2) The `UNBOUNDED` verdict tested `budget + one k=1 call P99` \u2014 a pass line invented by this harness, not an NFR \u2014 and missed it by 0.48 ms. 04 \u00a72.2 promises stop/log/count on exceed, never a total inside 10 ms, and cannot: the budget is checked AFTER each window, so a call overshoots by up to one window by design."
+  }
+}
