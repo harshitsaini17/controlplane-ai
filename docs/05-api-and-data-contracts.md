@@ -262,6 +262,7 @@ cp_fallback_engaged_total{from_provider,to_provider,reason}      # FR-GW-006
 cp_pricing_missing_total{provider,model}                        # ADR-022
 cp_enrichment_skipped_total{use_case,reason}                    # 04 §2.2 cap
 cp_detector_unavailable_total{detector}                         # ADR-033 state (c)
+cp_detector_timeout_abandoned_total{detector}                    # ADR-034 Part A
 ```
 The definition of `cp_gateway_overhead_ms` / `latency_json.total_attributable_overhead_ms` is **normative in 06 §4** — implementations and dashboards must use that formula, not an ad-hoc one.
 

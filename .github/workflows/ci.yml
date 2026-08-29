@@ -21,6 +21,17 @@
 # Verified locally at the tree this file landed on: py3.12.12 and py3.14.6, full suite
 # exit 0 (964 tests, 0 failures, ~9 s each); fault injection 27/27; bench --check exit 0.
 # The matrix is a measured claim, not an aspiration.
+#
+# ─── TWO JOBS, AND WHY THE SECOND ONE EXISTS ──────────────────────────────────────────
+# `verify` runs the four gates on the light `[dev]` extra. `ml-closure` installs the full
+# `[dev,ml]` stack to run ONE invariant: ADR-035's guard that the `ml` extra can build the
+# tier-2 graph it is expected to serve. That test skips where the model stack is absent, and
+# a permanently-skipped invariant is not an invariant — so `verify` alone would leave
+# `[D2-tier2-served-graph-is-unbuildable-on-the-ml-extra]` free to re-open silently.
+# It is deliberately NOT a matrix job: it is a composition check about the dependency set,
+# not an interpreter-compatibility claim, and it downloads two checkpoints. Resolution across
+# both interpreters is verified separately (ADR-035 item 3, `pip install --dry-run`).
+# It still measures nothing — NFR-P-002 is a CPU-budget claim about real hardware.
 
 name: CI
 
@@ -88,3 +99,50 @@ jobs:
             exit 1
           fi
           echo "reports/ unchanged."
+
+  # ADR-035 — the `ml` extra must be able to BUILD the graph it serves, not just serve it.
+  # This is the only job that installs the model stack, and it runs a single test file.
+  ml-closure:
+    runs-on: ubuntu-latest
+    name: ml extra builds the tier-2 graph (ADR-035)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"        # the verified primary toolchain (AGENTS.md §10)
+
+      # Two checkpoints, ~130 MB of weights, re-downloaded on every run otherwise. Keyed on
+      # this workflow file so a change to the pinned checkpoints or extras busts the cache.
+      - name: Cache HuggingFace hub
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-tier2-${{ hashFiles('.github/workflows/ci.yml', 'pyproject.toml') }}
+          restore-keys: hf-tier2-
+
+      # CPU-only torch FIRST, per AGENTS.md §10: the default index pulls the multi-GB CUDA
+      # stack for no benefit here, and on a shared runner that is most of the job's wall-clock.
+      - name: Install (dev,ml — CPU-only torch first)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -e ".[dev,ml]"
+
+      # The guard itself. `-p no:randomly` is not needed; the file is self-contained and its
+      # slow build is module-scoped. If this fails with `missing: onnx`, a build dependency
+      # left the `ml` extra and the D2 trap is back — fix the extra, not the test.
+      - name: ADR-035 closure invariant
+        run: python -m pytest tests/test_ml_extra_closure.py -v
+
+      # A skip here means the job proved nothing, which is the exact failure mode this job
+      # exists to prevent. Fail loudly rather than reporting a green tick for a no-op.
+      - name: Assert the invariant actually ran
+        run: |
+          python -m pytest tests/test_ml_extra_closure.py -q 2>&1 | tee /tmp/mlout.txt
+          if grep -qiE "[0-9]+ skipped" /tmp/mlout.txt; then
+            echo "::error::ADR-035 closure tests SKIPPED on a host that installed [dev,ml]."
+            echo "::error::A skipped invariant is not an invariant — see ADR-035 consequence 3."
+            exit 1
+          fi
+          echo "closure invariant ran."

@@ -55,7 +55,7 @@ Common contract: `async detect(ctx) -> list[Signal]`; must respect its latency b
 |---|---|---|---|---|
 | `tier1_pii` | input + output_sentence | <2 ms | `pii.*` | compiled regex + Aho-Corasick keyword sets; span-accurate for redaction. **Pattern set is normative in §2.5 (ADR-026), including two documented scope exclusions** |
 | `tier1_blocklist` | input + output_sentence | <2 ms | `security.blocklist` | per-use-case extra terms via policy `blocklist_extra` |
-| `tier2_injection` | input | <25 ms **per 104-token window** (ADR-032) | `security.prompt_injection` | small transformer, CPU/ONNX; score = **MAX over strided windows** (104 tokens / overlap 26 / step 76), full input coverage — no prefix privileged, no 512-token blind spot. `window_count` + max-window index in signal meta; multi-window cost published untargeted |
+| `tier2_injection` | input | <25 ms **per 104-token window** (ADR-032), enforced **inside** the detector; the runner's ceiling is **length-parametric** (ADR-034 Part B) | `security.prompt_injection` | small transformer, CPU/ONNX; score = **MAX over strided windows** (104 tokens / overlap 26 / step 76), full input coverage — no prefix privileged, no 512-token blind spot. `window_count` + max-window index in signal meta; multi-window cost published untargeted |
 | `tier2_toxicity` | output_sentence | <25 ms | `toxicity.*` | moderate vs high via detector-internal cutoffs (0.5/0.8 defaults; overridable in policy `detector_params`) |
 | `fast_consistency` | output_full* | <60 ms | `hallucination.low_confidence` | 2nd sample at temperature; embedding cosine; *runs on accumulated response so far at each sentence boundary using the parallel-sample stream (see §2.3) |
 | `rag_grounding` | output_sentence | <30 ms | `hallucination.ungrounded_claim` | only when request carries `context` docs; sentence-vs-context embedding entailment proxy |
@@ -65,6 +65,49 @@ Common contract: `async detect(ctx) -> list[Signal]`; must respect its latency b
 | `conv_tracker` | conversation | <1 ms | `conversation.cumulative_risk` | running totals of pii/hallucination signals per conversation id — **`stage` ∈ {output_sentence, output_full, conversation} only** (ADR-021) |
 
 **Stage names each detector's native granularity — the unit of text it consumes — not a whitelist of delivery modes:** a non-streaming pipeline buffers the full response and runs the `output_sentence` detectors over that buffered text (02 §4), so `output_full` marks the detectors that *cannot* work sentence-by-sentence rather than the only ones that run when a whole response is available (M-11, ratified 2026-08-27).
+
+
+### 2.1 Two budget mechanisms, and the vehicle every model detector runs on (ADR-034)
+
+A budget is only a budget if the thing it wraps can be interrupted. Two rules follow, and they are
+recorded here together because the deviation that produced them was caused by a doc stating one
+while the code enforced the other.
+
+**(a) Execution vehicle — generic.** Every **CPU-bound model detector** — `tier2_injection`,
+`tier2_toxicity`, `rag_grounding`, `fast_consistency`'s embedding comparison, `entity_enricher` —
+runs its inference on a **dedicated single-worker `ThreadPoolExecutor`, awaited from the detector**.
+Never inline on the event loop. ONNX Runtime releases the GIL during `sess.run`, so the loop stays
+live for concurrent requests; and an awaited future is what makes `asyncio.wait_for` a real
+enforcement point rather than a dead letter, since against inline CPU work the timeout fires only
+once control returns. `max_workers=1` serializes inference, preserving the one-inference-at-a-time
+conditions **SL-5** measured under, and **queue wait counts inside the ceiling**.
+
+A timed-out executor task is **abandoned, not killed** — Python cannot preempt a running thread, so
+the request proceeds under policy `fail_mode` while the thread finishes. Counted by
+`cp_detector_timeout_abandoned_total{detector}` (05 §5) so the condition is visible rather than
+inferred.
+
+**(b) Budget shape.** Most detectors carry a **flat** budget: the number in the table is the number
+the runner's `wait_for` receives. `tier2_injection` is **parametric**: its per-window budget is
+enforced *inside* the detector, window by window, while the runner enforces a ceiling derived from
+ADR-032's measured series — `max(25.0, envelope(n_windows) × 2)`, floored at the flat 25 ms for
+single-window inputs. The ceiling therefore means *"materially slower than its own measured
+envelope"*, not *"longer than one window's budget"*, which was a statement about input length
+wearing a budget's clothes. This is what stops `fail_closed` blocking every long input and
+`fail_open` silently skipping it. `run_with_budget`'s guarantee is consequently **two-tier**, and
+that is a stated trade-off rather than an emergent one.
+
+The envelope is grounded on ADR-032's **1-thread** column, not its 6-thread column: the two differ
+by **3.9×**, so a 2× safety factor over the optimistic figures sits *below* the pessimistic cost and
+would trip on contention alone. NFR-P-002 is **not** restated by this and SL-5's disclosure is
+unchanged.
+
+**Span disclosure, normative for every published `tier2_injection` figure.** ADR-032's window series
+times `sess.run` **only** (tokenization is outside its clock). A detector pays tokenization too —
+measured 1.59 ms P99 at 2 windows and 27.33 ms at the 4000-token bound. Any figure this repo
+publishes for this detector **states which spans it covers**. This is a disclosure, not a
+contradiction: 06 §4 defines `input_hold_ms` as "ingress + input-lane time", which includes
+tokenization by construction.
 
 ### 2.2 Enrichment stage — `entity_enricher` (ADR-011)
 

@@ -59,8 +59,18 @@ __all__ = [
 REQUIREMENTS: dict[str, tuple[str, ...]] = {
     # ADR-031 picks the checkpoints, ADR-032 the windowing; both serve on ONNX Runtime and
     # tokenize with transformers.
-    "tier2_injection": ("onnxruntime", "transformers"),
-    "tier2_toxicity": ("onnxruntime", "transformers"),
+    #
+    # `onnx` is here per **ADR-035**, and it is not a build-time entry that leaked onto a
+    # runtime list. ADR-031 keeps no checked-in graph, so a serving host EXPORTS and quantizes
+    # at first use — `torch.onnx.export` and `quantize_dynamic` both import `onnx`, while
+    # `import onnxruntime` alone does not pull it. Declaring only the serve-time names is what
+    # let an `.[ml]` host pass this probe and then fail every request
+    # (`[D2-tier2-served-graph-is-unbuildable-on-the-ml-extra]`): fail_closed pipelines blocked
+    # everything, fail_open ones silently scanned nothing. The set is MEASURED, not read off a
+    # dependency graph — see `tests/test_ml_extra_closure.py`, which masks the interpreter down
+    # to `.[ml]`'s declared closure and builds both checkpoints for real.
+    "tier2_injection": ("onnxruntime", "transformers", "onnx"),
+    "tier2_toxicity": ("onnxruntime", "transformers", "onnx"),
     # 04 §2 embedding-similarity grounding.
     "rag_grounding": ("sentence_transformers",),
     # ADR-011 names the NER model, and the model is a separate installable from spaCy itself —

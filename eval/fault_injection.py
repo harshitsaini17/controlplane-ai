@@ -50,7 +50,6 @@ from __future__ import annotations
 import argparse
 import json
 import platform
-import subprocess
 import sys
 import tempfile
 from collections.abc import Sequence
@@ -75,6 +74,7 @@ from controlplane.gateway.sse_proxy import UpstreamResponse
 from controlplane.policy.engine import DETECTOR_FAIL_CLASS
 from controlplane.policy.store import PolicyStore
 from controlplane.telemetry.metrics import MetricsRegistry
+from eval.host_load import git_stamp
 from eval.validate_dataset import (
     DATASET_DIR,
     FROZEN_COMMIT,
@@ -342,16 +342,6 @@ def check(probe: Probe, expect_mode: str) -> list[Assertion]:
     return out
 
 
-def _git(*args: str) -> str:
-    try:
-        return subprocess.run(
-            ["git", *args], capture_output=True, text=True, check=True,
-            cwd=Path(__file__).resolve().parents[1],
-        ).stdout.strip()
-    except Exception:  # noqa: BLE001
-        return "unavailable"
-
-
 #: 01 §3 pipeline labels, so the report reads in the docs' vocabulary (06 §5 and 07 beat 7
 #: both speak in UC numbers, while config and audit rows speak in use-case names).
 UC_LABEL: dict[str, str] = {
@@ -423,8 +413,10 @@ def execute(dataset_dir: Path = DATASET_DIR) -> Run:
 
 def _provenance(dataset_dir: Path, provenance_note: str) -> list[str]:
     digest = dataset_digest(dataset_dir)
-    head = _git("rev-parse", "HEAD")
-    dirty = _git("status", "--porcelain")
+    # One definition in `eval/host_load.py` (AGENTS.md §7).
+    code = git_stamp()
+    head = code["commit"] or "unavailable"
+    dirty = code["dirty"]
     return [
         "## Provenance",
         "",

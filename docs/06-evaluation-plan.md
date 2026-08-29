@@ -246,13 +246,13 @@ it, with the coverage limit stated rather than implied.
 
 - Method: 300 requests replayed from dataset traffic mix against the gateway with a **stub upstream** (canned SSE at realistic token cadence) so gateway overhead is isolated from provider variance; then 30 requests against the real provider for an end-to-end sanity row.
 - **Normative definitions** (used by 05 §5, the audit record, and every report — no ad-hoc variants). **ADR-030 re-scoped NFR-P-001 onto the per-hold series; the per-request sum is retained and published, under a new name, with no target.**
-  - `input_hold_ms` — ingress + input-lane time, before dispatch. **Targeted** (NFR-P-001).
+  - `input_hold_ms` — ingress + input-lane time, before dispatch. **Targeted** (NFR-P-001) **for single-window inputs only** — ADR-030 Amendment 2. `tier2_injection` scores its input as strided 104-token windows (ADR-032) and that scan is *inside* this quantity by the definition above, so a multi-window input's hold scales with input length: ADR-032 measures the window series at 23.28 ms P50 for 2 windows and 651.41 ms at the `per_request_max_tokens: 4000` bound. Above one window the hold is therefore published as an **untargeted, window-count-bucketed series** — the third use of the per-request-sum precedent, and deliberately the same shape ADR-032 gave NFR-P-002 so a reader meets one convention rather than three. **Tokenization is inside this figure and outside ADR-032's table**, whose series times `sess.run` only (ADR-034); measured separately at 1.59 ms P99 for 2 windows and 27.33 ms at the bound, so the two are comparable only once that term is stated.
   - `sentence_holds_ms` — the per-sentence holds as a **series, one entry per sentence** (boundary arrival → release: detector wait + policy + action). **Targeted per hold**, so P50/P99 are taken over holds rather than over requests. This is the quantity a user waits through, and the unit ADR-002's sentence-level interception makes meaningful.
   - `total_attributable_overhead_ms` — *streaming* = ingress + input-lane time + Σ per-sentence hold + finalization, upstream token wait excluded; *non-streaming* = total wall-clock − upstream call duration. **Formula unchanged** from what `gateway_overhead_ms` meant; renamed because it is no longer the targeted figure and the old name read as the headline. **Reported in every latency report, no target** (ADR-030).
   - `added_time_to_last_byte_ms` — client-observed last-byte time minus the same request's upstream duration: the honest end-to-end cost of interposing the gateway. **Measured and reported, never targeted** — it contains upstream token cadence, which the gateway does not control. **A benchmark-client quantity, defined here and NOT a `latency_json` key** (ADR-030 Amendment 1): "client-observed" names a vantage the gateway structurally lacks — a completed ASGI `send()` means *handed to the transport*, not received — so the only process in this repo that can measure it is the one holding a stopwatch around the call. It is **this benchmark's own** `wall − upstream`, which is why it absorbs the row previously reported as `reference_delta_ms` rather than joining it: two names for one subtraction invited the reading that one of them was the uncontaminated version. Published with that row's two standing caveats intact — an **upper bound**, since it carries `TestClient` ASGI transport cost a real client would not pay, and **never the headline number**.
   - TTFB delta vs stub-direct stays a separate reference row, never the headline number. Distinct from `added_time_to_last_byte_ms` above: **first** byte against a direct baseline rather than **last** byte against the same request's upstream duration. Both are client-side and neither is headlined, so the report names each rather than calling either "the reference row".
 - Report: P50/P95/P99 of each series above per use case — the **targeted** per-hold series against NFR-P-001, `total_attributable_overhead_ms` reported untargeted beside them, and `added_time_to_last_byte_ms` in its own row below them — reported from the client vantage, labelled an upper bound, and never headlined (ADR-030 Amendment 1) (streaming and non-streaming tabulated separately, since 06 §4 makes them different quantities); per-detector latency histograms vs NFR-P-002 budgets; **plus the ADR-032 window-count-bucketed `tier2_injection` series** — length-parametric and untargeted, with the `per_request_max_tokens` bound case stated as a figure, since NFR-P-002 is scoped to single-window inputs and the multi-window class is published rather than hidden; hardware + Python version + run date stamped.
-- Assertion mode: `--check` exits nonzero if NFR-P-001/002 violated → used in CI and as the D3 tripwire. **It must not gate NFR-P-001 on `total_attributable_overhead_ms`**, which ADR-030 removed from that requirement's scope: gating a withdrawn target would assert a requirement the docs no longer contain, and silently gating nothing would read as a pass. Until the per-hold series are emitted (M-20), NFR-P-001 is reported `not measured` and contributes no verdict.
+- Assertion mode: `--check` exits nonzero if NFR-P-001/002 violated → used in CI and as the D3 tripwire. **It must not gate NFR-P-001 on `total_attributable_overhead_ms`**, which ADR-030 removed from that requirement's scope: gating a withdrawn target would assert a requirement the docs no longer contain, and silently gating nothing would read as a pass. **The NFR-P-001 input-lane assertion gates the single-window population only** (ADR-030 Amendment 2): the bucketed multi-window series is reported beside it with no verdict attached, because a gate that stayed red on every long prompt would be indistinguishable from a broken gate. A run carrying no qualifying holds renders `not measured`, which is the third state proper and not a pass.
 
 ## 5. Fault injection (`fault_injection`)
 
@@ -281,7 +281,7 @@ number is then unverifiable by the one thing NFR-INT-001 promises, a reader with
 is why the rule is structural rather than a habit — the failure mode is a README that looks
 fully sourced while sourcing nothing.
 
-Three consequences, stated so they are not rediscovered later:
+Four consequences, stated so they are not rediscovered later:
 
 - **A report is still never hand-edited.** Committing it does not make it a document; it stays
   the output of its entry point, and the way to change it is to re-run that command.
@@ -293,6 +293,18 @@ Three consequences, stated so they are not rediscovered later:
   exist while its own contents are being generated. This is the same convention §1 uses for the
   frozen dataset hash, for the same reason. A report generated from a dirty tree stamps
   `+ uncommitted changes` and is **not** citable evidence; regenerate from a clean tree first.
+
+- **Measurement runs execute on a quiet host, and an artifact whose recorded load contradicts
+  that is not citable.** Every measurement harness stamps `os.getloadavg()` and the CPU count at
+  run start and end (`eval/host_load.py`, one definition shared by `bench_latency` and the
+  spikes); the **start** stamp is the one that certifies the host, since by the end the harness
+  is itself the load. This is a mechanical check standing in for a forensic argument: a published
+  spike artifact was once contaminated by ~20 s of competing multi-core work, and the only
+  evidence was inferential — a p50 that came in 25% above its own cold sample, and a curve that
+  stopped being monotone. A reader had to notice. With the stamp recorded, the same run is
+  rejected by reading one field. An artifact that carries **no** load stamp is uncitable for a
+  different reason than one recorded as busy, and the reports say which: the first was never
+  measured, the second was measured and failed.
 
 Cited section names must match the report's actual headings, so a citation can be resolved by
 searching the file:

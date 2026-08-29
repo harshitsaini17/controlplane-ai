@@ -96,6 +96,10 @@ REGISTRY: dict[str, MetricSpec] = {
         # ADR-033 state (c). No `use_case` label, deliberately: unloadability is a
         # property of the PROCESS, identical for every request this boot, so a per-use-case
         # breakdown would multiply one boot-time fact across the dashboard as if it varied.
+        MetricSpec("cp_detector_timeout_abandoned_total", "counter", ("detector",),
+                   "executor task abandoned after a budget timeout (ADR-034 Part A): "
+                   "Python cannot preempt a thread, so the worker finishes while the "
+                   "request proceeds under fail_mode"),
         MetricSpec("cp_detector_unavailable_total", "counter", ("detector",),
                    "registered but unloadable at boot — dependency absent (ADR-033); "
                    "counted per affected request, never a fault record"),

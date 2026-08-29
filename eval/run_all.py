@@ -25,7 +25,6 @@ import argparse
 import asyncio
 import json
 import platform
-import subprocess
 import sys
 from collections import Counter
 from dataclasses import dataclass, field
@@ -54,6 +53,7 @@ from eval.policy_matrix import (
     reconcile,
     render_matrix,
 )
+from eval.host_load import git_stamp
 from eval.validate_dataset import (
     DATASET_DIR,
     FROZEN_COMMIT,
@@ -435,19 +435,13 @@ def evaluate(cases: Sequence[dict[str, Any]]) -> tuple[list[DetectorResult], int
 # --------------------------------------------------------------------------
 
 
-def _git(*args: str) -> str:
-    try:
-        return subprocess.run(
-            ["git", *args], capture_output=True, text=True, timeout=5, check=True
-        ).stdout.strip()
-    except Exception:
-        return "unavailable"
-
-
 def _provenance(cases: Sequence[dict[str, Any]], dataset_dir: Path) -> list[str]:
     digest = dataset_digest(dataset_dir)
-    head = _git("rev-parse", "HEAD")
-    dirty = _git("status", "--porcelain")
+    # One definition in `eval/host_load.py`; this copy lacked `cwd`, so it read whichever
+    # directory the process started in rather than the repo.
+    code = git_stamp()
+    head = code["commit"] or "unavailable"
+    dirty = code["dirty"]
     return [
         "## Provenance",
         "",

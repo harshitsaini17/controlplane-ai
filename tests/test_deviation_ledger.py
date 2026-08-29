@@ -144,3 +144,102 @@ def test_no_slug_is_filed_twice() -> None:
 def test_the_registers_stay_separate(register: str) -> None:
     """§11's count is the deviation table's. Merging the registers is how a low count lies."""
     assert f"## {register}" in _doc()
+
+
+#: Suffixes worth scanning for a deviation slug: source, docs, CI and packaging config.
+SCANNED_SUFFIXES = frozenset({".py", ".md", ".yml", ".yaml", ".toml"})
+
+#: Any bracketed deviation slug, wherever it appears — prose, docstring, comment or commit note.
+ANY_SLUG = re.compile(r"\[(D\d[\w-]*)\]")
+
+
+def _slug_mentions() -> dict[str, set[str]]:
+    """Every deviation slug mentioned anywhere in the repo, mapped to the files mentioning it."""
+    repo = DOC_08.parents[1]
+    found: dict[str, set[str]] = {}
+    for path in sorted(repo.rglob("*")):
+        if not path.is_file() or path.suffix not in SCANNED_SUFFIXES:
+            continue
+        if {".venv", ".git", "__pycache__"} & set(path.parts):
+            continue
+        try:
+            text = path.read_text()
+        except (UnicodeDecodeError, OSError):
+            continue
+        for slug in set(ANY_SLUG.findall(text)):
+            found.setdefault(slug, set()).add(str(path.relative_to(repo)))
+    return found
+
+
+def test_every_slug_mentioned_anywhere_has_a_ledger_row() -> None:
+    """A COMPLETENESS check, which every other test in this file structurally cannot be.
+
+    The rest of this module checks the table's *arithmetic* — closed + open == rows, each stated
+    identity balances, the headline matches the open rows, the filed total matches the row count.
+    All of them read the table. So a deviation that was filed, adjudicated, and then never
+    entered as a row leaves every one of those assertions satisfied: the table stays perfectly
+    self-consistent about a smaller set of deviations than actually exist, and §11's count is
+    quietly short.
+
+    That is not hypothetical. `[D3-bound-case-window-count-undercovers-the-policy-bound]` was
+    filed and ruled, and its only trace in the repo was a docstring in
+    `tests/test_window_coverage.py` while the table read "25 filed, 24 closed, one open" — a
+    count that was internally consistent and wrong. AGENTS.md §11 rules on exactly this case:
+    where a slug appears in code or doc prose but not in the table, *the table is the thing that
+    is wrong*.
+
+    The scan direction matters. Reading the repo and requiring the table to cover it catches the
+    missing row; reading the table and looking for mentions cannot, because absence of a row is
+    absence of the thing to look up. `test_no_slug_is_filed_twice` guards the other direction.
+    """
+    # `.strip("[]")`: LEDGER_ROW captures the slug WITH its brackets (the other tests in this
+    # module build `## DEVIATION REPORT [slug]` headers from it), while ANY_SLUG captures without.
+    # Comparing the two forms directly reported all 26 slugs missing on first run.
+    rows = {LEDGER_ROW.match(r).group(1).strip("[]") for r in _rows()}
+    missing = {s: sorted(f) for s, f in _slug_mentions().items() if s not in rows}
+    assert not missing, (
+        "deviation slugs mentioned in the repo with no ledger row — §11 makes the table the "
+        f"thing that is wrong, not the mention: {missing}"
+    )
+
+
+#: A MINOR-resolution row: `| M-<n> | gap | resolution | why not a deviation |`.
+MINOR_ROW = re.compile(r"^\| (M-\d+) \|", re.M)
+
+#: An `M-<n>` reference anywhere in prose.
+ANY_MINOR = re.compile(r"\bM-(\d+)\b")
+
+
+def test_every_minor_claimed_by_an_adr_has_a_row_in_the_register() -> None:
+    """The same completeness check, one register over — because the same gap was there too.
+
+    `docs/03-decisions.md` ADRs cite MINOR resolutions by number ("logged as **M-32**"), and that
+    citation is the *only* place the reasoning behind some implementation choices survives. ADR-035
+    said "logged as M-32" while this register ended at M-31, so the reason a pin looks
+    inconsistent was recorded nowhere — exactly the deviation-table failure mode, in the register
+    §11.1 leans on to keep the open-deviation count honest rather than merely low.
+
+    Checked in the ADR -> register direction only. A row with no ADR citation is fine: most MINORs
+    are logged from code, not from a ruling.
+    """
+    rows = {int(m.split("-")[1]) for m in MINOR_ROW.findall(_doc())}
+    decisions = (DOC_08.parent / "03-decisions.md").read_text()
+    claimed = {int(n) for n in ANY_MINOR.findall(decisions)}
+    missing = sorted(claimed - rows)
+    assert not missing, (
+        "ADRs cite MINOR resolutions with no row in the `docs/08` register — the citation is "
+        f"often the only record of why an implementation choice was made: M-{missing}"
+    )
+
+
+def test_the_minor_register_is_densely_numbered() -> None:
+    """No gaps in `M-1..M-max`.
+
+    A hole is either a row that was dropped or a number that was skipped, and both read as "there
+    is an M-N somewhere that I have not found" to anyone auditing the register. Cheap to keep true.
+    """
+    rows = sorted(int(m.split("-")[1]) for m in MINOR_ROW.findall(_doc()))
+    assert rows, "no MINOR rows parsed — the row shape changed"
+    assert rows == list(range(1, max(rows) + 1)), (
+        f"gaps in the MINOR register: {sorted(set(range(1, max(rows) + 1)) - set(rows))}"
+    )

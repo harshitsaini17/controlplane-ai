@@ -213,6 +213,21 @@ Eval suite:   .venv/bin/python -m eval.run_all                       → reports
                          (add --check for the NFR-P-001/002 tripwire: nonzero on breach)
               .venv/bin/python -m eval.fault_injection            → reports/fault_injection_report.md
                          (06 §5; nonzero exit on any failed 04 §5 invariant)
+              .venv/bin/python -m eval.check_derivations           → stdout only, nonzero on defect
+                         (ADR-032 Correction 1 item 3) Re-derives every derivation-claiming
+                         figure in ADR-032/034 from `reports/spike_window_latency.json`.
+                         Three verdicts: OK / MISMATCH / NO SOURCE — and NO SOURCE is the
+                         point, meaning a doc claims a figure the artifact cannot produce.
+                         Such a figure gains a derivation or loses the claim; there is no
+                         third state. Run it after touching any of those figures. It is also
+                         a pytest gate (`tests/test_derivation_check.py`), so CI runs it.
+              Measurement runs need a QUIET HOST (06 §8). Every harness stamps
+                         `os.getloadavg()` + CPU count at start/end via `eval/host_load.py`;
+                         an artifact whose start stamp exceeds `QUIET_LOAD1_MAX` is NOT
+                         citable. Do not run tests, builds or another spike while a
+                         measurement is in flight — that is how a published artifact got
+                         contaminated once, and the stamp exists because the evidence was
+                         otherwise only inferential.
               [Phase 2+] .venv/bin/python -m eval.cost_simulation | .pii_leak_scan
               Both harnesses take --out: CI redirects there and asserts reports/ is
               untouched, because a report is evidence and not build output (06 §8).
@@ -273,5 +288,6 @@ indistinguishable from a gap that was missed.
 
 ---
 
-*Last updated: 2026-08-27 (§10: `run_all` and `bench_latency` lose their stale
-`[Phase 2+]` markers — both run; CI and `docs/TESTING.md` pointers added). When this file changes, note it in the session summary so the human knows the agent contract shifted.*
+*Last updated: 2026-08-29 (§10: `eval.check_derivations` added, plus the quiet-host rule
+for measurement runs — ADR-032 Correction 1). When this file changes, note it in the session
+summary so the human knows the agent contract shifted.*

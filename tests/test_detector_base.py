@@ -18,6 +18,9 @@ from pydantic import ValidationError
 
 from controlplane.detectors.base import (
     BUDGETS_MS,
+    ParametricBudget,
+    budget_ms,
+    ceiling_ms,
     ENRICHED_LABELS_KEY,
     DetectorContext,
     ENRICHED_ONLY_LABELS,
@@ -315,7 +318,7 @@ def test_stub_detector_satisfies_the_protocol_structurally() -> None:
 
 
 @pytest.mark.parametrize(
-    ("detector", "budget_ms"),
+    ("detector", "expected_ms"),
     [
         ("tier1_pii", 2.0),
         ("tier1_blocklist", 2.0),
@@ -330,9 +333,71 @@ def test_stub_detector_satisfies_the_protocol_structurally() -> None:
         ("entity_enricher", 10.0),
     ],
 )
-def test_nfr_p_002_budget_matches_the_doc_table(detector: str, budget_ms: float) -> None:
-    """Transcription check against 04 §2 / 04 §2.2 — a drifted budget is a silent NFR change."""
-    assert BUDGETS_MS[detector] == budget_ms
+def test_nfr_p_002_budget_matches_the_doc_table(detector: str, expected_ms: float) -> None:
+    """Transcription check against 04 §2 / 04 §2.2 — a drifted budget is a silent NFR change.
+
+    Reads through `budget_ms()` rather than indexing `BUDGETS_MS`, because ADR-034 Part C made
+    the values `float | ParametricBudget`. The accessor returns the **per-unit** figure, which
+    is the one 04 §2 tabulates and the one NFR-P-002 is scoped to — deliberately not the runner
+    ceiling. The parameter is `expected_ms`, not `budget_ms`: the old name shadowed the accessor
+    this test now calls.
+    """
+    assert budget_ms(detector) == expected_ms
+
+
+def test_adr034_only_tier2_injection_is_parametric() -> None:
+    """The union type must stay narrow — one parametric entry, introduced for one measured reason.
+
+    Pinned because a second parametric budget added casually would silently widen the two-tier
+    `run_with_budget` guarantee that ADR-034 documents as applying to exactly this detector.
+    """
+    parametric = {n for n, v in BUDGETS_MS.items() if isinstance(v, ParametricBudget)}
+    assert parametric == {"tier2_injection"}
+
+
+def test_adr034_ceiling_equals_budget_for_flat_and_single_window() -> None:
+    """A caller that never sees a multi-window input cannot tell the two accessors apart.
+
+    That equivalence is the compatibility claim ADR-034 Part C makes, so it is asserted rather
+    than trusted: only `tier2_injection`, and only above one window, may differ.
+    """
+    for name in BUDGETS_MS:
+        assert ceiling_ms(name, 1) == budget_ms(name), name
+    for name in BUDGETS_MS:
+        if name != "tier2_injection":
+            assert ceiling_ms(name, 53) == budget_ms(name), name
+
+
+def test_adr034_parametric_ceiling_grows_and_clears_the_measured_envelope() -> None:
+    """The ceiling must exceed ADR-032's measured 1-thread series at every measured rung.
+
+    A ceiling below the measurement would cancel a detector performing exactly as published —
+    the defect `[D1-windowed-injection-cannot-be-enforced-by-a-per-call-budget]` filed. Rungs
+    and figures are ADR-032's 1-thread sequential P50, the column ADR-034 grounds on (M-30).
+    """
+    measured_1_thread_p50 = {2: 99.35, 4: 198.85, 8: 395.81, 16: 789.34, 32: 1574.42,
+                             53: 2603.69}
+    prev = ceiling_ms("tier2_injection", 1)
+    for windows, measured in sorted(measured_1_thread_p50.items()):
+        got = ceiling_ms("tier2_injection", windows)
+        assert got > measured, f"{windows} windows: ceiling {got} <= measured {measured}"
+        assert got > prev, "the ceiling must be monotonic in window count"
+        prev = got
+
+
+def test_adr034_run_with_budget_refuses_a_parametric_default() -> None:
+    """Defaulting a parametric entry to `nominal_ms` is the exact defect ADR-034 removes.
+
+    25 ms would cancel every multi-window scan, so the wrapper must refuse rather than guess.
+    """
+    class _Injection:
+        name = "tier2_injection"
+
+        async def detect(self, ctx: Any) -> list[Signal]:      # pragma: no cover - never awaited
+            return []
+
+    with pytest.raises(ValueError, match="parametric budget"):
+        asyncio.run(run_with_budget(_Injection(), object()))
 
 
 def test_budget_table_covers_exactly_the_documented_detectors() -> None:

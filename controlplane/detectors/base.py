@@ -27,6 +27,9 @@ import asyncio
 import re
 import time
 import uuid
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from enum import Enum
 from typing import Annotated, Any, Protocol, runtime_checkable
 
@@ -40,6 +43,7 @@ from controlplane.policy.schema import TAXONOMY, ParamValue
 
 __all__ = [
     "BUDGETS_MS",
+    "ParametricBudget",
     "DetectorContext",
     "ENRICHED_LABELS_KEY",
     "ENRICHED_ONLY_LABELS",
@@ -53,8 +57,13 @@ __all__ = [
     "Stage",
     "clear_registry",
     "get_detector",
+    "budget_ms",
+    "ceiling_ms",
+    "shutdown_model_executor",
+    "model_executor",
     "register",
     "registered_names",
+    "run_in_executor",
     "run_with_budget",
 ]
 
@@ -151,13 +160,69 @@ class DetectorError(DetectorFailure):
 # NFR-P-002 budgets, transcribed from the 04 §2 registry table
 # --------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class ParametricBudget:
+    """A budget whose runner ceiling scales with input length (ADR-034 Part B).
+
+    Only `tier2_injection` carries one. 04 §2 budgets it **per 104-token window** while the
+    runner has always handed `wait_for` a flat scalar, and the two cannot both be honoured by
+    any implementation — the deviation that produced ADR-034. The resolution is two-tier:
+
+    * the **per-window** budget (`nominal_ms`) is enforced *inside* the detector, window by
+      window, and is what NFR-P-002 is scoped to (ADR-032: single-window inputs);
+    * the **runner ceiling** is `resolve(units)`, a coarse liveness backstop meaning
+      *"materially slower than its own measured envelope"* rather than *"longer than one
+      window's budget"*. That distinction is what stops `fail_closed` blocking every long
+      input and `fail_open` silently skipping it.
+
+    `per_unit_ms` and `fixed_ms` are **transcribed from ADR-032's measured series**, the same
+    way `BUDGETS_MS` is transcribed from the 04 §2 table — not fitted, and not read from
+    `reports/` at runtime (production code must not depend on a report file).
+
+    **The 1-thread column, deliberately** (ADR-034 M-30). ADR-032 publishes both thread
+    settings and SL-5 stands on the gap: 12.56 ms vs 51.28 ms P99 per window, a **3.9x**
+    spread. A ceiling built on the optimistic column sits *below* the pessimistic cost, so it
+    would fire on **contention** — which for a concurrent gateway is the normal case, not an
+    edge. A loose ceiling can only fail to catch a mildly-slow detector; a tight one causes
+    false blocks and false skips on live traffic.
+    """
+
+    #: The 04 §2 per-unit figure. What NFR-P-002 is compared against, and what every
+    #: budget-reading consumer sees via `budget_ms()`.
+    nominal_ms: float
+    #: Measured cost per unit, ADR-032 1-thread column (52.01 ms = 208.05/4, its worst
+    #: per-window P99 across the ladder).
+    per_unit_ms: float
+    #: Length-independent cost inside the same span — tokenization, which ADR-032's table
+    #: excludes (it times `sess.run` only) and a detector cannot. Measured 27.33 ms P99 at the
+    #: 4000-token bound; carried as a flat term because it is dwarfed by the per-unit sum.
+    fixed_ms: float
+    #: Multiplier over the measured envelope. 2.0 per the ruling.
+    safety_factor: float = 2.0
+
+    def resolve(self, units: int) -> float:
+        """Ceiling for `units` windows, floored at `nominal_ms` for the single-unit case."""
+        if units <= 1:
+            return self.nominal_ms
+        envelope = self.fixed_ms + self.per_unit_ms * units
+        return max(self.nominal_ms, envelope * self.safety_factor)
+
+
 #: Fast-path budget per detector, in milliseconds. Spec constants — NOT tunable per
 #: use case. `entity_enricher` is listed for completeness but is NOT a policy
 #: `fail_mode` class: 04 §2.2 says enrichment failure skips and logs, never blocks.
-BUDGETS_MS: dict[str, float] = {
+#:
+#: Values are `float | ParametricBudget` (ADR-034 Part C). Read a comparable number with
+#: `budget_ms(name)` and a runner ceiling with `ceiling_ms(name, units)`; indexing this
+#: mapping directly for arithmetic is what the union is there to make visible.
+BUDGETS_MS: dict[str, float | ParametricBudget] = {
     "tier1_pii": 2.0,
     "tier1_blocklist": 2.0,
-    "tier2_injection": 25.0,
+    # ADR-034: per-window budget 25 ms (04 §2, NFR-P-002 single-window scope); runner
+    # ceiling parametric on window count, grounded on ADR-032's 1-thread series.
+    "tier2_injection": ParametricBudget(
+        nominal_ms=25.0, per_unit_ms=52.01, fixed_ms=27.33
+    ),
     "tier2_toxicity": 25.0,
     "fast_consistency": 60.0,
     "rag_grounding": 30.0,
@@ -167,6 +232,105 @@ BUDGETS_MS: dict[str, float] = {
     "conv_tracker": 1.0,
     "entity_enricher": 10.0,
 }
+
+
+def budget_ms(name: str) -> float:
+    """The comparable NFR-P-002 figure for `name` (ADR-034 Part C).
+
+    For a flat entry this is the entry. For a parametric one it is `nominal_ms` — the 04 §2
+    per-unit budget, which is what NFR-P-002 is scoped to and what a per-detector latency
+    histogram must be compared against. It is deliberately **not** the runner ceiling: a
+    report comparing measured latency against a length-scaled backstop would be comparing a
+    detector's cost against a liveness guard and calling the result a budget verdict.
+    """
+    entry = BUDGETS_MS[name]
+    return entry.nominal_ms if isinstance(entry, ParametricBudget) else entry
+
+
+def ceiling_ms(name: str, units: int = 1) -> float:
+    """The ceiling the runner's `wait_for` should receive for `name` at `units` units.
+
+    Equal to `budget_ms(name)` for every flat entry and for the single-unit case, so a caller
+    that never sees a multi-unit input cannot tell the difference — which is the point: only
+    `tier2_injection` is parametric, and only above one window.
+    """
+    entry = BUDGETS_MS[name]
+    return entry.resolve(units) if isinstance(entry, ParametricBudget) else entry
+
+
+# --------------------------------------------------------------------------
+# Execution vehicle for CPU-bound model detectors (ADR-034 Part A)
+# --------------------------------------------------------------------------
+
+#: One process-wide, single-worker pool shared by every model detector.
+#:
+#: `max_workers=1` is load-bearing rather than a default (ADR-034 Part A). It serializes
+#: inference across concurrent requests, which preserves the one-inference-at-a-time
+#: conditions **SL-5** measured under: a pool that let four requests infer at once would push
+#: per-request parallelism toward ADR-032's 1-thread column, and no figure in this repo
+#: describes that. Queue wait is therefore real wait, and it counts inside the ceiling —
+#: a budget that excluded queueing would measure the detector rather than the hold
+#: NFR-P-001 is about.
+#:
+#: Shared across detectors, not one pool each, for the same reason: two pools would each
+#: believe they had the CPU to themselves.
+_MODEL_EXECUTOR: ThreadPoolExecutor | None = None
+_EXECUTOR_LOCK = threading.Lock()
+
+
+def model_executor() -> ThreadPoolExecutor:
+    """The shared single-worker inference pool, created on first use.
+
+    Lazy so that importing this module on a host with no model stack costs nothing, and so
+    that a process which never runs a model detector never spawns a thread.
+    """
+    global _MODEL_EXECUTOR
+    with _EXECUTOR_LOCK:
+        if _MODEL_EXECUTOR is None:
+            _MODEL_EXECUTOR = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="cp-model"
+            )
+        return _MODEL_EXECUTOR
+
+
+async def run_in_executor(fn: Any, /, *args: Any, detector: str = "") -> Any:
+    """Await `fn(*args)` on the shared inference pool. The only sanctioned way to infer.
+
+    Never call a model synchronously from a detector: ONNX Runtime releases the GIL during
+    `sess.run`, so an awaited executor future keeps the event loop live for concurrent
+    requests, and — the half that matters for budgets — it is what makes `asyncio.wait_for`
+    an enforcement point instead of a dead letter. Against inline CPU work the timeout fires
+    only once control returns, which is the trap ADR-034 was filed about.
+
+    **A timed-out task is abandoned, not killed.** Python cannot preempt a running thread, so
+    cancellation stops this coroutine *waiting* while the worker finishes its current call.
+    The request proceeds under policy `fail_mode` immediately and the orphaned result is
+    discarded; with one worker, that tail is queue wait for the next request. Each
+    abandonment increments `cp_detector_timeout_abandoned_total{detector}` so the condition is
+    countable rather than inferred from a latency histogram (ADR-034 Part A).
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(model_executor(), fn, *args)
+    except asyncio.CancelledError:
+        if detector:
+            # Imported here, not at module scope: `base` is the detector contract and must
+            # not acquire a telemetry dependency for a counter on an exceptional path.
+            from controlplane.telemetry.metrics import REGISTRY_DEFAULT
+
+            REGISTRY_DEFAULT.increment(
+                "cp_detector_timeout_abandoned_total", detector=detector
+            )
+        raise
+
+
+def shutdown_model_executor() -> None:
+    """Drop the shared pool. Test-support and clean-shutdown only."""
+    global _MODEL_EXECUTOR
+    with _EXECUTOR_LOCK:
+        if _MODEL_EXECUTOR is not None:
+            _MODEL_EXECUTOR.shutdown(wait=False)
+            _MODEL_EXECUTOR = None
 
 
 # --------------------------------------------------------------------------
@@ -515,12 +679,25 @@ async def run_with_budget(
     """
     name = getattr(detector, "name", type(detector).__name__)
     if budget_ms is None:
-        budget_ms = BUDGETS_MS.get(name)
-        if budget_ms is None:
+        entry = BUDGETS_MS.get(name)
+        if entry is None:
             raise ValueError(
                 f"no budget for detector {name!r}: pass budget_ms explicitly or add it "
                 "to BUDGETS_MS from the 04 §2 table"
             )
+        if isinstance(entry, ParametricBudget):
+            # Deliberately refused rather than defaulted to `nominal_ms`. A parametric
+            # ceiling depends on how much input this request may carry, which only the
+            # caller knows (04 §9 puts `per_request_max_tokens` in policy) — and defaulting
+            # to the single-window figure would cancel every multi-window scan at 25 ms,
+            # which is the exact defect ADR-034 exists to remove. Failing loudly here keeps
+            # the two-tier guarantee visible at the call site.
+            raise ValueError(
+                f"detector {name!r} has a parametric budget (ADR-034): resolve a ceiling "
+                "with `ceiling_ms(name, units)` and pass it explicitly. There is no safe "
+                "default — `nominal_ms` would cancel every multi-unit input."
+            )
+        budget_ms = entry
 
     started = time.perf_counter()
     try:

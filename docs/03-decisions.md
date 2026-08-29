@@ -983,6 +983,75 @@ example), 06 §4 (normative home; absorbs the reference row), 01 (NFR-P-001 row 
 
 ---
 
+### Amendment 2 — 2026-08-28: the input-hold target is scoped to single-window inputs; multi-window holds are an untargeted bucketed series (resolves `[D1-input-hold-target-cannot-survive-multi-window-injection]`)
+
+**Status:** Accepted 2026-08-28. Recommendation A of the filed report, approved.
+
+**This amendment formalizes a clause that was issued and then lost in transcription.** The
+adjudication that produced **ADR-032** carried, as its item 3, the same scoping this amendment now
+records — and it is absent from ADR-032's committed text. Verified rather than asserted: ADR-032
+mentions `NFR-P-001` nowhere, and the strings `input_hold`, `input hold` and `input-lane` appear in
+it only once, incidentally, inside its pre-dispatch clause ("the cost is therefore paid on the input
+lane"). Its "Docs touched" line names 01's **NFR-P-002** row, 04 §2, 06 §4 and 08 — the input-hold
+*target* is untouched. So the deviation this amendment closes was a real doc-versus-doc
+contradiction in the committed record, not a re-litigation: what the ruling decided and what the
+repo said had come apart.
+
+**Process note, recorded because it generalises.** When an issued adjudication clause is absent from
+the ADR transcribed from it, that is **drift**, and it is the same class of defect as a stale number
+in a report: the decision of record and the decision actually taken disagree, and only one of them
+is enforceable. Diff the issued ruling against the transcribed ADR **before** closing the deviation
+it resolves. The cost of not doing so is exactly what happened here — a scoping decision that had
+already been made was re-derived from scratch one detector later, by a reader who could only see the
+committed text.
+
+### The scoping
+
+- **NFR-P-001's input-lane hold (P50 < 40 ms, P99 < 50 ms) is scoped to single-window inputs**
+  (≤ 104 tokens, the ADR-032 window). There it is the derivation ADR-030 built: a 30 ms worst case
+  whose dominant term is `tier2_injection`, measured at **13.01 ms P99** for one window.
+- **Multi-window input holds are published as an untargeted, window-count-bucketed series.** This is
+  the **third use** of the per-request-sum precedent — `total_attributable_overhead_ms` was the
+  first, ADR-032's NFR-P-002 window series the second — and the shape is deliberately identical, so
+  a reader meets one convention rather than three.
+- **`eval/bench_latency --check` gates only the single-window population.** The bucketed series is
+  reported beside it with no verdict attached. A gate that stayed red on every long prompt would be
+  indistinguishable from a broken gate, which is the failure mode the filed report's option B names.
+
+### Anti-laundering record
+
+This scopes a target, so it carries the same record ADR-030 did, and for the same reason.
+
+**Filed and ruled from a projection over ADR-032's measured table, BEFORE the detector exists.**
+That is the fact that distinguishes it from the laundering **ADR-026 §5** bars. §5 forbids moving a
+target so that a measurement which *missed* it passes. Nothing has missed this target: `tier2_injection`
+is not written, so no measurement of it exists to be rescued. What is projected is the
+**composition** — that a multi-window scan lands inside `input_hold_ms` by 06 §4's own definition —
+and the cost is not projected at all, it is ADR-032's measured series.
+
+This is the precedent `[D1-tier2-budgets-cannot-coexist-with-nfr-p-001]` established and ADR-030
+recorded: a specification decision taken before the code can embarrass it is a front-door
+respecification, and the same decision taken afterwards is a moved goalpost. Ruling it now is the
+last moment that distinction is available.
+
+**SL-1 remains unmet and unmoved**, and ADR-026 §5's single re-measurement stays consumed. Nothing
+in this amendment touches `tier1_pii`'s recall target or any figure already published.
+
+### Consequences
+
+1. `01 §5`'s NFR-P-001 row gains the single-window scope on its input-lane figure, worded to match
+   the scope ADR-032 gave NFR-P-002 so the two read as one convention.
+2. `06 §4` gains the window-count-bucketed `input_hold_ms` series beside the targeted one, and
+   states that `--check` gates the single-window population only.
+3. `eval/bench_latency.py` emits the bucketed series and narrows its NFR-P-001 assertion to
+   single-window holds.
+4. The deviation closes citing this amendment.
+
+**Docs touched:** 01 §5 (NFR-P-001 input-lane scope), 06 §4 (the bucketed series + the `--check`
+narrowing), 08 (deviation closed).
+
+---
+
 ## ADR-031 — Tier-2 checkpoints: `madhurjindal/Jailbreak-Detector` + `martin-ha/toxic-comment-model`, on ONNX Runtime (resolves Q-04)
 
 **Status:** Accepted 2026-08-28. Closes **Q-04**, deferred 2026-08-24 pending an NFR-P-002 latency
@@ -1322,3 +1391,299 @@ because coverage **was** promised: a policy names the detector's class and a use
 
 **Docs touched:** 04 §5 (state (c)), 05 §3 (the DDL comment), 05 §4 (the coverage contract and the
 JSON view), 05 §5 (the metric), 08 (deviation closed).
+
+---
+
+## ADR-034 — CPU-bound model detectors run on a dedicated single-worker executor, and `tier2_injection`'s runner ceiling is length-parametric (resolves `[D1-windowed-injection-cannot-be-enforced-by-a-per-call-budget]`)
+
+**Status:** Accepted 2026-08-28. Recommendation A of the filed report, approved and **extended** with
+an execution-vehicle ruling that is deliberately generic rather than injection-specific.
+
+**Context.** The deviation found that 04 §2 budgets `tier2_injection` **per 104-token window** while
+`BUDGETS_MS` is a flat per-call scalar handed straight to `asyncio.wait_for` at
+`controlplane/gateway/pipeline.py:280` — so a detector *specified* to take ~651 ms at the
+`per_request_max_tokens: 4000` bound is *enforced* at 25 ms. It further measured that the two viable
+detector shapes fail in opposite directions: a loop-yielding implementation is cancelled at 25 ms,
+while a loop-blocking one passes by stalling the event loop for the full duration. There is no third
+shape **at that level of the design** — which is what this ADR changes, by ruling on the vehicle
+rather than only on the number.
+
+### Part A — Execution vehicle (generic: governs every CPU-bound model detector)
+
+**Model inference runs on a dedicated single-worker `ThreadPoolExecutor`, awaited from the detector.
+Never inline on the event loop.** This binds `tier2_injection`, `tier2_toxicity`, `rag_grounding`,
+`fast_consistency`'s embedding comparison, `entity_enricher`, and any future CPU-bound model
+detector. It is ruled once, generically, because three ad-hoc choices is how the same trap gets
+re-entered per detector.
+
+Two reasons, both recorded:
+
+1. **ONNX Runtime releases the GIL during `sess.run`**, so the event loop stays live for concurrent
+   requests while inference proceeds. The deviation's "sync shape stalls everything" is otherwise not
+   a hypothetical — it is the production behaviour of the only shape that survives a flat `wait_for`.
+2. **An awaited executor future is what makes `asyncio.wait_for` a real enforcement point** rather
+   than a dead letter. Against inline CPU work the wrapper cannot interrupt anything and the timeout
+   fires only once control returns, which `run_with_budget`'s own docstring already states. The
+   budget mechanism only means something if the thing it wraps can actually yield.
+
+**`max_workers=1` is load-bearing, not a default.** It serializes inference across concurrent
+requests, which preserves the one-inference-at-a-time conditions **SL-5** measured under: a pool that
+let four requests infer simultaneously would push per-request parallelism toward the 1-thread column
+without any figure in this repo describing it. **Queue wait counts inside the ceiling** — a request
+that waits behind two others has genuinely waited, and a budget that excluded queueing would measure
+the detector rather than the hold NFR-P-001 is about.
+
+**Caveat, recorded honestly because it is a real limitation and not a detail.** A timed-out executor
+task is **abandoned, not killed**: Python cannot preempt a running thread, so `wait_for` stops
+*waiting* for the future while the thread finishes its current `sess.run`. The request proceeds under
+policy `fail_mode` immediately, and the orphaned thread's completion is discarded. The practical
+consequence is that the worker may be busy for a short period after a timeout, which — with
+`max_workers=1` — is itself queue wait for the next request, counted as above. Each abandonment
+increments **`cp_detector_timeout_abandoned_total{detector}`**, so the condition is countable rather
+than inferred from a latency histogram.
+
+### Part B — `tier2_injection`'s runner ceiling is length-parametric
+
+The ceiling the runner enforces is derived from ADR-032's measured series rather than chosen:
+
+```
+ceiling_ms(n_windows) = max(25.0, envelope_ms(n_windows) x 2.0)
+```
+
+floored at the flat **25 ms** for single-window inputs, where NFR-P-002 is scoped and measured to
+hold (13.01 ms P99). The ceiling's meaning changes with its shape: it now says **"materially slower
+than its own measured envelope"** — a genuine anomaly worth a `DetectorTimeout` — instead of
+"longer than one window's budget", which was a statement about input length wearing a budget's
+clothes.
+
+**This dissolves the fail-mode pathology the deviation identified.** `finance_advisor`'s
+`tier2: fail_closed` no longer blocks every multi-window input, and `support_bot` / `hr_copilot`'s
+`fail_open` no longer silently skips them — because a correctly-behaving detector never trips the
+ceiling **by length alone**. That, and not the number, is the property being bought.
+
+#### Which measured column grounds the envelope (resolved in place, logged as a MINOR resolution)
+
+ADR-032 publishes **two** thread settings and SL-5 stands on the gap between them, so "the measured
+series x 2" does not name a unique number until the column is chosen. The choice has consequences,
+so it is recorded rather than left to the implementation:
+
+| basis | per-window P99 | ceiling at 2 windows | actual cost at 1 thread | verdict |
+|---|---|---|---|---|
+| 6 threads (optimistic) | 12.56 ms | ~50 ms | 102.56 ms | **trips by contention alone** |
+| 1 thread (pessimistic) | 51.28 ms | ~205 ms | 102.56 ms | holds |
+
+**The envelope is grounded on the 1-thread column.** A ceiling built on the 6-thread figures is
+*below* the 1-thread cost at every window count — the ratio is **3.9x**, not within a 2x safety
+factor — so it would re-introduce the exact pathology this ADR exists to remove, merely relocated
+from "any long input" to "any long input on a contended host". A gateway is a concurrent server, so
+that is the normal operating case and not an edge. Choosing the conservative column is also the
+low-risk direction in the only sense that matters here: a loose ceiling can fail to catch a mildly
+slow detector, while a tight one causes false blocks and false skips on live traffic. The per-window
+budget of 04 §2 is unchanged and unmoved — **NFR-P-002 is not restated by this ADR**, and SL-5's
+disclosure that Tier-2 figures are low-concurrency figures is unchanged.
+
+#### Tokenization is inside the ceiling, and it is not inside ADR-032's table
+
+**ADR-032's entire published series times `sess.run` only** — tokenization sits outside the clock at
+`eval/spike_window_latency.py:144`, as its own Correction section states. A detector pays both. The
+envelope therefore carries a tokenization term, measured on this host with the spike's own synthetic
+filler and the same tokenizer (`madhurjindal/Jailbreak-Detector`, `AutoTokenizer`, window 104 /
+overlap 26 / `padding="max_length"`, n=40):
+
+| input | windows | tokenize + window P50 / P99 |
+|---|---|---|
+| 178 tokens | 2 | 1.17 / 1.59 ms |
+| 633 tokens | 8 | 4.28 / 4.92 ms |
+| 4080 tokens | bound | 24.34 / 27.33 ms |
+
+This is **not** a contradiction of ADR-032: no doc claims the two spans are equal, and 06 §4 defines
+`input_hold_ms` as "ingress + input-lane time", which includes tokenization by construction. It is a
+disclosure, and it is stated here because a reader comparing this repo's published window series
+against ADR-032's table would otherwise conclude one of them is wrong. **Every `tier2_injection`
+figure this repo publishes states which spans it covers.**
+
+### Part C — `BUDGETS_MS` grows a shape for parametric entries
+
+`BUDGETS_MS` values become `float | ParametricBudget`, where a parametric entry resolves a ceiling
+from a window count. `pipeline.py:280` consumes the resolved value; every other entry stays a flat
+float and every existing call site is unchanged. **04 §2 records both halves** — the per-window
+budget the detector enforces internally, and the parametric runner ceiling — because the deviation's
+central finding was that a doc stating one of them while the code enforced the other is how the
+contradiction stayed invisible.
+
+**The cost is real and is stated rather than discovered later:** `run_with_budget`'s guarantee is now
+explicitly **two-tier**. For flat-budget detectors it is unchanged. For a parametric one, the outer
+wrapper enforces the envelope while the per-window budget is enforced inside the detector — so
+"`BUDGETS_MS[name]` is the number `wait_for` gets" stops being universally true, and that is the
+trade-off Recommendation A named when it was filed.
+
+#### Where the window count comes from — corrected against measurement
+
+This clause first specified the runner deriving its window count from a **cheap character upper
+bound**, on the reasoning that the runner must not pay the tokenizer twice. The bound is *sound* for
+a WordPiece tokenizer (`n_tokens <= n_chars`) but was measured to be far too loose to carry the
+meaning Part B gives the ceiling, so it is **replaced here rather than left to be discovered in
+implementation**. Measured chars-per-token on this tokenizer:
+
+| population | chars/token | implied over-provision |
+|---|---|---|
+| frozen corpus, median (n=280) | 4.29 | ~4.3x |
+| frozen corpus, minimum (base64/JWT-dense) | 1.42 | ~1.4x |
+| punctuation run / CJK | 1.00 | ~1.0x (bound is tight) |
+| unspaced letters, digits, emoji, combining marks | 400-800 | **~400-800x** |
+
+At the 4000-token bound a 4.3x over-provision turns a ~5.5 s envelope into a ~24 s ceiling on
+*typical* text, and the adversarial column is far worse. A ceiling that loose still catches a hung
+detector but no longer catches "materially slower than its own measured envelope", which is the
+condition Part B exists to detect. The bound also rests on the tokenizer being WordPiece: under
+byte-level BPE a single character can yield several tokens and `n_tokens <= n_chars` fails outright,
+so the guard would be silently unsound on a checkpoint swap.
+
+**Ruled instead: the exact count is used, and tokenization is paid once.** `tier2_injection`
+tokenizes its input **once**, obtains the true `window_count`, and enforces **both** its per-window
+budget and its own total envelope from that exact figure — raising `DetectorTimeout` itself. The
+runner's outer `wait_for` keeps a **backstop** ceiling derived from the policy's
+`per_request_max_tokens`, which is a genuine hard bound the gateway can enforce and needs no
+tokenization to read. So the two tiers become: an **exact** envelope check inside the detector, and a
+**coarse** liveness backstop outside it. Nothing tokenizes twice, and the meaningful guard is exact
+rather than approximate.
+
+This keeps the ruling's stated shape intact — `BUDGETS_MS` values are `flat float | parametric on
+window_count`, consumed at `pipeline.py:280` — and changes only *who* supplies the count. Logged as a
+MINOR resolution in `08` per AGENTS.md §11.1, since it is an implementation-level correction inside a
+contract this ADR itself settles.
+
+### Consequences
+
+1. `tier2_injection` is implementable as ADR-032 specifies — full-coverage windows, MAX aggregation,
+   batch 4 — without either stalling the event loop or being cancelled by its own runner.
+2. **The execution-vehicle rule binds four further detectors** (`tier2_toxicity`, `rag_grounding`,
+   `fast_consistency`, `entity_enricher`). None may run model inference inline on the loop, whatever
+   its budget, and a flat 25 ms budget is not a licence to do so.
+3. `05 §5` gains `cp_detector_timeout_abandoned_total{detector}`.
+4. `04 §2` records the per-window budget and the parametric runner ceiling as two distinct
+   mechanisms, with the tokenization-span disclosure attached to the published series.
+5. The MINOR resolution above (envelope column) is logged in `08`'s MINOR-resolutions register, per
+   AGENTS.md §11.1 — the count stays honest rather than merely low.
+6. The deviation closes citing this ADR.
+
+**Docs touched:** 04 §2 (both budget halves + the span disclosure), 05 §5 (the new counter), 08
+(deviation closed; MINOR resolution logged).
+
+---
+
+## ADR-035 — The `ml` extra must build the graph it serves: `onnx` is a serve-path dependency, not a build-only one (resolves `[D2-tier2-served-graph-is-unbuildable-on-the-ml-extra]`)
+
+**Status:** Accepted 2026-08-28. Option A of the filed report, approved and **extended** with a
+testable invariant so the trap cannot be re-opened by a later edit.
+
+**Context.** ADR-031 serves both Tier-2 checkpoints from ONNX Runtime int8, and deliberately checks
+**no graph into the repo** — *"a checked-in graph would be a binary artifact whose provenance nobody
+could check"*. ADR-033 then declared tier-2's dependency set as exactly `("onnxruntime",
+"transformers")`, and `pyproject.toml` kept `onnx`/`onnxscript` in the `dev` extra on the reasoning
+that they *build* the graph rather than serve it.
+
+Three statements that cannot all hold, because **with no checked-in artifact, serving builds.** The
+export and int8 quantization happen at first use, on the serving host, so the build toolchain sits on
+the serve path by construction. `import onnxruntime` genuinely does not pull `onnx` — which is why
+the `dev`-only comment read correctly in isolation and was still wrong in composition.
+
+The failure lands **past ADR-033's stated boundary**, and that is where the harm is. ADR-033 says a
+*"present package whose model graph fails to build at first use is a runtime fault (state (b)),
+resolved by `fail_mode` like any other."* So an `.[ml]` host passes the `find_spec` probe for both
+declared names, **boots clean**, and then converts a structurally unkeepable promise into a
+per-request fault: under `finance_advisor` (`tier2: fail_closed`) a **BLOCK on every request**, under
+`support_bot` / `hr_copilot` (`fail_open`) a **silent non-scan of every request**. ADR-033's boot
+refusal — the mechanism that exists precisely so a fail-closed promise is never broken silently —
+cannot fire, because the missing name is one nobody declared. It is invisible on the dev machine,
+which is the reason it was ruled before an `.[ml]` host existed rather than after.
+
+### Decision
+
+1. **`onnx` moves from `dev` into `ml`, and both tier-2 `REQUIREMENTS` rows grow it.** The addition
+   is **measured, not inferred from a dependency graph**: an interpreter was masked down to `.[ml]`'s
+   declared closure and the real build was attempted (method and its two false starts below). `onnx`
+   is the *only* addition needed — `ml_dtypes` arrives as `onnx`'s own requirement, so declaring it
+   would be redundant, and `onnxscript` is not imported at all on this path.
+2. **The invariant becomes a permanent test** — `tests/test_ml_extra_closure.py`. It derives both
+   dependency closures **from `pyproject.toml` at run time** (never a hand-maintained copy, which
+   would drift silently and test a stale set), masks the difference, and builds **both** checkpoints
+   for real. This is what makes ADR-033's probe truthful *by construction*: move a build dependency
+   out of `ml` and this fails in CI, before any `.[ml]` host boots into the per-request-fault trap.
+   The test asserts its **own masking** first — a harness that quietly stopped masking would make the
+   build pass for the wrong reason, on a full `.[dev,ml]` host.
+3. **Resolution verified on both CI interpreters, py3.12 and py3.14** — identical resolved version
+   sets, and adding `onnx` changes **no other pin**. This was checked rather than assumed because the
+   `optimum` episode is exactly this failure mode: it resolved `transformers` *downward* as a side
+   effect. Ruled in advance that a resolution failure would be a finding, not a pin to force; none
+   occurred.
+4. **Build-at-boot is kept; the cost is logged rather than cached.** Option B (build once into a
+   cache directory outside the repo) is **declined for now**: build-at-boot is provenance-pure per
+   ADR-031, and the boot cost is immaterial against a hackathon prototype's startup. The measured
+   duration is logged at startup as one line beside the FR-GW-006 canary result, so the cost is
+   *visible* rather than folded into an unexplained pause. B is recorded here as available, unchanged,
+   if boot economics ever change — it is strictly an optimization on top of this ADR and answers no
+   part of the deviation on its own.
+5. **`onnxscript` stays in `dev`, and that is now an empirical claim rather than a guess.**
+   `torch.onnx.export(..., dynamo=False)` uses the legacy TorchScript exporter, which does not import
+   it; masking it out builds both checkpoints successfully. It is retained in `dev` as the escape
+   hatch if that call ever moves to the dynamo exporter. Logged as **M-32** so the reason survives
+   next to the pin.
+
+### How the import set was measured — including two ways of faking absence that give wrong answers
+
+Recorded because the permanent test rests on this method, and both mistakes produced a **confident,
+plausible, wrong dependency list** before being caught:
+
+1. **Raising from `find_spec` is wrong.** `transformers.utils.import_utils._is_package_available`
+   *probes* for optional packages and expects `None` when absent
+   (`import_utils.py:205`: `_pytest_available = _is_package_available("pytest")`). A finder that
+   raises converts a graceful capability check into a hard failure — which reported **`pytest` as a
+   tier-2 build dependency**. Absence means: `find_spec` returns `None`, and `import` raises from the
+   import machinery itself.
+2. **Wrapping finders without delegating `find_distributions` is wrong.** That hook is how
+   `importlib.metadata` enumerates installed distributions, so wrapping without it broke metadata
+   lookup for *every* package and reported **`tqdm`** — installed and unmasked — as missing.
+
+A masked distribution must therefore be invisible in **both** channels: no importable module and no
+metadata. The test asserts exactly that before trusting its own result.
+
+### Measurement outcome
+
+`madhurjindal/Jailbreak-Detector` and `martin-ha/toxic-comment-model`, Ryzen 5 5600H, Linux 7.1.2,
+Python 3.14.6, onnxruntime 1.29.0, warm HuggingFace cache:
+
+| host configuration | ADR-033 probe | actual graph build |
+|---|---|---|
+| `.[dev,ml]` | available | succeeds |
+| `.[ml]` **before** this ADR | **available** | **`ModuleNotFoundError: No module named 'onnx'`** (requested 5×) |
+| `.[ml]` **after** this ADR | available | **succeeds, both checkpoints** (66.2 MB / 67.3 MB int8) |
+
+**Boot cost, corrected.** The deviation report cited *"~4.6 s (1.76 export + 2.85 quantize)"*. That is
+the export-plus-quantize span only; the figure a booting host actually pays also includes
+`from_pretrained` and opening the ORT session. Measured end-to-end per checkpoint: **9.6–10.1 s**
+(export 1.86–1.95 s, quantize 2.98–3.10 s, remainder model load and session open), so **~20 s for
+both** — roughly 4× the number quoted when Option B was declined. The ruling's conclusion is
+unchanged and stands: ~20 s of prototype startup is still immaterial, and provenance purity is worth
+it. The corrected figure is published here rather than left at the flattering one (AGENTS.md §7), and
+it is the number item 4's startup log will print. A cold host additionally downloads the checkpoints.
+
+### Consequences
+
+1. `REQUIREMENTS` is a true statement about what tier-2 needs, so ADR-033's boot refusal works as
+   designed on an `.[ml]` host — the D7 edge it closed at boot stays closed.
+2. The `ml` extra now carries graph-build tooling on serving hosts. That is the accepted cost of
+   ADR-031's no-artifact stance, stated plainly rather than discovered by a deployer.
+3. **A new CI job installing `.[dev,ml]` is required for the guard in item 2 to have teeth** — the
+   test skips where the model stack is absent, and a permanently-skipped invariant is not one. This
+   settles the optional M-row left to discretion in the Phase-5 sweep: the second CI job is no longer
+   an economics question, it is what makes this ADR enforceable.
+4. `05 §6` / AGENTS.md §10 install guidance is unchanged: `.[dev,ml]` was already the documented
+   full-stack line, and it still installs everything.
+5. The provisioning seam the detectors were built around — one shared helper obtaining the int8
+   session — is now fully ruled, and the ruling changed **one function** rather than two detectors.
+6. The deviation closes citing this ADR. `onnxscript`'s retention is logged as M-32.
+
+**Docs touched:** `pyproject.toml` (both extras, with the superseded comment preserved quoted),
+`controlplane/detectors/availability.py` (`REQUIREMENTS`), `tests/test_ml_extra_closure.py` (new),
+`08` (deviation closed; M-32 logged), CI workflow (the `.[dev,ml]` job).

@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from controlplane.detectors.base import BUDGETS_MS, Stage
+from controlplane.detectors.base import BUDGETS_MS, Stage, budget_ms
 from controlplane.gateway.pipeline import LANES, LIVE
 from controlplane.policy.store import PolicyStore
 from controlplane.telemetry.metrics import MetricsRegistry
@@ -364,7 +364,7 @@ def test_detector_stats_are_read_from_the_registry_the_gateway_used(batch):
 
 def test_nfr_p002_is_checked_on_p99_against_the_declared_budget():
     """A P99 at or above budget violates; one below does not."""
-    budget = BUDGETS_MS["tier1_pii"]
+    budget = budget_ms("tier1_pii")
     inside = {"tier1_pii": bl.Stats(n=50, p50=0.1, p95=0.2, p99=budget - 0.01,
                                     minimum=0.05, maximum=budget - 0.01)}
     outside = {"tier1_pii": bl.Stats(n=50, p50=0.1, p95=0.2, p99=budget + 1.0,
@@ -741,7 +741,7 @@ def test_sentence_counts_use_the_real_segmentation(corpus):
 
 
 def test_the_projection_is_derived_from_the_registry_not_written_down():
-    """Lane membership and every figure must come from `LANES` / `BUDGETS_MS`.
+    """Lane membership and every figure must come from `LANES` / `budget_ms()`.
 
     Pinned so a budget change moves the report instead of leaving a stale paragraph. The
     guard is a real substitution: raising a budget must raise the projected total.
@@ -750,7 +750,7 @@ def test_the_projection_is_derived_from_the_registry_not_written_down():
     before = bl.project_tier2(cases)
     seq = next(r for r in before["rows"] if r["mode_is_sum"])
     assert seq["sentence_ms"] == sum(
-        BUDGETS_MS[d] for d in LANES[Stage.OUTPUT_SENTENCE] if d != "rag_grounding"
+        budget_ms(d) for d in LANES[Stage.OUTPUT_SENTENCE] if d != "rag_grounding"
     )
     assert set(before["pending"]) == {
         d for d in (*LANES[Stage.INPUT], *LANES[Stage.OUTPUT_SENTENCE])
@@ -786,7 +786,7 @@ def test_both_lane_readings_are_reported(corpus):
     seq, par = rows
     assert seq["sentence_ms"] > par["sentence_ms"], "the sum must exceed the max"
     assert par["sentence_ms"] == max(
-        BUDGETS_MS[d] for d in LANES[Stage.OUTPUT_SENTENCE] if d != "rag_grounding"
+        budget_ms(d) for d in LANES[Stage.OUTPUT_SENTENCE] if d != "rag_grounding"
     )
 
 

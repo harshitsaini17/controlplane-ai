@@ -39,7 +39,6 @@ import argparse
 import asyncio
 import json
 import platform
-import subprocess
 import sys
 import tempfile
 import time
@@ -52,7 +51,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from controlplane.audit.records import canonical_view
-from controlplane.detectors.base import BUDGETS_MS, Stage
+from controlplane.detectors.base import BUDGETS_MS, Stage, budget_ms
 from controlplane.gateway.app import Gateway, create_app
 from controlplane.gateway.config import (
     TaintedDataError,
@@ -65,6 +64,7 @@ from controlplane.gateway.sentence_buffer import Segmentation
 from controlplane.gateway.sse_proxy import UpstreamResponse
 from controlplane.policy.store import PolicyStore
 from controlplane.telemetry.metrics import MetricsRegistry, percentile
+from eval.host_load import git_stamp, load_stamp, quiet_verdict
 from eval.validate_dataset import (
     DATASET_DIR,
     FROZEN_COMMIT,
@@ -271,6 +271,14 @@ class Batch:
     #: otherwise let the tables be split streaming/non-streaming by a `streaming` flag no
     #: request ever saw. Same defect class as the one fixed in `eval/fault_injection.py`.
     store: PolicyStore | None = None
+    #: Host load at the first and last measured request (ADR-032 Correction 1 item 2). Carried
+    #: on the batch rather than sampled inside `render()`: by report time the load says
+    #: something about rendering, not about the run whose numbers are being published.
+    # Same field name as the spike harness's artifact, deliberately: `eval/host_load.py` exists
+    # so 06 §8's citability rule reads ONE key in either artifact. Corpus loading precedes it;
+    # no measurement does.
+    load_at_process_start: dict[str, Any] | None = None
+    load_at_end: dict[str, Any] | None = None
 
     def by_stream_mode(self, streaming: bool) -> list[Sample]:
         return [s for s in self.samples if s.streaming is streaming]
@@ -328,7 +336,7 @@ def run_batch(
     """
     store = PolicyStore()
     store.load()
-    batch = Batch(store=store)
+    batch = Batch(store=store, load_at_process_start=load_stamp())
 
     with tempfile.TemporaryDirectory() as tmp:
         gateway = Gateway(
@@ -396,6 +404,7 @@ def run_batch(
                     ),
                 )
             )
+    batch.load_at_end = load_stamp()
     return batch
 
 
@@ -552,9 +561,13 @@ def check_nfr_p002(stats: dict[str, Stats]) -> list[Violation]:
     """
     violations: list[Violation] = []
     for detector, stat in sorted(stats.items()):
-        budget = BUDGETS_MS.get(detector)
-        if budget is None:
+        if detector not in BUDGETS_MS:
             continue
+        # `budget_ms`, never a resolved ceiling (ADR-034 Part C). NFR-P-002 is scoped to the
+        # per-unit figure 04 §2 tabulates; comparing a measured latency against a length-scaled
+        # runner backstop would compare a detector's cost to a liveness guard and call the
+        # result a budget verdict.
+        budget = budget_ms(detector)
         if stat.p99 >= budget:
             violations.append(Violation("NFR-P-002", detector, "P99", budget, stat.p99))
     return violations
@@ -609,7 +622,14 @@ def project_tier2(cases: Sequence[dict[str, Any]]) -> dict[str, Any]:
     live_inp = [d for d in inp_lane if d in LIVE]
 
     def cost(names: Sequence[str], mode: str) -> float:
-        budgets = [BUDGETS_MS[n] for n in names]
+        # Per-unit budgets (ADR-034 Part C `budget_ms`), which makes this a **single-window**
+        # projection for the input lane — disclosed in the rendered section rather than left
+        # for a reader to infer. `tier2_injection` costs one window's budget here; ADR-032
+        # measures the multi-window series and ADR-030 Amendment 2 publishes it untargeted,
+        # so a projection that silently used 25 ms for a 53-window input would understate the
+        # hold by ~26x. Stating the scope is what keeps this comparable to NFR-P-001, which
+        # Amendment 2 scoped the same way.
+        budgets = [budget_ms(n) for n in names]
         if not budgets:
             return 0.0
         return sum(budgets) if mode == "sum" else max(budgets)
@@ -653,14 +673,20 @@ def project_tier2(cases: Sequence[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _git(*args: str) -> str:
-    try:
-        return subprocess.run(
-            ["git", *args], capture_output=True, text=True, check=True,
-            cwd=Path(__file__).resolve().parents[1],
-        ).stdout.strip()
-    except Exception:  # noqa: BLE001
-        return "unavailable"
+def _load_cell(stamp: dict[str, Any] | None, *, verdict: bool = False) -> str:
+    """One provenance cell for a load stamp; `verdict=True` attaches 06 §8's citability call.
+
+    The verdict is rendered beside the numbers rather than left to the reader: a latency figure
+    measured on a loaded host is not a slightly worse figure, it is a figure of something else,
+    and 06 §8 makes such an artifact non-citable. It is attached to the **start** stamp only —
+    the end stamp is high by construction, because by then the benchmark itself is the load, so
+    a verdict there would fail every honest run.
+    """
+    if not stamp or stamp.get("load1") is None:
+        return f"not recorded — **{quiet_verdict(stamp)}**"
+    cell = (f"{stamp['load1']} / {stamp['load5']} / {stamp['load15']} "
+            f"· {stamp.get('cpus', '?')} CPUs")
+    return f"{cell} — **{quiet_verdict(stamp)}**" if verdict else cell
 
 
 def _row(label: str, stats: Stats | None) -> str:
@@ -718,8 +744,12 @@ def render(
     dstats = detector_stats(batch)
     stream_stats = Stats.of(batch.overheads(streaming=True))
     projection = project_tier2(cases if cases is not None else load_corpus(dataset_dir))
-    head = _git("rev-parse", "HEAD")
-    dirty = _git("status", "--porcelain")
+    # `eval/host_load.py` owns this now. It was duplicated in FOUR harnesses and had drifted
+    # (differing `cwd`/`timeout`), and the spike artifact recorded no commit at all
+    # (AGENTS.md §7).
+    code = git_stamp()
+    head = code["commit"] or "unavailable"
+    dirty = code["dirty"]
 
     lines: list[str] = [
         "# Gateway latency benchmark (06 §4)",
@@ -749,6 +779,9 @@ def render(
         f"| Platform | {platform.system()} {platform.release()} · {platform.machine()} |",
         f"| CPU | {platform.processor() or 'unreported'} |",
         f"| Percentile method | linear-interpolated (`telemetry.metrics.percentile`) |",
+        f"| Host load at process start (1/5/15) | "
+        f"{_load_cell(batch.load_at_process_start, verdict=True)} |",
+        f"| Host load at end (1/5/15) | {_load_cell(batch.load_at_end)} |",
         f"| Command | `{command}` |",
         "",
         provenance_note,
@@ -851,7 +884,7 @@ def render(
     ]
     faults = detector_faults(batch)
     for detector, stat in sorted(dstats.items()):
-        budget = BUDGETS_MS.get(detector)
+        budget = budget_ms(detector) if detector in BUDGETS_MS else None
         verdict = "—" if budget is None else ("yes" if stat.p99 < budget else "**NO**")
         modes = faults.get(detector, {})
         fault_cell = (

@@ -1,0 +1,494 @@
+{
+  "spike": "ADR-032 \u2014 full-coverage strided windows for tier2_injection",
+  "model_id": "madhurjindal/Jailbreak-Detector",
+  "budget_ms": 25.0,
+  "backend": "onnx_int8",
+  "filler": "synthetic (deterministic); no corpus text",
+  "window": {
+    "tokens": 104,
+    "overlap": 26,
+    "policy_bound_tokens": 4000
+  },
+  "platform": "Linux-7.1.2-arch3-1-x86_64-with-glibc2.43",
+  "cpu_count": 12,
+  "python": "3.14.6",
+  "onnxruntime": "1.29.0",
+  "runs": [
+    {
+      "threads": 6,
+      "reps": 40,
+      "model_id": "madhurjindal/Jailbreak-Detector",
+      "params_m": 65.8,
+      "export_s": 1.63,
+      "quantize_s": 1.74,
+      "graph_mb": 66.2,
+      "filler_tokens": 4082,
+      "filler_chars": 22639,
+      "window_tokens": 104,
+      "window_overlap": 26,
+      "window_step": 76,
+      "window_content_tokens": 102,
+      "bound_windows": 53,
+      "bound_coverage_tokens": 4054,
+      "ladder": {
+        "1": {
+          "windows": 1,
+          "covers_tokens": 102,
+          "sequential": {
+            "n": 40,
+            "calls": 1,
+            "cold_ms": 20.14,
+            "p50": 11.46,
+            "p95": 12.97,
+            "p99": 13.15,
+            "max": 14.49
+          },
+          "batched": {
+            "n": 40,
+            "calls": 1,
+            "cold_ms": 11.2,
+            "p50": 11.51,
+            "p95": 13.26,
+            "p99": 13.71,
+            "max": 14.31
+          }
+        },
+        "2": {
+          "windows": 2,
+          "covers_tokens": 178,
+          "sequential": {
+            "n": 40,
+            "calls": 2,
+            "cold_ms": 22.2,
+            "p50": 23.43,
+            "p95": 24.43,
+            "p99": 25.03,
+            "max": 25.71
+          },
+          "batched": {
+            "n": 40,
+            "calls": 1,
+            "cold_ms": 20.17,
+            "p50": 21.78,
+            "p95": 23.47,
+            "p99": 25.24,
+            "max": 30.29
+          }
+        },
+        "4": {
+          "windows": 4,
+          "covers_tokens": 330,
+          "sequential": {
+            "n": 40,
+            "calls": 4,
+            "cold_ms": 44.45,
+            "p50": 47.33,
+            "p95": 49.69,
+            "p99": 49.97,
+            "max": 59.17
+          },
+          "batched": {
+            "n": 40,
+            "calls": 1,
+            "cold_ms": 43.51,
+            "p50": 45.07,
+            "p95": 46.41,
+            "p99": 52.33,
+            "max": 53.0
+          }
+        },
+        "8": {
+          "windows": 8,
+          "covers_tokens": 634,
+          "sequential": {
+            "n": 20,
+            "calls": 8,
+            "cold_ms": 92.7,
+            "p50": 96.27,
+            "p95": 97.99,
+            "p99": 97.99,
+            "max": 102.32
+          },
+          "batched": {
+            "n": 20,
+            "calls": 1,
+            "cold_ms": 105.95,
+            "p50": 94.11,
+            "p95": 98.99,
+            "p99": 98.99,
+            "max": 103.19
+          }
+        },
+        "16": {
+          "windows": 16,
+          "covers_tokens": 1242,
+          "sequential": {
+            "n": 20,
+            "calls": 16,
+            "cold_ms": 195.98,
+            "p50": 195.28,
+            "p95": 204.81,
+            "p99": 204.81,
+            "max": 204.9
+          },
+          "batched": {
+            "n": 20,
+            "calls": 1,
+            "cold_ms": 207.0,
+            "p50": 206.26,
+            "p95": 217.94,
+            "p99": 217.94,
+            "max": 221.87
+          }
+        },
+        "32": {
+          "windows": 32,
+          "covers_tokens": 2458,
+          "sequential": {
+            "n": 10,
+            "calls": 32,
+            "cold_ms": 394.94,
+            "p50": 396.33,
+            "p95": 401.83,
+            "p99": 401.83,
+            "max": 404.35
+          },
+          "batched": {
+            "n": 10,
+            "calls": 1,
+            "cold_ms": 464.22,
+            "p50": 464.15,
+            "p95": 475.75,
+            "p99": 475.75,
+            "max": 475.93
+          }
+        },
+        "53": {
+          "windows": 53,
+          "covers_tokens": 4054,
+          "sequential": {
+            "n": 10,
+            "calls": 53,
+            "cold_ms": 653.5,
+            "p50": 662.82,
+            "p95": 678.92,
+            "p99": 678.92,
+            "max": 758.36
+          },
+          "batched": {
+            "n": 10,
+            "calls": 1,
+            "cold_ms": 870.44,
+            "p50": 830.7,
+            "p95": 902.44,
+            "p99": 902.44,
+            "max": 941.63
+          }
+        }
+      },
+      "batch_curve": {
+        "1": {
+          "n": 10,
+          "calls": 53,
+          "cold_ms": 653.57,
+          "p50": 663.53,
+          "p95": 672.42,
+          "p99": 672.42,
+          "max": 688.64
+        },
+        "2": {
+          "n": 10,
+          "calls": 27,
+          "cold_ms": 636.23,
+          "p50": 613.56,
+          "p95": 620.0,
+          "p99": 620.0,
+          "max": 626.4
+        },
+        "4": {
+          "n": 10,
+          "calls": 14,
+          "cold_ms": 637.69,
+          "p50": 617.29,
+          "p95": 626.45,
+          "p99": 626.45,
+          "max": 628.57
+        },
+        "8": {
+          "n": 10,
+          "calls": 7,
+          "cold_ms": 655.85,
+          "p50": 645.08,
+          "p95": 650.22,
+          "p99": 650.22,
+          "max": 654.36
+        },
+        "16": {
+          "n": 10,
+          "calls": 4,
+          "cold_ms": 696.79,
+          "p50": 690.1,
+          "p95": 696.21,
+          "p99": 696.21,
+          "max": 699.16
+        },
+        "32": {
+          "n": 10,
+          "calls": 2,
+          "cold_ms": 751.98,
+          "p50": 740.66,
+          "p95": 763.89,
+          "p99": 763.89,
+          "max": 772.37
+        },
+        "53": {
+          "n": 10,
+          "calls": 1,
+          "cold_ms": 813.03,
+          "p50": 819.17,
+          "p95": 873.18,
+          "p99": 873.18,
+          "max": 949.45
+        }
+      }
+    },
+    {
+      "threads": 1,
+      "reps": 40,
+      "model_id": "madhurjindal/Jailbreak-Detector",
+      "params_m": 65.8,
+      "export_s": 1.18,
+      "quantize_s": 1.61,
+      "graph_mb": 66.2,
+      "filler_tokens": 4082,
+      "filler_chars": 22639,
+      "window_tokens": 104,
+      "window_overlap": 26,
+      "window_step": 76,
+      "window_content_tokens": 102,
+      "bound_windows": 53,
+      "bound_coverage_tokens": 4054,
+      "ladder": {
+        "1": {
+          "windows": 1,
+          "covers_tokens": 102,
+          "sequential": {
+            "n": 40,
+            "calls": 1,
+            "cold_ms": 49.54,
+            "p50": 49.82,
+            "p95": 51.44,
+            "p99": 55.44,
+            "max": 58.31
+          },
+          "batched": {
+            "n": 40,
+            "calls": 1,
+            "cold_ms": 49.78,
+            "p50": 49.54,
+            "p95": 50.31,
+            "p99": 52.3,
+            "max": 54.05
+          }
+        },
+        "2": {
+          "windows": 2,
+          "covers_tokens": 178,
+          "sequential": {
+            "n": 40,
+            "calls": 2,
+            "cold_ms": 99.92,
+            "p50": 98.99,
+            "p95": 103.92,
+            "p99": 104.5,
+            "max": 110.13
+          },
+          "batched": {
+            "n": 40,
+            "calls": 1,
+            "cold_ms": 99.07,
+            "p50": 98.8,
+            "p95": 102.81,
+            "p99": 104.05,
+            "max": 108.05
+          }
+        },
+        "4": {
+          "windows": 4,
+          "covers_tokens": 330,
+          "sequential": {
+            "n": 40,
+            "calls": 4,
+            "cold_ms": 200.04,
+            "p50": 197.13,
+            "p95": 204.99,
+            "p99": 207.74,
+            "max": 210.35
+          },
+          "batched": {
+            "n": 40,
+            "calls": 1,
+            "cold_ms": 197.48,
+            "p50": 197.42,
+            "p95": 205.02,
+            "p99": 208.89,
+            "max": 210.2
+          }
+        },
+        "8": {
+          "windows": 8,
+          "covers_tokens": 634,
+          "sequential": {
+            "n": 20,
+            "calls": 8,
+            "cold_ms": 393.11,
+            "p50": 392.76,
+            "p95": 401.3,
+            "p99": 401.3,
+            "max": 404.05
+          },
+          "batched": {
+            "n": 20,
+            "calls": 1,
+            "cold_ms": 403.14,
+            "p50": 399.92,
+            "p95": 407.45,
+            "p99": 407.45,
+            "max": 408.37
+          }
+        },
+        "16": {
+          "windows": 16,
+          "covers_tokens": 1242,
+          "sequential": {
+            "n": 20,
+            "calls": 16,
+            "cold_ms": 789.75,
+            "p50": 789.96,
+            "p95": 801.33,
+            "p99": 801.33,
+            "max": 814.87
+          },
+          "batched": {
+            "n": 20,
+            "calls": 1,
+            "cold_ms": 817.08,
+            "p50": 814.4,
+            "p95": 822.42,
+            "p99": 822.42,
+            "max": 822.8
+          }
+        },
+        "32": {
+          "windows": 32,
+          "covers_tokens": 2458,
+          "sequential": {
+            "n": 10,
+            "calls": 32,
+            "cold_ms": 1575.58,
+            "p50": 1575.1,
+            "p95": 1577.21,
+            "p99": 1577.21,
+            "max": 1579.23
+          },
+          "batched": {
+            "n": 10,
+            "calls": 1,
+            "cold_ms": 1700.44,
+            "p50": 1696.72,
+            "p95": 1728.03,
+            "p99": 1728.03,
+            "max": 1743.42
+          }
+        },
+        "53": {
+          "windows": 53,
+          "covers_tokens": 4054,
+          "sequential": {
+            "n": 10,
+            "calls": 53,
+            "cold_ms": 2600.81,
+            "p50": 2631.74,
+            "p95": 2898.85,
+            "p99": 2898.85,
+            "max": 2945.04
+          },
+          "batched": {
+            "n": 10,
+            "calls": 1,
+            "cold_ms": 3157.92,
+            "p50": 2886.94,
+            "p95": 2896.81,
+            "p99": 2896.81,
+            "max": 2905.59
+          }
+        }
+      },
+      "batch_curve": {
+        "1": {
+          "n": 10,
+          "calls": 53,
+          "cold_ms": 2630.5,
+          "p50": 2603.2,
+          "p95": 2616.76,
+          "p99": 2616.76,
+          "max": 2618.04
+        },
+        "2": {
+          "n": 10,
+          "calls": 27,
+          "cold_ms": 2609.96,
+          "p50": 2601.86,
+          "p95": 2610.24,
+          "p99": 2610.24,
+          "max": 2611.4
+        },
+        "4": {
+          "n": 10,
+          "calls": 14,
+          "cold_ms": 2615.92,
+          "p50": 2622.85,
+          "p95": 2633.66,
+          "p99": 2633.66,
+          "max": 2649.01
+        },
+        "8": {
+          "n": 10,
+          "calls": 7,
+          "cold_ms": 2650.23,
+          "p50": 2644.95,
+          "p95": 2657.28,
+          "p99": 2657.28,
+          "max": 2657.95
+        },
+        "16": {
+          "n": 10,
+          "calls": 4,
+          "cold_ms": 2678.42,
+          "p50": 2686.29,
+          "p95": 2706.35,
+          "p99": 2706.35,
+          "max": 2738.38
+        },
+        "32": {
+          "n": 10,
+          "calls": 2,
+          "cold_ms": 2760.22,
+          "p50": 2770.6,
+          "p95": 2801.97,
+          "p99": 2801.97,
+          "max": 2809.95
+        },
+        "53": {
+          "n": 10,
+          "calls": 1,
+          "cold_ms": 2841.69,
+          "p50": 2798.82,
+          "p95": 2825.69,
+          "p99": 2825.69,
+          "max": 2826.87
+        }
+      }
+    }
+  ]
+}
