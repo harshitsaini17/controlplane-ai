@@ -34,7 +34,7 @@ from controlplane.audit.records import (
 from controlplane.detectors.base import Plane, ScoreKind, Signal, Span, Stage
 from controlplane.policy.actions import AppliedEdit
 from controlplane.policy.engine import DetectorFailureRecord, evaluate, resolve_failure
-from controlplane.policy.schema import Action, Policy
+from controlplane.policy.schema import Action, Consistency, Policy
 from controlplane.telemetry import spans
 
 POLICY_DIR = Path(__file__).resolve().parents[1] / "policies"
@@ -734,13 +734,23 @@ def test_m10_a_not_run_entry_is_not_a_detector_failure(conn) -> None:
 def test_m10_the_uc3_case_this_field_exists_for(conn) -> None:
     """★ The concrete requirement: UC-3 asks for consistency, and it is not there.
 
-    `finance_advisor` sets `consistency: "on"`, so a reader seeing no
-    `hallucination.low_confidence` signal must be able to tell "checked, clean" from "never
-    checked". Reads the flag out of the shipped policy rather than hardcoding it, so this
-    test follows the config.
+    A reader seeing no `hallucination.low_confidence` signal must be able to tell
+    "checked, clean" from "never checked".
+
+    **SL-6 moved this test's premise off disk.** It used to read `consistency: "on"` out of
+    the shipped `finance_advisor` policy; the `fast_consistency` cut set every policy to
+    `off`, so no shipped file states the condition any more. The condition is therefore
+    **constructed** from the shipped policy with one field overridden — the field is still
+    a legal, schema-valid mode a future policy can select, and `detectors_json` is what
+    answers for it. Deleting the test instead would have removed the only coverage of the
+    case the field exists for, on the grounds that the config stopped reaching it.
     """
     policy = yaml.safe_load((POLICY_DIR / "finance_advisor.yaml").read_text())
-    assert policy["consistency"] == "on", "UC-3 is the case this field exists for"
+    assert policy["consistency"] == "off", "SL-6: the shipped value, for the record"
+    policy["consistency"] = "on"       # the constructed premise
+    policy["streaming"] = False        # ADR-014 guard, still enforced for this mode
+    assert Policy(**policy).consistency is Consistency.ON, \
+        "consistency: on must remain a selectable mode for this test to mean anything"
 
     write_record(conn, AuditRecord(
         request_id="uc3", use_case="finance_advisor", policy_version=3,

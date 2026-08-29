@@ -53,7 +53,7 @@ from controlplane.policy.engine import (
     Verdict,
     evaluate,
 )
-from controlplane.policy.schema import Policy
+from controlplane.policy.schema import Consistency, Policy
 from controlplane.telemetry import spans
 from controlplane.telemetry.metrics import REGISTRY_DEFAULT, MetricsRegistry
 
@@ -169,7 +169,11 @@ def expected_for(stage: Stage, request: ResolvedRequest) -> tuple[str, ...]:
     * `rag_grounding` — 04 §2, "only when request carries `context` docs".
     * `fast_consistency` — ADR-014 via `policy.consistency`; `off` means the check is not
       part of this pipeline at all, and 04 §2.3 says `rag_grounding` covers the plane
-      instead.
+      instead. Compared with `is not Consistency.OFF`, **not** `str(policy.consistency)
+      != "off"` (M-48): `Consistency` is a `(str, Enum)` mixin, so `str(member)` is
+      `'Consistency.OFF'` and that comparison is never true. It was written the broken way
+      here and the narrowing silently never fired, while `availability._uses` — which
+      carries a comment warning about exactly this — had it right. The two now agree.
     * `conv_tracker` — 04 §2 is per-conversation, so no conversation id means no lane.
     """
     policy = request.policy
@@ -177,7 +181,7 @@ def expected_for(stage: Stage, request: ResolvedRequest) -> tuple[str, ...]:
     for name in lane_members(stage):
         if name == "rag_grounding" and not request.context_docs:
             continue
-        if name == "fast_consistency" and str(policy.consistency) == "off":
+        if name == "fast_consistency" and policy.consistency is Consistency.OFF:
             continue
         if name == "conv_tracker" and not request.conversation_id:
             continue

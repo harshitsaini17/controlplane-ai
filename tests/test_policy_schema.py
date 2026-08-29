@@ -72,12 +72,12 @@ def test_finance_advisor_matches_doc_04_section_3_example() -> None:
     """UC-3 is transcribed from the normative 04 §3 example — verify key-by-key."""
     p = Policy(**load_raw("finance_advisor.yaml"))
 
-    assert p.policy_version == 3
+    assert p.policy_version == 4
     assert p.geography == "EU"
     assert p.risk_appetite is RiskAppetite.LOW
     assert p.streaming is False
     assert p.sampling.deep_audit_rate == 0.25
-    assert p.consistency is Consistency.ON
+    assert p.consistency is Consistency.OFF   # SL-6 cut; was ON
     assert p.cascade_probe is CascadeProbe.OFF
     assert (p.thresholds.tau_low, p.thresholds.tau_high, p.thresholds.tau_route) == (
         0.35,
@@ -103,16 +103,28 @@ def test_finance_advisor_matches_doc_04_section_3_example() -> None:
 
 
 def test_uc_profiles_differ_in_delivery_mode_per_adr_014() -> None:
-    """ADR-014: the three pipelines differ even in delivery mode."""
+    """ADR-014: the pipelines differ in delivery mode — but not via `consistency` now.
+
+    **SL-6 flattened the consistency axis.** With `fast_consistency` cut to roadmap all
+    three policies read `off`, so ADR-014's `on => streaming: false` guard is **inert**:
+    no shipped policy exercises it. Asserted as it now is rather than adjusted to keep a
+    distinction the config no longer draws. `streaming` still differs, and it differs on
+    its own ground — UC-3 judges a full response because it is high-stakes (01 §3), which
+    is why that value did not move when the guard stopped binding (M-47).
+    """
     policies = {name: Policy(**load_raw(name)) for name in POLICY_FILES}
 
     support = policies["support_bot.yaml"]
     hr = policies["hr_copilot.yaml"]
     finance = policies["finance_advisor.yaml"]
 
-    assert (support.streaming, support.consistency) == (True, Consistency.ON_SAMPLED)
+    assert (support.streaming, support.consistency) == (True, Consistency.OFF)
     assert (hr.streaming, hr.consistency) == (True, Consistency.OFF)
-    assert (finance.streaming, finance.consistency) == (False, Consistency.ON)
+    assert (finance.streaming, finance.consistency) == (False, Consistency.OFF)
+    assert {p.consistency for p in policies.values()} == {Consistency.OFF}, \
+        "SL-6: the consistency axis is flat, so ADR-014's guard is unexercised"
+    assert {p.streaming for p in policies.values()} == {True, False}, \
+        "delivery mode still differs, on 01 §3 stakes rather than on ADR-014"
 
     # ADR-013: probe on for the two lower-stakes pipelines, off for high stakes.
     assert support.cascade_probe is CascadeProbe.ON

@@ -356,14 +356,53 @@ def test_input_pii_is_redacted_before_dispatch(make_client) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_uc3_records_fast_consistency_as_not_run(make_client) -> None:
-    """The case `detectors_json` exists for: `consistency: "on"` with no implementation."""
-    client, gateway, _ = make_client("Markets closed higher.")
+def test_uc3_records_fast_consistency_as_not_run(make_client, tmp_path) -> None:
+    """The case `detectors_json` exists for: `consistency: "on"` with no implementation.
+
+    **SL-6 moved the premise off disk.** `finance_advisor` shipped `consistency: "on"`
+    until the `fast_consistency` cut set every policy to `off`; at `off`, 04 §2 excludes
+    the detector from `expected_for` entirely, so it is correctly neither `ran` nor
+    `not_run` (05 §4: "a detector switched off by policy is not listed"). The premise is
+    therefore **constructed** on a copy — `on` is still a legal mode, and this is the only
+    coverage of the state where a policy asks for a check that does not exist. The
+    alternative was deleting the test because the config stopped reaching it, which would
+    retire a live requirement on a config change.
+
+    The `off` behaviour is covered separately below, so both readings are pinned.
+    """
+    policy_dir = tmp_path / "policies_on"
+    policy_dir.mkdir()
+    for path in (ROOT / "policies").glob("*.yaml"):
+        shutil.copy(path, policy_dir)
+    target = policy_dir / "finance_advisor.yaml"
+    # streaming stays false, so ADR-014's `on => streaming: false` guard is satisfied.
+    text = target.read_text().replace('consistency: "off"', 'consistency: "on"', 1)
+    assert 'consistency: "on"' in text, "the shipped value moved; premise not constructed"
+    target.write_text(text)
+
+    client, gateway, _ = make_client("Markets closed higher.", store=PolicyStore(policy_dir))
     response = post(client, "finance_advisor")
 
     detectors = audit_of(gateway, response)["detectors"]
     gaps = {entry["detector"]: entry["reason"] for entry in detectors["not_run"]}
     assert gaps.get("fast_consistency") == "not_implemented"
+    assert "tier1_pii" in detectors["ran"]
+
+
+def test_uc3_omits_fast_consistency_entirely_when_consistency_is_off(make_client) -> None:
+    """SL-6's shipped state: `off` means not listed at all, not listed as a gap.
+
+    The distinction 05 §4 draws is what keeps `not_run` answering one question. A cut
+    detector appearing as `not_implemented` under `off` would report a coverage gap where
+    the policy declined the check.
+    """
+    client, gateway, _ = make_client("Markets closed higher.")
+    response = post(client, "finance_advisor")
+
+    detectors = audit_of(gateway, response)["detectors"]
+    listed = {e["detector"] for e in detectors["not_run"]} | set(detectors["ran"])
+    assert "fast_consistency" not in listed, \
+        "consistency: off excludes the detector from coverage (05 §4), cut or not"
     assert "tier1_pii" in detectors["ran"]
 
 

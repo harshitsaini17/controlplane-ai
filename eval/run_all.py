@@ -223,8 +223,10 @@ SKIPPED: tuple[SkippedDetector, ...] = (
     SkippedDetector("tier2_toxicity", ("toxicity.high", "toxicity.moderate"),
                     "not implemented — stub; Q-04 defers the checkpoint choice"),
     SkippedDetector("fast_consistency", ("hallucination.low_confidence",),
-                    "not implemented — stub; the 2nd-sample provider is bound "
-                    "(Q-10 resolved 2026-08-28), the detector is not"),
+                    "CUT to roadmap (SL-6) — specified in 04 §2.3, never implemented. "
+                    "The 2nd-sample provider was bound (Q-10, 2026-08-28); the detector "
+                    "was not. UC-3's performance plane is covered by rag_grounding where "
+                    "context exists; the context-free case is what the cut gives up"),
     SkippedDetector("rag_grounding", ("hallucination.ungrounded_claim",),
                     "not implemented — stub; needs sentence-transformers"),
     # Reason deferred to `_enricher_reason()`: the row was "not implemented — stub" until

@@ -185,8 +185,9 @@ def test_consistency_off_is_the_one_policy_level_narrowing(policies) -> None:
     # Asserted, not skipped. The first draft of this test filtered with
     # `str(p.consistency) == "off"` — which is never true for a `(str, Enum)` mixin — so it
     # skipped, and a skip is what let the identical mistake in `_uses` look tested.
-    assert [p.use_case for p in off] == ["hr_copilot"], \
-        "hr_copilot is the shipped `consistency: off` policy (04 §3)"
+    assert sorted(p.use_case for p in off) == \
+        ["finance_advisor", "hr_copilot", "support_bot"], \
+        "SL-6 cut fast_consistency, so every shipped policy now reads `off` (was hr only)"
     manifest = (Unavailable(detector="fast_consistency", missing=ABSENT),)
     assert policies_requiring_fail_closed(manifest, off) == {}
     # And the narrowing must actually be doing the work: hr_copilot maps

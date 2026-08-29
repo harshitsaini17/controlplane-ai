@@ -57,7 +57,7 @@ Common contract: `async detect(ctx) -> list[Signal]`; must respect its latency b
 | `tier1_blocklist` | input + output_sentence | <2 ms | `security.blocklist` | per-use-case extra terms via policy `blocklist_extra` |
 | `tier2_injection` | input | <25 ms **per 104-token window** (ADR-032), enforced **inside** the detector; the runner's ceiling is **length-parametric** (ADR-034 Part B) | `security.prompt_injection` | small transformer, CPU/ONNX; score = **MAX over strided windows** (104 tokens / overlap 26 / step 76), full input coverage — no prefix privileged, no 512-token blind spot. `window_count` + max-window index in signal meta; multi-window cost published untargeted |
 | `tier2_toxicity` | output_sentence | <25 ms | `toxicity.*` | moderate vs high via detector-internal cutoffs (0.5/0.8 defaults; overridable in policy `detector_params`) |
-| `fast_consistency` | output_full* | <60 ms | `hallucination.low_confidence` | 2nd sample at temperature; embedding cosine; *runs on accumulated response so far at each sentence boundary using the parallel-sample stream (see §2.3) |
+| `fast_consistency` | output_full* | <60 ms | `hallucination.low_confidence` | 2nd sample at temperature; embedding cosine; *runs on accumulated response so far at each sentence boundary using the parallel-sample stream (see §2.3). **CUT to roadmap — SL-6, 2026-08-30**: this row is the specification and is retained; no implementation ships |
 | `rag_grounding` | output_sentence | <30 ms | `hallucination.ungrounded_claim` | only when request carries `context` docs; sentence-vs-context embedding entailment proxy |
 | `numeric_claims` | output_sentence | <5 ms | `hallucination.unsourced_numeric` | **quantity-shaped** numerals only (§2.4, ADR-025 — the bare large-digit-run rule is DELETED) with no citation marker (§2.4.2) and no match in provided context; identifier structures are excluded by a pre-filter; high-stakes use cases map it to ESCALATE |
 | `cost_budget` | input | <1 ms | `cost.*` | ledger lookup; token estimate via tokenizer count × price table |
@@ -141,6 +141,13 @@ A skipped span is a legal signal, not a malformed one: ADR-019 rejects an *unrec
 - `consistency: on` **requires `streaming: false`** (schema-enforced). The full response and a parallel 2nd sample are compared once, pre-delivery — the check is always available and nothing reaches the user before the verdict. (UC-3.)
 - `consistency: on_sampled` (streaming; UC-1 at deep-audit rate): the 2nd sample streams in parallel from dispatch; at each sentence boundary the aligned prefix is compared **only if** sample-2 has ≥ 70% of the primary's released+buffered length. Otherwise the sentence proceeds *without* the signal, audited as `meta.consistency:"lagged"` and counted in `cp_consistency_lagged_total`; deep audit is the backstop.
 - `consistency: off`: `rag_grounding` covers the performance plane where context exists.
+
+**All three shipped policies read `off` as of 2026-08-30 (SL-6).** `fast_consistency` is cut to
+roadmap — this section remains its specification, not a description of running code. Two
+consequences worth stating rather than leaving to be inferred: the `on` and `on_sampled` modes
+above are **unexercised by any shipped policy** (still schema-enforced, and still selectable),
+and the plane is covered *where context exists* — a context-free claim goes unscored on the
+performance plane, which is precisely what the cut gives up.
 
 Cost: ~2× tokens wherever sampling occurs — a policy knob (coverage vs cost), said openly in the demo.
 
@@ -290,14 +297,16 @@ than hidden: see 06 §3's revision-methodology requirement.
 # policies/finance_advisor.yaml
 schema_version: 1
 use_case: finance_advisor
-policy_version: 3                # bump on every change; engine stamps it into audit
+policy_version: 4                # bump on every change; engine stamps it into audit
 geography: EU                    # metadata usable by mappings; data not code
 risk_appetite: low               # low | medium | high (informational + default pack selector)
 
-streaming: false                 # consistency:on requires full buffering (ADR-014)
+streaming: false                 # UC-3 judges the full response before delivery (01 §3).
+                                 # ADR-014 also forced it while consistency was "on"
 sampling:
   deep_audit_rate: 0.25
-consistency: "on"                # on | on_sampled | off   (on ⇒ streaming:false)
+consistency: "off"               # on | on_sampled | off   (on ⇒ streaming:false).
+                                 # "off" since the SL-6 cut; rag_grounding covers the plane
 cascade_probe: "off"             # ADR-013; high-stakes → always frontier tier
 
 thresholds:                      # calibrated per 06 §3; conformal-style quantiles

@@ -162,10 +162,13 @@ removed without storing what it was.
 
 ## 4. Audit record — canonical JSON view
 
-The proposal/README show this shape (assembled from `audit_records`):
+The proposal/README show this shape (assembled from `audit_records`). The `fast_consistency`
+signal below is **illustrative of the record shape, not of current behaviour**: SL-6 cut that
+detector, so no signal carries `hallucination.low_confidence` today. The shape is what this
+section specifies, and it is unchanged by which detectors happen to be implemented:
 ```json
 {
-  "request_id": "…", "use_case": "finance_advisor", "policy_version": 3,
+  "request_id": "…", "use_case": "finance_advisor", "policy_version": 4,
   "verdict": "escalate",
   "signals": [{"detector":"fast_consistency","labels":["hallucination.low_confidence"],
                "score":0.41,"stage":"output_full","latency_ms":38.2}],
