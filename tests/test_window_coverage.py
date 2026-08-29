@@ -117,11 +117,6 @@ def test_correction1_detector_side_count_leaves_no_tail_at_the_bound() -> None:
         assert tail <= 0, f"{n_tokens} tokens -> {n} windows leaves {tail} tokens unscanned"
 
 
-@pytest.mark.xfail(
-    reason="ADR-032 Correction 1 has not landed its re-measurement: the committed artifact is\n"
-           "still the 52-rung pre-correction run",
-    strict=True,
-)
 @pytest.mark.skipif(not ARTIFACT.exists(), reason="no published spike artifact")
 def test_correction1_published_labels_are_derived_not_observed() -> None:
     """Every coverage label in the artifact must equal the formula's output.
@@ -147,11 +142,6 @@ def test_correction1_published_labels_are_derived_not_observed() -> None:
         assert run["filler_tokens"] >= POLICY_BOUND_TOKENS
 
 
-@pytest.mark.xfail(
-    reason="ADR-032 Correction 1 has not landed its re-measurement: the committed artifact is\n"
-           "still the 52-rung pre-correction run",
-    strict=True,
-)
 @pytest.mark.skipif(not ARTIFACT.exists(), reason="no published spike artifact")
 def test_correction1_artifact_measures_the_corrected_bound_case() -> None:
     """The published artifact must be the re-measured one, not the pre-correction table.

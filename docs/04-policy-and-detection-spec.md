@@ -98,13 +98,18 @@ wearing a budget's clothes. This is what stops `fail_closed` blocking every long
 that is a stated trade-off rather than an emergent one.
 
 The envelope is grounded on ADR-032's **1-thread** column, not its 6-thread column: the two differ
-by **3.9×**, so a 2× safety factor over the optimistic figures sits *below* the pessimistic cost and
-would trip on contention alone. NFR-P-002 is **not** restated by this and SL-5's disclosure is
+by **4.12×** — 12.38 ms vs 51.05 ms per-window P99 at the **2-window rung**, both sequential
+(ADR-032 Correction 1 re-derived this pair; the withdrawn figure quoted a ratio from the 1-window rung
+while citing 2-window cells) — so a 2× safety factor over the optimistic figures sits *below* the
+pessimistic cost and would trip on contention alone. NFR-P-002 is **not** restated by this and SL-5's disclosure is
 unchanged.
 
 **Span disclosure, normative for every published `tier2_injection` figure.** ADR-032's window series
 times `sess.run` **only** (tokenization is outside its clock). A detector pays tokenization too —
-measured 1.59 ms P99 at 2 windows and 27.33 ms at the 4000-token bound. Any figure this repo
+measured **0.40 ms P99 at 2 windows and 8.32 ms P99 at the 4000-token bound** (1-thread, the
+grounding column; 0.41 / 8.22 at 6 threads). Both figures are ADR-032 Correction 1's: when this
+disclosure was first written **no script in this repo measured tokenization**, and the asserted
+figures it carried — 1.59 and 27.33 — were high by ~4x and ~3x respectively. Any figure this repo
 publishes for this detector **states which spans it covers**. This is a disclosure, not a
 contradiction: 06 §4 defines `input_hold_ms` as "ingress + input-lane time", which includes
 tokenization by construction.

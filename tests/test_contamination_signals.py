@@ -195,15 +195,14 @@ def test_the_check_discriminates_on_real_artifacts_not_only_synthetic_ones() -> 
         )
 
 
-@pytest.mark.xfail(
-    reason="ADR-032 Correction 1 has not landed its re-measurement. The committed artifact passes "
-           "`contamination_signals` but carries neither a load nor a code stamp, and is still the "
-           "52-rung pre-correction run whose four largest rungs cannot resolve a P99",
-    strict=True,
-)
-def test_landing_gate_the_published_artifact_is_clean() -> None:
-    """The gate Correction 1 must satisfy. `strict=True`, so it fails loudly the moment the
-    clean artifact lands and stops being an xfail — at which point the test above is deleted."""
+def test_the_published_artifact_is_clean() -> None:
+    """**Now live.** The gate Correction 1 had to satisfy, satisfied 2026-08-29 and kept as a
+    standing assertion on whatever artifact is committed.
+
+    It was a `strict=True` xfail, which is why it converted rather than being noticed: the strict
+    marker turned "this started passing" into a failure the suite could not ignore. The artifact
+    it now guards was measured at code `445ca31dd087` on a host stamped 0.6/0.94/0.98 QUIET, and
+    reports **0** contamination signals in both thread phases."""
     art = json.loads(ARTIFACT.read_text())
     assert art.get("load_at_process_start", {}).get("cpus") is not None
     for run in art["runs"]:

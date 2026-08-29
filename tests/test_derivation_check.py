@@ -28,6 +28,40 @@ ARTIFACT = REPO / "reports" / "spike_window_latency.json"
 PRE = REPO / "reports" / "spike_window_latency.pre-correction-1.json"
 
 
+def _ladder_tables(doc: str) -> list[str]:
+    """Every ADR-032 ladder table in the doc, live or blockquoted, as text blocks.
+
+    Split out because two tests need the same slicing and a regex over the whole file would be
+    the fragile way: the tables differ only by a `> ` prefix.
+    """
+    out, cur = [], []
+    for line in doc.splitlines():
+        bare = line.lstrip("> ").rstrip()
+        if bare.startswith("|"):
+            cur.append(line)
+        elif cur:
+            out.append("\n".join(cur)); cur = []
+    if cur:
+        out.append("\n".join(cur))
+    return [t for t in out if "batched (all in one call)" in t]
+
+
+def _first_ladder_table(doc: str) -> str:
+    """The live (corrected) table — the one `_table_after` reads."""
+    for t in _ladder_tables(doc):
+        if t.lstrip().startswith("|"):
+            return t
+    raise AssertionError("no live ladder table found in ADR-032")
+
+
+def _withdrawn_ladder_table(doc: str) -> str:
+    """The preserved withdrawn table, un-quoted so the checker can see it."""
+    for t in _ladder_tables(doc):
+        if t.lstrip().startswith(">"):
+            return "\n".join(ln.lstrip()[1:].lstrip() for ln in t.splitlines())
+    raise AssertionError("no blockquoted (withdrawn) ladder table found in ADR-032")
+
+
 def _verdicts(artifact: Path) -> dict[str, list[str]]:
     art = json.loads(artifact.read_text())
     out: dict[str, list[str]] = {"OK": [], "MISMATCH": [], "NO SOURCE": []}
@@ -54,22 +88,51 @@ def test_correction1_checker_still_catches_the_defects_it_was_built_for() -> Non
     assert len(v["OK"]) >= 10, f"only {len(v['OK'])} figures validated; matching is too strict"
 
 
-@pytest.mark.skipif(not PRE.exists(), reason="pre-correction artifact not retained")
 def test_correction1_withdrawn_coverage_labels_are_caught_specifically() -> None:
-    """Not just "some failure" — the coverage mismatch by name.
+    """Not just "some failure" — the coverage mismatch by name, on the real withdrawn figures.
 
     A test satisfied by any failure would keep passing if the checker broke in a new way and
     stopped seeing this one.
+
+    **Re-pointed when Correction 1 landed, not deleted** (the convention ADR-031 consequence 5
+    sets for tripwires). It previously read the pre-correction *artifact*, which no longer works
+    and could not be made to: the coverage defect lived in the **doc text**, and this check's
+    derived side is `coverage_tokens(n)`, a pure formula. Once the doc was corrected, the labels
+    agree with the geometry against *any* artifact — the assertion had become unsatisfiable rather
+    than merely unsatisfied, so leaving it pointed at `PRE` would have been a test that can never
+    fail dressed as one that can.
+
+    So the fixture is now the **withdrawn table itself**, which Correction 1 preserves verbatim
+    (blockquoted) precisely so the defect stays inspectable. Un-quoting it hands the checker the
+    exact rows that were published — 16w labelled 1546 against a derived 1242, 32w as ~3100
+    against 2458, 52w as 4082 against 3978 — and the checker must still flag them. That ties the
+    guard to preserved evidence rather than to a run, so it keeps working after the next
+    re-measurement.
     """
-    v = _verdicts(PRE)
+    doc = DECISIONS.read_text()
+    live = _first_ladder_table(doc)
+    withdrawn = _withdrawn_ladder_table(doc)
+    assert "| 52 |" in withdrawn or "| **52** |" in withdrawn, (
+        "the withdrawn 52-window table is no longer preserved in ADR-032 Correction 1 — it is the "
+        "only record of what was published, and this guard's fixture"
+    )
+    v: dict[str, list[str]] = {"OK": [], "MISMATCH": [], "NO SOURCE": []}
+    for c in checks(json.loads(ARTIFACT.read_text()), doc.replace(live, withdrawn)):
+        v[c.verdict].append(c.label)
     coverage = [lab for lab in v["MISMATCH"] if "coverage label" in lab]
-    assert coverage, f"coverage labels not flagged; MISMATCH was {v['MISMATCH']}"
+    assert len(coverage) >= 3, (
+        f"checker no longer flags the withdrawn coverage labels; MISMATCH was {v['MISMATCH']}"
+    )
 
 
 @pytest.mark.skipif(not ARTIFACT.exists(), reason="no published spike artifact")
 @pytest.mark.xfail(
-    reason="ADR-032 Correction 1 has not landed: the docs still cite the pre-re-run figures and "
-           "the committed artifact's four largest rungs cannot resolve a P99 (n=20/n=10)",
+    reason="Correction 1 has landed and drove this from 6 OK/22 MISMATCH/12 NO SOURCE to 33 OK/6 "
+           "MISMATCH/1 NO SOURCE. Every remaining non-OK figure is inside ADR-032's batching "
+           "paragraph, which is under the OPEN deviation "
+           "[D1-batch-4-justification-falsified-at-the-corrected-bound] — re-citing those figures "
+           "would rewrite the justification the deviation contests, i.e. self-approve it "
+           "(AGENTS.md §5.4). Clears when that deviation is ruled, not before",
     strict=True,
 )
 def test_correction1_committed_docs_rederive_against_committed_artifact() -> None:
@@ -108,7 +171,11 @@ def test_correction1_check_exits_nonzero_on_a_defect() -> None:
 
 
 @pytest.mark.skipif(not ARTIFACT.exists(), reason="no published spike artifact")
-@pytest.mark.xfail(reason="ADR-032 Correction 1 has not landed", strict=True)
+@pytest.mark.xfail(
+    reason="same single cause as the gate above: ADR-032's batching paragraph is under an open "
+           "deviation, so 6 MISMATCH + 1 NO SOURCE remain and the exit status stays 1",
+    strict=True,
+)
 def test_landing_gate_check_exits_zero_once_the_docs_rederive() -> None:
     """The other half: usable as a commit gate means exit 0 has to be reachable."""
     assert main(["--artifact", str(ARTIFACT)]) == 0

@@ -177,10 +177,13 @@ class ParametricBudget:
 
     `per_unit_ms` and `fixed_ms` are **transcribed from ADR-032's measured series**, the same
     way `BUDGETS_MS` is transcribed from the 04 §2 table — not fitted, and not read from
-    `reports/` at runtime (production code must not depend on a report file).
+    `reports/` at runtime (production code must not depend on a report file). The
+    transcription is not trusted either: a test re-derives both from the artifact and fails
+    on drift, because "transcribed" is precisely how a figure loses its derivation.
 
     **The 1-thread column, deliberately** (ADR-034 M-30). ADR-032 publishes both thread
-    settings and SL-5 stands on the gap: 12.56 ms vs 51.28 ms P99 per window, a **3.9x**
+    settings and SL-5 stands on the gap: 12.38 ms vs 51.05 ms P99 per window at the
+    2-window rung, a **4.12x**
     spread. A ceiling built on the optimistic column sits *below* the pessimistic cost, so it
     would fire on **contention** — which for a concurrent gateway is the normal case, not an
     edge. A loose ceiling can only fail to catch a mildly-slow detector; a tight one causes
@@ -190,11 +193,13 @@ class ParametricBudget:
     #: The 04 §2 per-unit figure. What NFR-P-002 is compared against, and what every
     #: budget-reading consumer sees via `budget_ms()`.
     nominal_ms: float
-    #: Measured cost per unit, ADR-032 1-thread column (52.01 ms = 208.05/4, its worst
-    #: per-window P99 across the ladder).
+    #: Measured cost per unit — ADR-032's 1-thread series, worst per-window P99 across
+    #: **both** columns (52.78 ms = 2797.44/53, the 53-window bound rung, sequential). Worst
+    #: across both because ADR-032 binds `batch 4`, so the batched column is the bound column
+    #: and a ceiling grounded on either one alone sits below the other (Correction 1).
     per_unit_ms: float
     #: Length-independent cost inside the same span — tokenization, which ADR-032's table
-    #: excludes (it times `sess.run` only) and a detector cannot. Measured 27.33 ms P99 at the
+    #: excludes (it times `sess.run` only) and a detector cannot. Measured 8.32 ms P99 (1-thread) at the
     #: 4000-token bound; carried as a flat term because it is dwarfed by the per-unit sum.
     fixed_ms: float
     #: Multiplier over the measured envelope. 2.0 per the ruling.
@@ -221,7 +226,7 @@ BUDGETS_MS: dict[str, float | ParametricBudget] = {
     # ADR-034: per-window budget 25 ms (04 §2, NFR-P-002 single-window scope); runner
     # ceiling parametric on window count, grounded on ADR-032's 1-thread series.
     "tier2_injection": ParametricBudget(
-        nominal_ms=25.0, per_unit_ms=52.01, fixed_ms=27.33
+        nominal_ms=25.0, per_unit_ms=52.78, fixed_ms=8.32
     ),
     "tier2_toxicity": 25.0,
     "fast_consistency": 60.0,

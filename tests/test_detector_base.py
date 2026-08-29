@@ -12,6 +12,8 @@ test is small enough that the plugin buys nothing.
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -368,21 +370,91 @@ def test_adr034_ceiling_equals_budget_for_flat_and_single_window() -> None:
             assert ceiling_ms(name, 53) == budget_ms(name), name
 
 
+#: ADR-032's published artifact. Read at test time, never transcribed: the figures below
+#: were hardcoded once and drifted from every artifact version that ever existed (see
+#: `test_adr034_grounding_figures_are_derivable_from_the_artifact`), which is the same
+#: defect class ADR-032 Correction 1 exists to close.
+ARTIFACT = Path(__file__).resolve().parents[1] / "reports" / "spike_window_latency.json"
+
+
+def _ladder(threads: int) -> dict[int, dict[str, dict[str, float]]]:
+    """ADR-032's ladder for one thread setting, keyed by window count."""
+    artifact = json.loads(ARTIFACT.read_text())
+    run = next(r for r in artifact["runs"] if r["threads"] == threads)
+    return {int(k): v for k, v in run["ladder"].items()}
+
+
+def _worst_per_window_p99(threads: int) -> tuple[int, float]:
+    """Worst per-window P99 across **both** columns, and the rung it occurs at.
+
+    Both columns because ADR-032 binds `batch 4` — the batched column is the bound column,
+    so grounding on either one alone puts the ceiling below the other (Correction 1).
+    """
+    per_window = {
+        n: max(row["sequential"]["p99"], row["batched"]["p99"]) / n
+        for n, row in _ladder(threads).items()
+    }
+    rung = max(per_window, key=lambda n: per_window[n])
+    return rung, per_window[rung]
+
+
 def test_adr034_parametric_ceiling_grows_and_clears_the_measured_envelope() -> None:
-    """The ceiling must exceed ADR-032's measured 1-thread series at every measured rung.
+    """The ceiling must exceed ADR-032's measured 1-thread envelope at every measured rung.
 
     A ceiling below the measurement would cancel a detector performing exactly as published —
-    the defect `[D1-windowed-injection-cannot-be-enforced-by-a-per-call-budget]` filed. Rungs
-    and figures are ADR-032's 1-thread sequential P50, the column ADR-034 grounds on (M-30).
+    the defect `[D1-windowed-injection-cannot-be-enforced-by-a-per-call-budget]` filed. The
+    envelope is the **worst of both columns** at each rung, matching what `per_unit_ms` is
+    grounded on; rungs and figures come from the artifact, so a re-measurement re-points this
+    test instead of silently invalidating it.
+
+    Rung 1 is excluded from the clearance assertion deliberately: `resolve()` floors the
+    single-window case at `nominal_ms` (25 ms), which sits *below* the measured 1-thread
+    single-window cost. That gap is NFR-P-002's scope boundary and SL-5's standing
+    disclosure — not a ceiling defect — so asserting it away here would hide it.
     """
-    measured_1_thread_p50 = {2: 99.35, 4: 198.85, 8: 395.81, 16: 789.34, 32: 1574.42,
-                             53: 2603.69}
+    envelope = {
+        n: max(row["sequential"]["p99"], row["batched"]["p99"])
+        for n, row in _ladder(1).items()
+        if n > 1
+    }
+    assert len(envelope) >= 5, f"artifact ladder too sparse to be a real check: {envelope}"
+
     prev = ceiling_ms("tier2_injection", 1)
-    for windows, measured in sorted(measured_1_thread_p50.items()):
+    for windows, measured in sorted(envelope.items()):
         got = ceiling_ms("tier2_injection", windows)
         assert got > measured, f"{windows} windows: ceiling {got} <= measured {measured}"
         assert got > prev, "the ceiling must be monotonic in window count"
         prev = got
+
+
+def test_adr034_grounding_figures_are_derivable_from_the_artifact() -> None:
+    """`per_unit_ms` and `fixed_ms` must equal what the artifact says, to the digit.
+
+    `base.py` transcribes both rather than reading `reports/` at runtime, because production
+    code must not depend on a report file. This is the guard that makes the transcription
+    honest — and it is not hypothetical: the series this file used to pin matched **no**
+    version of the artifact, in any column, at any rung, and additionally pinned a 53-window
+    rung the withdrawn run never measured. A figure whose stated derivation cannot reproduce
+    it either gains a source or loses the claim; there is no third state (ADR-032
+    Correction 1).
+    """
+    budget = BUDGETS_MS["tier2_injection"]
+    assert isinstance(budget, ParametricBudget)
+
+    rung, worst = _worst_per_window_p99(1)
+    assert round(worst, 2) == budget.per_unit_ms, (
+        f"per_unit_ms={budget.per_unit_ms} but the artifact's worst per-window P99 is "
+        f"{worst:.2f} at the {rung}-window rung"
+    )
+
+    artifact = json.loads(ARTIFACT.read_text())
+    run = next(r for r in artifact["runs"] if r["threads"] == 1)
+    tokenize_at_bound = run["tokenize"][str(artifact["window"]["policy_bound_tokens"])]
+    assert tokenize_at_bound["percentiles_resolved"], "an unresolved percentile is not a P99"
+    assert tokenize_at_bound["p99"] == budget.fixed_ms, (
+        f"fixed_ms={budget.fixed_ms} but the artifact measures tokenization at the bound at "
+        f"{tokenize_at_bound['p99']} ms P99"
+    )
 
 
 def test_adr034_run_with_budget_refuses_a_parametric_default() -> None:

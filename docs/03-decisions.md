@@ -1009,7 +1009,9 @@ committed text.
 
 - **NFR-P-001's input-lane hold (P50 < 40 ms, P99 < 50 ms) is scoped to single-window inputs**
   (≤ 104 tokens, the ADR-032 window). There it is the derivation ADR-030 built: a 30 ms worst case
-  whose dominant term is `tier2_injection`, measured at **13.01 ms P99** for one window.
+  whose dominant term is `tier2_injection`, measured at **12.59 ms P99** for one window — the
+  worst of both columns at the 1-window rung (sequential 11.87), re-derived from the clean artifact
+  by ADR-032 Correction 1; the withdrawn run read 13.01.
 - **Multi-window input holds are published as an untargeted, window-count-bucketed series.** This is
   the **third use** of the per-request-sum precedent — `total_attributable_overhead_ms` was the
   first, ADR-032's NFR-P-002 window series the second — and the shape is deliberately identical, so
@@ -1193,10 +1195,10 @@ completed, with the measured cost accepted.
    single call, and small windows are *more* token-efficient than large ones — measured cost per
    content token is **0.111 ms** at 104 tokens against **0.187 ms** at 512, because attention is
    quadratic in sequence length. So no window geometry rescues the bound: full coverage of 4000
-   tokens is inherently ~52 × ~12 ms. The overlap exists so a payload straddling a boundary is
+   tokens is inherently ~53 × ~12 ms. The overlap exists so a payload straddling a boundary is
    whole in some window.
 2. **Aggregation is MAX over windows**, with `window_count` and the index of the max-scoring
-   window in the signal meta. MAX and not mean: a mean over 52 windows dilutes a single malicious
+   window in the signal meta. MAX and not mean: a mean over 53 windows dilutes a single malicious
    window below any threshold, which is padding-as-evasion by arithmetic.
 3. **The position is pre-dispatch, and that is not negotiable.** Optimistic dispatch — call the
    provider while scoring — would deliver the payload upstream, which is the exact event the gate
@@ -1212,22 +1214,25 @@ completed, with the measured cost accepted.
 `eval/spike_window_latency.py`, raw in `reports/spike_window_latency.json`. Ryzen 5 5600H
 (12 logical CPUs), Linux 7.1.2, Python 3.14.6, onnxruntime 1.29.0, `madhurjindal/Jailbreak-Detector`
 65.8 M on ONNX Runtime **int8**, synthetic deterministic filler (no corpus text), window 104/26/76,
-52 windows at the `per_request_max_tokens: 4000` bound. P50 / P99 ms, 6 threads:
+**53** windows at the `per_request_max_tokens: 4000` bound (Correction 1 below). Every coverage label
+is **derived** from the window geometry, never read off a filler token count. Measured at code
+`445ca31dd087` (clean) on a host stamped **0.6 / 0.94 / 0.98 QUIET**, n=40 per ladder point, 0
+contamination signals in either thread phase. P50 / P99 ms, 6 threads:
 
 | windows | input tokens | sequential | batched (all in one call) |
 |---|---|---|---|
-| 1 | 102 | 11.30 / 13.01 | 11.62 / 12.90 |
-| 2 | ~178 | 23.28 / **25.13** | 21.45 / **26.10** |
-| 4 | 330 | 47.20 / 51.40 | 43.52 / 54.13 |
-| 8 | 634 | 96.52 / 99.50 | 91.99 / 98.42 |
-| 16 | 1546 | 196.19 / 201.91 | 203.88 / 235.27 |
-| 32 | ~3100 | 397.39 / 409.54 | 457.89 / 474.63 |
-| **52** | **4082** | **651.41 / 657.04** | **800.75 / 819.96** |
+| 1 | 102 | 10.92 / 11.87 | 11.27 / 12.59 |
+| 2 | 178 | 22.81 / 24.76 | 21.21 / 22.53 |
+| 4 | 330 | 45.98 / 48.77 | 43.09 / 46.71 |
+| 8 | 634 | 94.00 / 96.99 | 91.03 / 97.42 |
+| 16 | 1242 | 191.74 / 229.64 | 200.38 / 208.58 |
+| 32 | 2458 | 391.66 / 401.56 | 450.09 / 506.82 |
+| **53** | **4054** | **655.50 / 686.25** | **794.18 / 865.42** |
 
 **The cost is accepted, with the reason recorded rather than left to inference.** It scales with
 window count, and window count scales with input length — so the guard's cost concentrates
 precisely on long inputs, which is where pad-then-inject attacks live. A typical single-window
-prompt pays **11.30 ms P50 / 13.01 ms P99**. The pathological 4000-token prompt pays ~0.6 s, and it
+prompt pays **10.92 ms P50 / 11.87 ms P99**. The pathological 4000-token prompt pays ~0.6 s, and it
 is the shape an attacker uses to dilute or outrun a scanner. Spending the most time on the most
 suspicious inputs is the correct allocation, not an unfortunate one.
 
@@ -1237,15 +1242,25 @@ This is context for the magnitude, **not** a target and not a claim the cost is 
 figure is published in full and untargeted so a reader can judge it themselves.
 
 **Hardware, stated once.** All figures are CPU int8 with **6 threads** available to one inference.
-**SL-5's caveat applies in full**: at **1 thread** a *single* window costs **49.81 / 50.55 ms** —
-NFR-P-002 breaches even single-window — and the bound case costs **2566.68 ms**. GPU or dedicated
+**SL-5's caveat applies in full**: at **1 thread** a *single* window costs **49.77 / 50.76 ms** —
+NFR-P-002 breaches even single-window — and the bound case costs **2541.99 ms**. GPU or dedicated
 serving hardware is roadmap, not claimed anywhere in this repo.
+
+> ⚠ **The rest of this paragraph is under an OPEN deviation and is NOT re-cited by Correction 1.**
+> `[D1-batch-4-justification-falsified-at-the-corrected-bound]` (MAJOR, filed 2026-08-29, unruled)
+> was raised **by** Correction 1's own re-measurement: at the corrected 53-window bound the b2→b4
+> gap is ~6% per window rather than the 0.6% this paragraph rests on, and batch 4 is *slower than
+> batch 8* despite half the calls. The figures below are the **withdrawn 52-window run's**, left in
+> place deliberately — rewriting the justification would be self-approving a deviation (AGENTS.md
+> §5.4). The clean curve is in `08`'s report and in `reports/spike_window_latency.json`; the
+> re-derivation check flags these figures as MISMATCH, which is the correct state for a contested
+> number. **Only this paragraph and `batch 4` in consequence 1 are blocked.**
 
 **Batching does not amortise, and past a small batch it hurts.** Measured at the bound (6 threads,
 52 windows, P50): batch **2 → 599.20 ms** (the minimum), batch 4 → 602.66, batch 8 → 631.45,
 batch 16 → 667.03, batch 32 → 727.18, all-52-in-one-call → **800.58** — *worse* than 52 separate
-calls at 653.65. The cause is measurable rather than speculative: one window costs 49.81 ms at
-1 thread and 11.30 ms at 6, a **4.41×** speedup, so ONNX Runtime already spreads a single window
+calls at 653.65. The cause is measurable rather than speculative: one window costs 49.77 ms at
+1 thread and 10.92 ms at 6, a **4.56×** speedup, so ONNX Runtime already spreads a single window
 across the cores. There is no idle parallelism for a batch to exploit; a larger tensor only queues
 more work at a saturated pipeline. **Bound batch size: 4.** Not 2, though 2 is the nominal minimum:
 599.20 and 602.66 differ by 0.6%, which is inside this harness's own run-to-run spread (below), so
@@ -1273,7 +1288,108 @@ the **higher** one where they disagree, and the ~26% band applies to every figur
 The conclusions are unchanged: 1 window fits with margin on either figure, 2 windows breach on
 either, and the bound case is in the >500 ms class on either.
 
+#### Correction 1 — 2026-08-29: the coverage labels were observed, not derived, and the bound case undercovered the bound (resolves `[D3-bound-case-window-count-undercovers-the-policy-bound]`)
+
+**Status:** Accepted 2026-08-29. Option A of the filed report, approved. (Numbered "1" although this
+ADR's other correction — the cross-validation note above — is unnumbered. That one predates the
+numbering convention and is left as-is rather than renumbered, since it is cited by heading text
+elsewhere; the format precedent it follows is the `eyJ` correction in ADR-026.)
+
+**The withdrawn table, preserved rather than deleted:**
+
+> | windows | input tokens | sequential | batched (all in one call) |
+> |---|---|---|---|
+> | 1 | 102 | 11.30 / 13.01 | 11.62 / 12.90 |
+> | 2 | ~178 | 23.28 / **25.13** | 21.45 / **26.10** |
+> | 4 | 330 | 47.20 / 51.40 | 43.52 / 54.13 |
+> | 8 | 634 | 96.52 / 99.50 | 91.99 / 98.42 |
+> | 16 | 1546 | 196.19 / 201.91 | 203.88 / 235.27 |
+> | 32 | ~3100 | 397.39 / 409.54 | 457.89 / 474.63 |
+> | **52** | **4082** | **651.41 / 657.04** | **800.75 / 819.96** |
+
+(Blockquoted deliberately, and not struck: `eval/check_derivations.py` locates a table by its header
+line and takes the **first** match, so a withdrawn table left as live markdown would be the one the
+re-derivation check reads. A quoted table is invisible to it. The mechanical guard shapes how the
+withdrawn evidence is preserved — which is the correct direction of influence.)
+
+**The off-by-one, stated plainly.** The bound-case row claimed **4082 tokens** of coverage at **52
+windows**. The geometry is `coverage_tokens(n) = 102 + (n-1)·76`, so 52 windows span **3978** tokens —
+**22 short of the 4000-token bound**, and 4082 is not a figure 52 windows can produce at all. The row
+therefore contradicted the ADR's own headline guarantee, *full coverage, no unscanned tail*, in the
+one row where the guarantee matters most. `windows_for_tokens(4000) = 53`, spanning 4054.
+
+**Where 4082 came from, and why the whole column was wrong in kind.** The labels were **observed**
+rather than **derived**: the harness reported the token count of the *whole synthetic filler string*,
+which overshoots the target by construction (it appends until it is at least long enough — 4082 for a
+4000-token request). The 52-window row was then labelled with the filler's length rather than with
+what 52 windows cover. Rungs 1/2/4/8 happened to agree with the geometry, which is exactly why the
+defect survived review; **16 and 32 did not** — published as 1546 and ~3100 against a derived 1242 and
+2458. Those two are not merely mislabelled but **underivable**: no combination of the harness's
+geometry and filler produces them, and the ruling explicitly declined to reconstruct their provenance.
+One sentence is the whole record: they were wrong, their origin is not recoverable from the artifact,
+and they are replaced by derived values.
+
+**Every label in the re-published table is now computed from the geometry**, in the artifact and in
+the harness, and `filler_tokens` is recorded beside them **explicitly marked provenance, not a label**.
+
+**This is a label correction plus a re-measurement — not a re-roll.** The same precedent the `eyJ`
+correction set: *the decision stands; only its stated reason was wrong.* Every conclusion ADR-032
+reached survives — the bound case is in the >500 ms class, cost concentrates on long inputs, the
+512-token blind spot closes, single-window inputs fit NFR-P-002 with margin. What changed is that the
+bound case is now measured **at** the bound (53 windows, 4054 tokens) instead of 22 tokens short of
+it, and every label is derived. The re-measurement was required because the row's *subject* changed:
+a corrected label on a 52-window measurement would still not be a measurement of the bound.
+
+**Why the re-measured figures differ slightly from the withdrawn ones.** They are a different run on
+the same host: ~2-4% lower across the ladder, within the ~26% run-to-run band the correction above
+already discloses. The new run also carries provenance the old one could not: a clean code stamp
+(`445ca31dd087`), a certified-quiet host stamp (**0.6 / 0.94 / 0.98**, `QUIET`), **0 contamination
+signals** from `spike_window_latency.contamination_signals`, and **n=40 at every ladder rung** — the
+last of which matters more than it looks. The old artifact ran reduced reps at its four largest rungs,
+where `_percentiles_are_distinct(10)` is False: `int(0.95·9)` and `int(0.99·9)` are both 8, so those
+rows' "P99" was `samples[8]`, the second-worst of ten, wearing a P99 label. The figures were real; the
+**percentile they claimed was not**. The symptom was visible and had been dismissed — a bound-case
+"P99" that moved 10.9% between two runs whose P50s agreed to 1.2%.
+
+**Guards, so the harness cannot reproduce the defect.** (1) `spike_window_latency` refuses to run if
+`coverage_tokens(max(WINDOW_COUNTS)) < POLICY_BOUND_TOKENS` — an import-time assertion, so an
+under-covering ladder cannot be measured, let alone published. (2) `tests/test_window_coverage.py`
+asserts every published label equals the formula's output, and that the artifact's top rung is 53 and
+not 52. (3) ADR-034 Part C's exact-count rule is pinned by a test that the detector's window count at
+the policy bound covers every token, leaving no unscanned tail. (4) `eval/check_derivations.py`
+re-derives every derivation-claiming figure in ADR-032/034 from the artifact and is a pytest gate, so
+CI fails on a figure whose stated derivation does not produce it.
+
+**M-31 is vindicated, and the vindication is the point.** M-31 recorded that Part C's original
+character-upper-bound clause was *"never checked against real text before being written down."* The
+same sentence describes this defect exactly: a coverage label never checked against the geometry it
+claimed to express. Both were sound-looking arithmetic that no one evaluated at the bound.
+
+**Pattern observation, recorded because it has now happened twice in two sessions.** In both cases the
+*measurement* falsified the *written text*, not the reverse — and in both cases the written text was
+internally plausible and had survived review. The defect class is **"a figure described by a
+derivation it doesn't come from"**, and its instances here are: coverage labels sourced from filler
+token counts; unresolved percentiles published as P99; Part B's tokenization table, which no script in
+this repo measured when it was published; `4080` labelled "bound" when it is 54 windows; and a ratio
+re-derived from a different rung than the two cells beside it. The lesson is not "review harder" — all
+of these passed review. It is that a derivation claim must be **executable**, which is why the guard
+this correction lands is a script and not a convention. A third instance was found by the correction's
+own re-measurement and is filed as
+`[D1-batch-4-justification-falsified-at-the-corrected-bound]` (MAJOR, open).
+
 ### Budget respecification (04 §2 / NFR-P-002)
+
+> ⚠ **Bullet 1's justification is under an OPEN deviation and is NOT re-cited by Correction 1.**
+> `[D1-two-window-budget-breach-not-reproduced-on-the-clean-artifact]` (MAJOR, filed
+> 2026-08-29, unruled) was raised by Correction 1's own re-measurement, one rung below the batch-4
+> filing. On the clean artifact two windows measure **24.76 ms P99** (sequential; batched 22.53) —
+> **under** the 25 ms budget in both columns, with the first breach at **4** windows. This flips a
+> **verdict**, not a figure, which is why the bullet is marked rather than corrected: restating it
+> would self-approve a deviation (AGENTS.md §5.4). The margin is 0.24 ms (1.0%), far inside the
+> ~26% run-to-run band this same ADR discloses, so whether the scope boundary moves is a
+> specification call. **The scoping decision itself is not contested and nothing in code depends on
+> the falsified half** — `ceiling_ms` floors the single-window case at `nominal_ms` and no test pins
+> 25.13. Only this bullet and the two-window breach claim are blocked.
 
 - **NFR-P-002's <25 ms is scoped to single-window inputs** (≤104 tokens), where it is measured to
   hold at 13.01 ms P99. The boundary is not a conservative choice — it is exactly where the
@@ -1451,7 +1567,8 @@ ceiling_ms(n_windows) = max(25.0, envelope_ms(n_windows) x 2.0)
 ```
 
 floored at the flat **25 ms** for single-window inputs, where NFR-P-002 is scoped and measured to
-hold (13.01 ms P99). The ceiling's meaning changes with its shape: it now says **"materially slower
+hold (**12.59 ms P99**, worst of both columns at the 1-window rung — Correction 1; the withdrawn run
+read 13.01). The ceiling's meaning changes with its shape: it now says **"materially slower
 than its own measured envelope"** — a genuine anomaly worth a `DetectorTimeout` — instead of
 "longer than one window's budget", which was a statement about input length wearing a budget's
 clothes.
@@ -1469,11 +1586,17 @@ so it is recorded rather than left to the implementation:
 
 | basis | per-window P99 | ceiling at 2 windows | actual cost at 1 thread | verdict |
 |---|---|---|---|---|
-| 6 threads (optimistic) | 12.56 ms | ~50 ms | 102.56 ms | **trips by contention alone** |
-| 1 thread (pessimistic) | 51.28 ms | ~205 ms | 102.56 ms | holds |
+| 6 threads (optimistic) | 12.38 ms | ~50 ms | 102.09 ms | **trips by contention alone** |
+| 1 thread (pessimistic) | 51.05 ms | ~204 ms | 102.09 ms | holds |
+
+Both per-window figures are the **P99 at the 2-window rung**, halved — same rung, same percentile, so
+the two cells are comparable and the ratio below is derivable *from them*. Stating the rung is the
+point: the withdrawn version of this paragraph quoted a ratio taken from the **1-window** rung while
+displaying the 2-window cells (50.55 / 13.01 = 3.89), which is exactly the defect class Correction 1
+exists to remove — a figure described by a derivation it does not come from.
 
 **The envelope is grounded on the 1-thread column.** A ceiling built on the 6-thread figures is
-*below* the 1-thread cost at every window count — the ratio is **3.9x**, not within a 2x safety
+*below* the 1-thread cost at every window count — the ratio is **4.12x** (51.05 / 12.38, both the P99 at the 2-window rung), not within a 2x safety
 factor — so it would re-introduce the exact pathology this ADR exists to remove, merely relocated
 from "any long input" to "any long input on a contended host". A gateway is a concurrent server, so
 that is the normal operating case and not an edge. Choosing the conservative column is also the
@@ -1486,15 +1609,25 @@ disclosure that Tier-2 figures are low-concurrency figures is unchanged.
 
 **ADR-032's entire published series times `sess.run` only** — tokenization sits outside the clock at
 `eval/spike_window_latency.py:144`, as its own Correction section states. A detector pays both. The
-envelope therefore carries a tokenization term, measured on this host with the spike's own synthetic
+envelope therefore carries a tokenization term. **When this table was first published, no script in this repo
+measured it** — the figures were asserted, and they were wrong by ~3x. `eval/spike_window_latency.py`
+now times the windowing pass (`_time_tokenize`, wrapping the same `_tokenize_windows` call the ladder
+feeds from, so the figure covers the code a detector actually runs), and the table below is re-cited
+from `reports/spike_window_latency.json` — measured on this host with the spike's own synthetic
 filler and the same tokenizer (`madhurjindal/Jailbreak-Detector`, `AutoTokenizer`, window 104 /
-overlap 26 / `padding="max_length"`, n=40):
+overlap 26 / `padding="max_length"`, n=40, 6 threads, code `445ca31dd087` on a `QUIET` host):
 
 | input | windows | tokenize + window P50 / P99 |
 |---|---|---|
-| 178 tokens | 2 | 1.17 / 1.59 ms |
-| 633 tokens | 8 | 4.28 / 4.92 ms |
-| 4080 tokens | bound | 24.34 / 27.33 ms |
+| 178 tokens | 2 | 0.37 / 0.41 ms |
+| 634 tokens | 8 | 1.49 / 1.83 ms |
+| 4000 tokens | 53 | 7.65 / 8.22 ms |
+
+The bottom row **is** the policy bound: 4000 tokens is `per_request_max_tokens` and 53 windows is what
+covers it (Correction 1). The withdrawn version of this table labelled its bottom row
+**"4080 tokens | bound"**, wrong twice over — 4080 tokens needs **54** windows, so that row was neither
+the bound nor labelled with a window count at all. The 1-thread column is within noise of this one
+(0.38 / 1.50 / 7.83 P50), as expected: the windowing pass is single-threaded Python either way.
 
 This is **not** a contradiction of ADR-032: no doc claims the two spans are equal, and 06 §4 defines
 `input_hold_ms` as "ingress + input-lane time", which includes tokenization by construction. It is a
