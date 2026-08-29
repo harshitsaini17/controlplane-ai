@@ -35,14 +35,15 @@ from controlplane.audit.records import serialize_detectors
 from controlplane.detectors import numeric_claims as numeric_claims_mod
 from controlplane.detectors import tier1_patterns
 from controlplane.detectors.base import (
-    BUDGETS_MS,
     Detector,
     DetectorContext,
     DetectorFailure,
     Signal,
     Stage,
+    ceiling_ms,
     run_with_budget,
 )
+from controlplane.detectors.windowing import windows_for_tokens
 from controlplane.gateway.ingress import ResolvedRequest
 from controlplane.policy.actions import Outcome, apply_input_verdict, apply_verdict, category_of
 from controlplane.policy.engine import (
@@ -128,6 +129,29 @@ def lane_members(stage: Stage) -> tuple[str, ...]:
     if stage is Stage.OUTPUT_FULL:
         return LANES[Stage.OUTPUT_SENTENCE] + LANES[Stage.OUTPUT_FULL]
     return LANES.get(stage, ())
+
+
+def backstop_units(request: ResolvedRequest) -> int:
+    """Window count the runner sizes its ceiling for — ADR-034 Part C's coarse backstop.
+
+    Derived from the policy's `budget.per_request_max_tokens`, deliberately, and that choice is
+    the whole of Part C's correction. Two rejected alternatives:
+
+    * **The exact count.** Requires tokenizing, and the runner tokenizing would mean the input is
+      tokenized twice per request. Part C rules the *detector* owns the exact envelope, computed
+      from its single tokenization pass, and raises `DetectorTimeout` itself.
+    * **A character upper bound.** Sound for WordPiece (`n_tokens <= n_chars`) and the clause's
+      first draft, withdrawn on measurement: chars/token runs 1.00 to 800 against a corpus median
+      of 4.29, so at the bound a ~5.5 s envelope becomes a ~24 s ceiling on typical text (M-31).
+      It also fails outright under byte-level BPE, so it would break silently on a checkpoint swap.
+
+    So this is the *policy bound*, not the request's length: a hard number the gateway already
+    holds and can read for free. It over-provisions on short inputs by design — the tier that
+    fires on a merely-slow detector is inside the detector, and this one only catches a hung one.
+    Reading the request's own length here would look tighter and be unsound, since the runner
+    cannot know the token count without paying for it.
+    """
+    return windows_for_tokens(request.policy.budget.per_request_max_tokens)
 
 
 def expected_for(stage: Stage, request: ResolvedRequest) -> tuple[str, ...]:
@@ -269,6 +293,9 @@ async def run_lane(
     failures: list[DetectorFailureRecord] = []
     latency: dict[str, float] = {}
 
+    # Once per lane, not per detector: it depends on the policy, which is fixed for the request.
+    units = backstop_units(request)
+
     for name in expected_for(stage, request):
         detector = LIVE.get(name)
         if detector is None:
@@ -277,7 +304,12 @@ async def run_lane(
 
         started = time.perf_counter()
         try:
-            produced = await run_with_budget(detector, ctx, BUDGETS_MS[name])
+            # `ceiling_ms`, never `BUDGETS_MS[name]`: a parametric entry is an object, and
+            # indexing the mapping here handed it straight to `wait_for` — which surfaced as
+            # `DetectorError: raised TypeError` on the first multi-window detector to go live,
+            # a budget breach wearing a detector fault's clothes. Flat entries are unaffected by
+            # `units`, so one call site serves both kinds (ADR-034 Part C).
+            produced = await run_with_budget(detector, ctx, ceiling_ms(name, units))
         except DetectorFailure as exc:
             failures.append(
                 DetectorFailureRecord(

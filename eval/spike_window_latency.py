@@ -51,7 +51,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import platform
 import shutil
@@ -77,57 +76,32 @@ from eval.spike_tier2_models import (  # noqa: E402  (after sys.path)
     build_onnx_session,
     _percentiles_are_distinct,
 )
+from controlplane.detectors.windowing import (  # noqa: E402  (after sys.path)
+    WINDOW_CONTENT_TOKENS,
+    WINDOW_OVERLAP,
+    WINDOW_STEP,
+    WINDOW_TOKENS,
+    coverage_tokens,
+    windows_for_tokens,
+)
 
 #: The pick ADR-031 bound for the input stage. Windowing is an `input`-lane concern only:
 #: `tier2_toxicity` reads output sentences, which the segmenter caps at 240 characters.
 MODEL_ID = "madhurjindal/Jailbreak-Detector"
 
-#: Window length in tokens, INCLUDING the tokenizer's two special tokens — this is the value
-#: handed to `max_length`, so 104 here means 102 tokens of content. ADR-031 measured this length
-#: at 14.27 / 22.80 ms, inside the 25 ms budget; 158 tokens breached at 33.57.
-WINDOW_TOKENS = 104
-
-#: Overlap in tokens (HF `stride`). 25% of the window per the ruling, making the step 76.
-WINDOW_OVERLAP = 26
+#: The window geometry now lives in **production** code and is imported, not restated
+#: (`controlplane/detectors/windowing.py`). The detector and the runner both need it, neither
+#: may import this harness (it pulls the `ml` stack), and a second copy of `102 + (n-1) * 76`
+#: is the defect this workstream keeps finding. Re-exported below so every existing importer
+#: — `tests/`, `eval.check_derivations` — keeps working and transitively reads one definition.
+#:
+#: Measurement depends on production, never the reverse.
 
 #: 04 §3 `budget.per_request_max_tokens`. The ruling designates this the input bound and item 4
 #: makes lowering it the per-use-case latency ceiling, so the published worst case sits here.
+#: Stays in the harness: it is which bound we chose to *publish* a worst case for. Production
+#: reads the real one per use case from policy config.
 POLICY_BOUND_TOKENS = 4000
-
-#: Content tokens per window — `WINDOW_TOKENS` less the tokenizer's two special tokens.
-WINDOW_CONTENT_TOKENS = WINDOW_TOKENS - 2
-
-#: Token step between consecutive window starts. Derived, never written down twice.
-WINDOW_STEP = WINDOW_CONTENT_TOKENS - WINDOW_OVERLAP
-
-
-def coverage_tokens(n_windows: int) -> int:
-    """Content tokens spanned by `n_windows` strided windows. THE definition (ADR-032 §C1).
-
-    `102 + (n-1) * 76`. Every published coverage label derives from here.
-
-    ADR-032 **Correction 1** exists because the original table labelled its rungs from the
-    *filler's* token count — the whole synthetic text — rather than from what the sliced
-    windows actually span. The two coincide only while the filler is short. At the top rung
-    they diverged: 4082 claimed against 3978 spanned, so the published bound case claimed a
-    coverage it did not have, contradicting the ADR's own full-coverage guarantee. A label
-    that is computed cannot drift from the geometry it describes; one that is observed can.
-    """
-    return 0 if n_windows < 1 else WINDOW_CONTENT_TOKENS + (n_windows - 1) * WINDOW_STEP
-
-
-def windows_for_tokens(n_tokens: int) -> int:
-    """Windows needed to cover `n_tokens` — the inverse of `coverage_tokens`.
-
-    This is what ADR-034 Part C has the detector compute from its own single tokenization
-    pass, so the harness and the detector agree by construction rather than by coincidence.
-    Verified against the live tokenizer at 3978 / 4000 / 4080 tokens (52 / 53 / 54 windows,
-    no unscanned tail in any case).
-    """
-    if n_tokens <= WINDOW_CONTENT_TOKENS:
-        return 1
-    return 1 + math.ceil((n_tokens - WINDOW_CONTENT_TOKENS) / WINDOW_STEP)
-
 
 #: Windows needed for FULL coverage of the policy bound: 53, not 52.
 #:

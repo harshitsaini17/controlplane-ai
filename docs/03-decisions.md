@@ -843,7 +843,7 @@ non-streaming pipeline that NFR-P-001 never covered.
 
 02 §3 has always said per-sentence detectors run concurrently (`asyncio.gather`).
 `pipeline.run_lane` is sequential, and that was a *measurement* decision documented at
-`pipeline.py:212`: with three regex detectors at ~0.2 ms each, `gather` cannot overlap CPU-bound
+`run_lane`'s docstring records why: with three regex detectors at ~0.2 ms each, `gather` cannot overlap CPU-bound
 work on one event loop and would only make each detector's recorded `latency_ms` include the
 others'.
 
@@ -1332,7 +1332,7 @@ window."* Two errors, corrected here rather than by rewriting a filed report:
 - **11.30 is not the conservative figure**; it is the *faster* of the two, so it understates
   per-window cost.
 - **The gap is not a synthetic-vs-real content effect.** Both harnesses time `sess.run` only, with
-  tokenization outside the clock (`spike_window_latency.py:144`, `spike_tier2_models.py:381`), and
+  tokenization outside the clock (`spike_window_latency._time_calls`, and the `t0` immediately before `sess.run` in `spike_tier2_models`), and
   at a fixed 104-token tensor shape a BERT-class encoder's FLOPs do not depend on which tokens
   fill it. Identical work measured at 11.30 and 14.27 ms in two separate runs is **run-to-run
   variance (~26%)** — thermal state, background load, a separate quantization pass — and is
@@ -1588,8 +1588,9 @@ JSON view), 05 §5 (the metric), 08 (deviation closed).
 an execution-vehicle ruling that is deliberately generic rather than injection-specific.
 
 **Context.** The deviation found that 04 §2 budgets `tier2_injection` **per 104-token window** while
-`BUDGETS_MS` is a flat per-call scalar handed straight to `asyncio.wait_for` at
-`controlplane/gateway/pipeline.py:280` — so a detector *specified* to take ~651 ms at the
+`BUDGETS_MS` is a flat per-call scalar which `run_lane` then handed straight to
+`asyncio.wait_for` (it now resolves a ceiling through `ceiling_ms`, which is what Part C below
+rules) — so a detector *specified* to take ~651 ms at the
 `per_request_max_tokens: 4000` bound is *enforced* at 25 ms. It further measured that the two viable
 detector shapes fail in opposite directions: a loop-yielding implementation is cancelled at 25 ms,
 while a loop-blocking one passes by stalling the event loop for the full duration. There is no third
@@ -1680,7 +1681,8 @@ disclosure that Tier-2 figures are low-concurrency figures is unchanged.
 #### Tokenization is inside the ceiling, and it is not inside ADR-032's table
 
 **ADR-032's entire published series times `sess.run` only** — tokenization sits outside the clock at
-`eval/spike_window_latency.py:144`, as its own Correction section states. A detector pays both. The
+`eval.spike_window_latency._time_calls`, whose timed `one_pass` calls `sess.run` and nothing else, as its own
+Correction section states. A detector pays both. The
 envelope therefore carries a tokenization term. **When this table was first published, no script in this repo
 measured it** — the figures were asserted, and they were wrong by ~3x. `eval/spike_window_latency.py`
 now times the windowing pass (`_time_tokenize`, wrapping the same `_tokenize_windows` call the ladder
@@ -1710,7 +1712,7 @@ figure this repo publishes states which spans it covers.**
 ### Part C — `BUDGETS_MS` grows a shape for parametric entries
 
 `BUDGETS_MS` values become `float | ParametricBudget`, where a parametric entry resolves a ceiling
-from a window count. `pipeline.py:280` consumes the resolved value; every other entry stays a flat
+from a window count. `run_lane` consumes the resolved value via `ceiling_ms(name, units)`; every other entry stays a flat
 float and every existing call site is unchanged. **04 §2 records both halves** — the per-window
 budget the detector enforces internally, and the parametric runner ceiling — because the deviation's
 central finding was that a doc stating one of them while the code enforced the other is how the
@@ -1754,7 +1756,7 @@ tokenization to read. So the two tiers become: an **exact** envelope check insid
 rather than approximate.
 
 This keeps the ruling's stated shape intact — `BUDGETS_MS` values are `flat float | parametric on
-window_count`, consumed at `pipeline.py:280` — and changes only *who* supplies the count. Logged as a
+window_count`, consumed by `run_lane` through `ceiling_ms` — and changes only *who* supplies the count. Logged as a
 MINOR resolution in `08` per AGENTS.md §11.1, since it is an implementation-level correction inside a
 contract this ADR itself settles.
 
