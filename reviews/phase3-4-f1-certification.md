@@ -88,6 +88,12 @@ every published figure in `reports/` was measured on.
 still pins the current key set. That transition is Phase-5 work and will update the pin
 atomically, in one commit, citing F2.
 
+**F2 closed 2026-08-30**, as this paragraph anticipated and by the route it named for one
+half: the rename emitted in `ab06917` with the pin re-pointed in that same commit. The other
+half closed by **specification correction** instead — ADR-030 Amendment 1 re-sited
+`added_time_to_last_byte_ms` to 06 §4 as a benchmark-client figure, because no gateway
+vantage for it exists. Full note in `reviews/phase3-4-review.md` F2.
+
 **Standing consequence:** these gates now run per-push. `.github/workflows/ci.yml` (M-21)
 executes this exact sequence on py3.12 and py3.14, so the class of uncertainty F1 identified —
 "passes on the author's machine" being indistinguishable from "passes" — is closed structurally
