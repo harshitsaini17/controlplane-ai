@@ -144,7 +144,12 @@ def test_the_ceiling_is_still_a_ceiling(monkeypatch: pytest.MonkeyPatch) -> None
     assert ceiling < 50.0, f"scaled fixture is not cheap enough to sleep past: {ceiling} ms"
 
     result = _run_input_lane(_Sleeper(ceiling + 50.0), monkeypatch)
-    assert [f.error_class for f in result.failures] == ["DetectorTimeout"], (
+    # `DetectorHang`, not `DetectorTimeout`, since ADR-036: `_Sleeper` awaits, so it consumes no
+    # attributable CPU and cannot breach an NFR-P-002 budget. The property under test is
+    # unchanged and is the whole point of the test — the parametric ceiling still *stops* a
+    # detector that runs past its envelope. Only the name of the finding moved, and it moved
+    # toward the truth: this detector did not overrun a budget, it failed to come back.
+    assert [f.error_class for f in result.failures] == ["DetectorHang"], (
         f"a detector past its envelope was not stopped: {result.failures}"
     )
 

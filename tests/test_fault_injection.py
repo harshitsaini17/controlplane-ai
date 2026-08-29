@@ -40,35 +40,35 @@ def text():
 # ---------------------------------------------------------------------------
 
 
-def test_tier2_is_not_yet_injectable() -> None:
-    """★ Pins the substitution the report declares: SC-3 runs on `performance`, not `tier2`.
+def test_tier2_carries_sc3_on_the_class_the_docs_name() -> None:
+    """★ SC-3 runs on `tier2`, the class 06 §5 and 07 beat 7 both name. Substitution retired.
 
-    06 §5 and 07 beat 7 both name `tier2`. No tier2 detector is *faultable*, so no tier2 fault
-    can be injected — the report says so, and this is what keeps that statement true rather
-    than merely written down once.
+    **Re-pointed twice, and this is the third and final form.** It first read "no tier2 detector
+    is live" and fired when `tier2_injection` shipped; re-pointed to "no tier2 detector is
+    *faultable*" — true for a narrower reason, since `tier2_injection` runs at `Stage.INPUT` and
+    faults inject only at `FAULT_STAGES`. It fired again when `tier2_toxicity` landed in
+    `OUTPUT_SENTENCE`, exactly as its own instructions said it would, and those instructions are
+    now carried out: 07 beat 7 needed no edit (it always said `--inject-fault tier2` — the harness
+    was the side that deviated), and the report's scope section names `tier2`.
 
-    **Re-pointed once already, and the reason it asserts matters.** It first read "no tier2
-    detector is live" and fired exactly as designed when `tier2_injection` shipped. The
-    substitution nonetheless still stands, for a narrower reason: `tier2_injection` runs at
-    `Stage.INPUT` only, and faults are injected at `FAULT_STAGES` (the OUTPUT stages), because
-    an input-lane fault short-circuits before dispatch — a different verdict path from the
-    response-in-flight case 06 §5 asserts about. So the condition is now *faultable*, not
-    *live*, which is the honest form: being live was never sufficient.
-
-    **This test is meant to fail when a faultable tier2 detector lands** — `tier2_toxicity`
-    sits in `OUTPUT_SENTENCE`, so it will trip this the moment it goes live. That failure is the
-    signal to re-point 07 beat 7 and the report's scope section at `tier2`, the class the docs
-    actually specify. Do not delete it to get green — deleting it silently makes a
-    documented-as-temporary substitution permanent, and the report would go on citing a test
-    that no longer exists.
+    **The assertion is inverted, which is the point.** For two phases this test guarded against a
+    temporary substitution becoming permanent. That risk is gone; the opposite one replaces it —
+    tier2 silently *losing* its carrier and SC-3 sliding back onto `performance` without anyone
+    noticing. So it now fails if tier2 is not carried, and additionally requires the carrier to be
+    among the faultable tier2 detectors: a carrier that cannot actually be faulted would let the
+    report claim a fault it can never inject, which is the over-reporting failure
+    `test_a_live_tier2_detector_is_not_silently_counted_as_covering_tier2` exists for.
     """
     tier2 = [d for d, c in DETECTOR_FAIL_CLASS.items() if c == "tier2"]
     assert tier2, "the 04 §2 registry must still declare tier2 detectors"
     faultable = [d for d in tier2 if d in fi.faultable()]
-    assert faultable == [], (
-        f"tier2 detector(s) {faultable} are now faultable — 06 §5's own class can carry SC-3. "
-        "Re-point 07 beat 7 and eval/fault_injection.py's scope section at `tier2`, then update "
-        "this test to assert the real thing rather than the substitution."
+    assert faultable, (
+        "no tier2 detector is faultable, so SC-3 has silently fallen back to the `performance` "
+        "substitution this test was re-pointed to retire. 06 §5 and 07 beat 7 both name `tier2`."
+    )
+    assert fi.class_carriers().get("tier2") in faultable, (
+        f"tier2 is carried by {fi.class_carriers().get('tier2')!r}, which is not among the "
+        f"faultable tier2 detectors {faultable} — the report would claim a fault it cannot inject"
     )
 
 
@@ -91,8 +91,8 @@ def test_the_report_only_cites_tests_that_exist() -> None:
     """A scope note naming a nonexistent test is worse than no scope note (AGENTS.md §7)."""
     source = (ROOT / "eval" / "fault_injection.py").read_text()
     mine = (ROOT / "tests" / "test_fault_injection.py").read_text()
-    assert "test_tier2_is_not_yet_injectable" in source
-    assert "def test_tier2_is_not_yet_injectable" in mine
+    assert "test_tier2_carries_sc3_on_the_class_the_docs_name" in source
+    assert "def test_tier2_carries_sc3_on_the_class_the_docs_name" in mine
 
 
 # ---------------------------------------------------------------------------
@@ -113,17 +113,30 @@ def test_class_carriers_are_derived_from_the_live_registry() -> None:
 
 
 def test_a_new_live_detector_changes_coverage_without_a_source_edit(monkeypatch) -> None:
-    """Proves derivation rather than asserting it: inject a tier2 detector, see it appear."""
-    assert "tier2" not in fi.class_carriers()
+    """Proves derivation rather than asserting it: a detector appears, coverage follows.
+
+    **Re-pointed by ADR-036's sweep.** It used to assert `"tier2" not in class_carriers()` and
+    then monkeypatch a fake in — a precondition that stopped being true the moment
+    `tier2_toxicity` went live, so the test failed for a reason unrelated to what it asserts.
+    The absent-to-present structure is what has the evidentiary value, so it is preserved by
+    *removing* the real carrier first rather than by finding a class that happens to be empty:
+    `cost` is empty but its detectors sit in no `FAULT_STAGES` lane (04 §2), so faking one there
+    would fabricate lane membership the spec denies and prove nothing about derivation.
+    """
+    carrier = fi.class_carriers()["tier2"]
+    monkeypatch.delitem(pipeline.LIVE, carrier)
+    assert "tier2" not in fi.class_carriers(), (
+        "with the only tier2 carrier removed, coverage must report the class as absent"
+    )
 
     class Fake:
-        name = "tier2_toxicity"
+        name = carrier
 
         async def detect(self, ctx):
             return []
 
-    monkeypatch.setitem(pipeline.LIVE, "tier2_toxicity", Fake())
-    assert fi.class_carriers().get("tier2") == "tier2_toxicity"
+    monkeypatch.setitem(pipeline.LIVE, carrier, Fake())
+    assert fi.class_carriers().get("tier2") == carrier
 
 
 def test_every_class_with_no_carrier_is_absent_rather_than_empty() -> None:
@@ -332,19 +345,22 @@ def test_the_report_carries_no_response_text(tmp_path) -> None:
 
 
 def test_the_report_states_the_class_substitution(tmp_path) -> None:
-    """The scope note is the honest half of using `performance` where docs say `tier2`.
+    """The scope note must record that the `performance` substitution is retired, not silent.
 
     Asserted structurally rather than by quoting prose: a phrase match would break on any
-    rewording while saying nothing about whether the report is actually honest. What must hold
-    is that `tier2` is named, that it is shown as having no live carrier, and that the tripwire
-    is cited — the three things a reader needs to know the substitution was deliberate.
+    rewording while saying nothing about whether the report is actually honest. What must hold is
+    that `tier2` is named, that its live carrier is named, that the retirement is stated, and
+    that the guard is cited — a reader who saw the old note needs to see the change, since a
+    report that quietly stops mentioning a two-phase caveat is indistinguishable from one whose
+    caveat still applies.
     """
     out = tmp_path / "f.md"
     fi.main(["--out", str(out)])
     body = out.read_text()
     assert "tier2" in body
-    assert "none live" in body, "the coverage table must show tier2 has no carrier"
-    assert "test_tier2_is_not_yet_injectable" in body
+    assert "`tier2_toxicity`" in body, "the coverage table must name the live tier2 carrier"
+    assert "substitution is retired" in body
+    assert "test_tier2_carries_sc3_on_the_class_the_docs_name" in body
 
 
 def test_the_report_shows_configured_modes_for_unexercisable_classes(tmp_path, store) -> None:

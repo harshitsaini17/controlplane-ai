@@ -36,6 +36,7 @@ from controlplane.detectors import entity_enricher
 from controlplane.detectors import numeric_claims as numeric_claims_mod
 from controlplane.detectors import tier1_patterns
 from controlplane.detectors import tier2_injection as tier2_injection_mod
+from controlplane.detectors import tier2_toxicity as tier2_toxicity_mod
 from controlplane.detectors.base import (
     Detector,
     DetectorContext,
@@ -66,6 +67,7 @@ LIVE: dict[str, Detector] = {
     "tier1_blocklist": tier1_patterns.tier1_blocklist,
     "numeric_claims": numeric_claims_mod.numeric_claims,
     "tier2_injection": tier2_injection_mod.tier2_injection,
+    "tier2_toxicity": tier2_toxicity_mod.tier2_toxicity,
 }
 
 #: 04 §2 Stage column, transcribed. Order within a stage is the table's order, so a
@@ -336,7 +338,10 @@ async def run_lane(
         except DetectorFailure as exc:
             failures.append(
                 DetectorFailureRecord(
-                    detector=name, error_class=exc.error_class, stage=stage
+                    detector=name,
+                    error_class=exc.error_class,
+                    attributable_ms=exc.attributable_ms,
+                    stage=stage,
                 )
             )
         else:

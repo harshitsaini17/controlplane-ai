@@ -77,8 +77,11 @@ CREATE TABLE audit_records (
                                 -- PURE Signals: a detector fault is never one (ADR-027)
   detector_failures_json TEXT,  -- list[DetectorFailureRecord] per 04 §5 (ADR-027):
                                 -- {failure_id, detector, error_class, stage,
-                                --  fail_mode_applied, ts}. Operational events, not
-                                -- content risks: no span, no plane, no label, no text
+                                --  fail_mode_applied, ts, attributable_ms}. Operational
+                                -- events, not content risks: no span, no plane, no label,
+                                -- no text. `attributable_ms` = measured in-thread execution
+                                -- (ADR-036 item 4), null when unmeasured; a duration is not
+                                -- content, so NFR-SEC-001 does not reach it
   -- The §4.3 step-5 stamp (ADR-027 Amendment 1). JSON arrays of ids; `[]` when none
   -- contributed, NEVER NULL — `[]` is the fact "nothing did", NULL would say "we did
   -- not record". STORED, not derived: see the note below the table for why.
@@ -174,7 +177,8 @@ section specifies, and it is unchanged by which detectors happen to be implement
                "score":0.41,"stage":"output_full","latency_ms":38.2}],
   "detector_failures": [{"failure_id":"…","detector":"tier2_toxicity",
                          "error_class":"DetectorTimeout","stage":"output_full",
-                         "fail_mode_applied":"fail_closed","ts":"…"}],
+                         "fail_mode_applied":"fail_closed","ts":"…",
+                         "attributable_ms":27.4}],
   "contributing_signal_ids": ["…"], "failure_record_ids": ["…"],
   "actions": {"quarantined": true, "review_id":"…",
               "input_redactions": [{"stage":"input","category":"pii.ssn",

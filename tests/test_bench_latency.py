@@ -404,13 +404,27 @@ def test_unexercised_budgets_are_reported_as_untested_not_met(batch):
 
 
 def test_faults_are_counted_and_absent_means_zero(batch):
-    """The per-detector table's `Faults` column exists, and a clean run reports 0.
+    """The per-detector table's `Faults` column exists, and a detector with no faults reports 0.
 
     Absent-means-zero is legitimate here and only here: a detector with latency observations
     demonstrably ran, so "no fault series" can only mean no fault. Contrast the latency table,
     where absent means never-checked.
+
+    **Asserted `detector_faults(batch) == {}` until ADR-036.** That was a precondition about the
+    host, not the claim in this test's name: `tier2_toxicity` genuinely breaches its 25 ms budget
+    when the suite competes for CPU, because ORT's calling thread spin-waits on its intra-op pool
+    and its attributable CPU rises with contention (measured p50 11.98 ms quiet, 26.04 ms under
+    load). Per AGENTS.md §7 that measurement stands; the harness is not made clean to satisfy a
+    test. Re-anchored on `tier1_pii` — a regex detector that runs on every request and touches no
+    pool — the property is exercised against a **mixed** mapping rather than an empty one, which
+    is strictly more coverage: it now proves that *this* detector's absence reads as zero while
+    another detector's faults are present, the case an empty dict could never distinguish. A
+    regression that made absence render blank, or that mislabelled the column, still fails here.
     """
-    assert bl.detector_faults(batch) == {}
+    faults = bl.detector_faults(batch)
+    assert "tier1_pii" not in faults, (
+        f"the absent-means-zero probe needs a fault-free detector; tier1_pii faulted: {faults}"
+    )
     body = bl.render(
         batch, dataset_dir=bl.DATASET_DIR, provenance_note="", cadence_ms=0.5,
         violations=[], live_note="",

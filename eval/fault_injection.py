@@ -9,17 +9,16 @@ fault stamped in `failure_record_ids`)." Both assertions are evaluated here, rea
 the audit record rather than from the HTTP response — the response says what the client saw,
 and 04 §5's claim is about what the system *recorded* about its own failure.
 
-**The class 06 §5 names is not the class that can carry it this phase, and that is stated
-rather than quietly substituted.** §5 and 07 beat 7 both say `tier2`. `tier2_injection` is now
-live, so the original reason for the substitution ("nothing to monkeypatch") no longer holds and
-is superseded: it is an **INPUT-stage** detector (04 §2), and this harness injects faults only at
-`FAULT_STAGES` — see `_Faulty` for why the input lane is a different phenomenon rather than an
-oversight. So a tier2 fault still cannot be injected, for a narrower reason than before.
-`tier2_toxicity` sits in `OUTPUT_SENTENCE` and will carry the class properly when it lands; the
-harness needs no edit for that, only `faultable()` to include it. What *is* faultable is
-`numeric_claims`, whose
-04 §2 class is `performance`, and the shipped policies give it the identical asymmetry the
-beat exists to show:
+**The class 06 §5 names is the class this run carries. The substitution is retired.** §5 and
+07 beat 7 both say `tier2`, and `tier2_toxicity` (OUTPUT_SENTENCE) now carries it. Worth recording
+why the stand-in stood as long as it did, because the second reason was not the first: initially
+no tier2 detector existed to monkeypatch, then `tier2_injection` shipped but runs at **INPUT**
+(04 §2) while this harness injects only at `FAULT_STAGES` — see `_Faulty` for why the input lane
+is a different phenomenon rather than an oversight. The harness needed no edit to close it:
+`faultable()` derives coverage, so a detector landing in an output lane changes the answer by
+itself. `numeric_claims` (04 §2 class `performance`) is still exercised beside it, now as
+corroboration rather than a stand-in, and the shipped policies give both classes the identical
+asymmetry the beat exists to show:
 
     performance:   support_bot fail_open · hr_copilot fail_open · finance_advisor fail_closed
     tier2:         support_bot fail_open · hr_copilot fail_open · finance_advisor fail_closed
@@ -609,19 +608,19 @@ def render(run: Run, dataset_dir: Path, provenance_note: str) -> str:
         "",
         "## Scope and limitations",
         "",
-        f"**06 §5 and 07 beat 7 both name `tier2`; this run carries SC-3 on "
-        f"`{two_sided[0] if two_sided else 'nothing'}` instead.** `tier2_injection` is live, so "
-        "the earlier reason for this substitution (\"nothing to monkeypatch\") no longer applies. "
-        "It is an INPUT-stage detector (04 §2) and faults are injected only at the OUTPUT stages "
-        "(`FAULT_STAGES`), where a fault is a response-in-flight decision rather than a "
-        "short-circuit before dispatch — so a tier2 fault still cannot be injected, for a "
-        "narrower reason. `tier2_toxicity` (OUTPUT_SENTENCE) will carry the class when it lands. "
-        "FR-POL-006 is stated per detector "
-        "*class*, and the class used here has the identical two-sided configuration "
-        "(fail_open on UC-1/UC-2, fail_closed on UC-3), so the requirement is verified on a "
-        "live class rather than asserted on an absent one. "
-        "`test_tier2_is_not_yet_injectable` fails the moment a tier2 detector lands, forcing "
-        "07 beat 7 back into review rather than letting the substitution become permanent.",
+        f"**06 §5 and 07 beat 7 both name `tier2`, and this run carries SC-3 on "
+        f"`{'tier2' if run.carriers.get('tier2') else 'nothing'}` — the substitution is "
+        "retired.** It stood for two phases and for two different reasons: first nothing tier2 "
+        "existed to monkeypatch, then `tier2_injection` shipped but runs at INPUT (04 §2) while "
+        "faults are injected only at the OUTPUT stages (`FAULT_STAGES`), where a fault is a "
+        "response-in-flight decision rather than a short-circuit before dispatch. "
+        f"`{run.carriers.get('tier2', '—')}` (OUTPUT_SENTENCE) closes it, and the harness needed "
+        "no edit: `faultable()` derives coverage rather than listing it. `performance` is still "
+        "shown alongside, now as corroboration rather than a stand-in — FR-POL-006 is stated per "
+        "detector *class*, and two classes with the same two-sided configuration showing the "
+        "same contrast is a stronger result than one. "
+        "`test_tier2_carries_sc3_on_the_class_the_docs_name` holds the line from the other side: "
+        "it fails if tier2 ever stops being carried.",
         "",
         f"**Classes with no live carrier:** {', '.join(f'`{c}`' for c in absent) or 'none'}. "
         "Their `fail_mode` values are still read from config and shown above, so the "

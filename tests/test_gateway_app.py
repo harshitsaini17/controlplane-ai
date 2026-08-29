@@ -527,6 +527,17 @@ def test_streaming_overhead_excludes_token_wait_time(make_client) -> None:
     `total − upstream` the two would be within rounding of each other; the assertion is
     that gateway work is a small fraction of a slow stream, which is the claim NFR-P-001
     actually makes.
+
+    **The stub's cadence was re-anchored by ADR-036's sweep; the tolerance was not touched.**
+    At 20 ms/token this stub produced 60.6 ms of upstream against 68.0 ms of overhead and the
+    test failed — not because the property broke, but because the fixture was calibrated when
+    the sentence lane held one regex detector. `tier2_toxicity` adds ~12 ms per sentence, and
+    this text is three sentences, so the lane legitimately costs ~36 ms more than when the
+    20 ms figure was chosen: 3 x 12 + the pre-existing ~30 = the 68 ms measured. The honest fix
+    is to make the stub stream at a rate a real provider actually streams at — 80 ms/token is
+    within the ordinary range — rather than to relax `upstream / 2`, which is the thing under
+    test. Widening the ratio would have quietly converted "gateway work is a small fraction of
+    a slow stream" into "gateway work is comparable to it" while still reporting as a pass.
     """
     import asyncio
 
@@ -534,7 +545,7 @@ def test_streaming_overhead_excludes_token_wait_time(make_client) -> None:
 
     async def slow(messages, **kw):
         for word in stub.text.split(" "):
-            await asyncio.sleep(0.02)
+            await asyncio.sleep(0.08)
             yield word + " "
 
     stub.stream_text = slow

@@ -26,6 +26,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 import asyncio
+import contextvars
 import re
 import time
 import uuid
@@ -52,7 +53,9 @@ __all__ = [
     "Detector",
     "DetectorError",
     "DetectorFailure",
+    "DetectorHang",
     "DetectorTimeout",
+    "HANG_BACKSTOP_FACTOR",
     "Plane",
     "ScoreKind",
     "Signal",
@@ -134,8 +137,15 @@ class DetectorFailure(Exception):
     taxonomy). Its resolution is the policy's `fail_mode` for that detector's class —
     never a decision made here."""
 
-    def __init__(self, detector: str, message: str = "") -> None:
+    def __init__(
+        self, detector: str, message: str = "", attributable_ms: float | None = None
+    ) -> None:
         self.detector = detector
+        #: In-thread execution measured for this call, or None when nothing measured it
+        #: (a non-pool detector, or a backstop abandonment whose worker had not returned).
+        #: ADR-036 item 4: recorded so a real breach and a scheduling artifact stay
+        #: distinguishable in the audit forever. A duration is not content (NFR-SEC-001).
+        self.attributable_ms = attributable_ms
         super().__init__(message or f"{type(self).__name__} in detector {detector!r}")
 
     @property
@@ -150,6 +160,19 @@ class DetectorFailure(Exception):
 
 class DetectorTimeout(DetectorFailure):
     """Detector exceeded its NFR-P-002 budget. Raised by `run_with_budget`."""
+
+
+class DetectorHang(DetectorFailure):
+    """The wall-clock **hang backstop** fired: the call did not return within 2x its ceiling.
+
+    Deliberately NOT a `DetectorTimeout`. ADR-036 binds NFR-P-002 to detector-attributable
+    time, so a detector that sat in a pool queue has not breached its budget — but a call that
+    never returns still has to be survivable, and `wait_for` is the only thing that can end it.
+    The two are different findings and 04 §5 records them as different `error_class` values:
+    `DetectorTimeout` says "this detector spent too long executing", `DetectorHang` says "this
+    call did not come back". Collapsing them would rebuild exactly the misattribution ADR-036
+    exists to remove, and would do it invisibly (ADR-034 Part B's genuine-anomaly framing).
+    """
 
 
 class DetectorError(DetectorFailure):
@@ -322,9 +345,15 @@ def compose_hold(names: "Iterable[str]") -> float:
 #: inference across concurrent requests, which preserves the one-inference-at-a-time
 #: conditions **SL-5** measured under: a pool that let four requests infer at once would push
 #: per-request parallelism toward ADR-032's 1-thread column, and no figure in this repo
-#: describes that. Queue wait is therefore real wait, and it counts inside the ceiling —
-#: a budget that excluded queueing would measure the detector rather than the hold
-#: NFR-P-001 is about.
+#: describes that.
+#:
+#: **ADR-036 supersedes the sentence that used to stand here** ("queue wait is real wait, and
+#: it counts inside the ceiling"). Queue wait *is* real wait — it simply is not this detector's.
+#: The old reasoning conflated the NFR-P-002 budget with the NFR-P-001 hold: because the hold
+#: must include queueing, the budget was made to include it too. ADR-036 separates them. The
+#: budget binds **detector-attributable** time (in-thread execution); queue wait, GIL contention
+#: and loop scheduling are lane-composition costs and belong to the HOLD series, where ADR-030
+#: Amendment 3 already sums pool users. Nothing is hidden: the hold still measures wall-clock.
 #:
 #: Shared across detectors, not one pool each, for the same reason: two pools would each
 #: believe they had the CPU to themselves.
@@ -347,6 +376,29 @@ def model_executor() -> ThreadPoolExecutor:
         return _MODEL_EXECUTOR
 
 
+#: Multiplier on a detector's ceiling at which the wall-clock **hang backstop** fires.
+#:
+#: Not a budget and not a tolerance: ADR-036 item 3. The NFR-P-002 budget is enforced against
+#: in-thread execution *after* the call returns, which cannot rescue a call that never returns
+#: at all — so `wait_for` stays, retargeted from "the budget" to "something is wrong". 2x is
+#: deliberately loose: anything close to 1x would re-enforce the budget on wall-clock through
+#: the back door, which is the defect ADR-036 removes.
+HANG_BACKSTOP_FACTOR: float = 2.0
+
+#: Per-call sink for in-thread execution time, in ms. `run_with_budget` installs a fresh list
+#: and `run_in_executor` appends to it from inside the worker.
+#:
+#: A ContextVar holding a **mutable** list, which is what makes it survive two boundaries that
+#: a plain value would not: `asyncio.wait_for` runs the detector in a task carrying a *copy* of
+#: this context (the copy holds the same list), and the executor worker inherits no context at
+#: all (the closure captures the object before the hop). `list.append` from the worker thread is
+#: atomic under the GIL. `None` means nobody is measuring — a detector called outside
+#: `run_with_budget` must not silently accumulate into a previous call's sink.
+_ATTRIBUTABLE_MS: contextvars.ContextVar[list[float] | None] = contextvars.ContextVar(
+    "cp_attributable_ms", default=None
+)
+
+
 async def run_in_executor(fn: Any, /, *args: Any, detector: str = "") -> Any:
     """Await `fn(*args)` on the shared inference pool. The only sanctioned way to infer.
 
@@ -364,8 +416,38 @@ async def run_in_executor(fn: Any, /, *args: Any, detector: str = "") -> Any:
     countable rather than inferred from a latency histogram (ADR-034 Part A).
     """
     loop = asyncio.get_running_loop()
+    sink = _ATTRIBUTABLE_MS.get()
+
+    def _timed() -> Any:
+        # Clocked HERE, inside the worker, because this span is the only part of the call that
+        # is this detector's own work (ADR-036 item 2). Everything outside it — pool queue wait,
+        # GIL contention with the asyncio detectors sharing the lane, loop scheduling — is
+        # lane composition, and ADR-030 Amendment 3 already charges it to the hold.
+        #
+        # `thread_time`, NOT `perf_counter` — and this is a deliberate departure from the
+        # instrument ADR-036's ruling names in passing (PROVISIONAL, batch review at phase end).
+        # A worker thread's `perf_counter` span counts every microsecond it sits blocked on the
+        # GIL while the asyncio detectors in the same lane run, so it relocates the clock without
+        # isolating anything: measured p50 229.26 ms under lane contention against 12.04 ms on a
+        # quiet loop, and 31.02 ms attributable against 31.3 ms wall-clock in the gateway — the
+        # two are the same number. Enforcing on it produced 18/30 spurious control faults, worse
+        # than the 2/30 that opened the deviation. `thread_time` is per-thread CPU time and
+        # excludes GIL-wait: 26.04 ms under the same contention, 11.98 ms quiet. The ruling's
+        # *intent* is explicit — "scheduling, GIL contention, and pool-queue wait belong to the
+        # HOLD series" — and this is the instrument that achieves it.
+        #
+        # Caveat, recorded rather than smoothed: ORT's calling thread spin-waits on its intra-op
+        # pool, so this figure still rises under real CPU competition (11.98 -> 26.04 ms). It is
+        # detector-attributable CPU, not a contention-free constant.
+        t0 = time.thread_time()
+        try:
+            return fn(*args)
+        finally:
+            if sink is not None:
+                sink.append((time.thread_time() - t0) * 1000.0)
+
     try:
-        return await loop.run_in_executor(model_executor(), fn, *args)
+        return await loop.run_in_executor(model_executor(), _timed)
     except asyncio.CancelledError:
         if detector:
             # Imported here, not at module scope: `base` is the detector contract and must
@@ -754,11 +836,21 @@ async def run_with_budget(
         budget_ms = entry
 
     started = time.perf_counter()
+    sink: list[float] = []
+    token = _ATTRIBUTABLE_MS.set(sink)
     try:
-        signals = await asyncio.wait_for(detector.detect(ctx), timeout=budget_ms / 1000.0)
+        signals = await asyncio.wait_for(
+            detector.detect(ctx), timeout=HANG_BACKSTOP_FACTOR * budget_ms / 1000.0
+        )
     except asyncio.TimeoutError as exc:
-        raise DetectorTimeout(
-            name, f"detector {name!r} exceeded its {budget_ms} ms budget (NFR-P-002)"
+        # The BACKSTOP, not the budget (ADR-036 item 3). `attributable_ms` is whatever the
+        # worker had finished reporting; None when it never returned, which is the normal case
+        # for a genuine hang and is itself the distinguishing fact.
+        raise DetectorHang(
+            name,
+            f"detector {name!r} did not return within {HANG_BACKSTOP_FACTOR:g}x its "
+            f"{budget_ms} ms ceiling (ADR-036 hang backstop, not an NFR-P-002 breach)",
+            attributable_ms=(sum(sink) if sink else None),
         ) from exc
     except DetectorFailure:
         raise  # already in the right vocabulary; don't double-wrap
@@ -768,10 +860,27 @@ async def run_with_budget(
         # Deliberately not interpolating `exc` — its text may quote the checked
         # content, and this message can reach a log (NFR-SEC-001).
         raise DetectorError(
-            name, f"detector {name!r} raised {type(exc).__name__}"
+            name,
+            f"detector {name!r} raised {type(exc).__name__}",
+            attributable_ms=(sum(sink) if sink else None),
         ) from exc
 
+    finally:
+        _ATTRIBUTABLE_MS.reset(token)
+
     elapsed_ms = (time.perf_counter() - started) * 1000.0
+    # ADR-036 item 2: the budget binds detector-attributable time. An empty sink means the
+    # detector never touched the pool, and for a non-pool detector wall-clock IS its
+    # attributable time — so the fallback needs no `POOL_USERS` branch here, and a detector
+    # moving between pools cannot change which clock judges it.
+    attributable_ms = sum(sink) if sink else elapsed_ms
+    if attributable_ms > budget_ms:
+        raise DetectorTimeout(
+            name,
+            f"detector {name!r} exceeded its {budget_ms} ms budget (NFR-P-002): "
+            f"{attributable_ms:.1f} ms of in-thread execution",
+            attributable_ms=attributable_ms,
+        )
     if not isinstance(signals, list) or not all(isinstance(s, Signal) for s in signals):
         raise DetectorError(
             name, f"detector {name!r} must return list[Signal] (04 §2 contract)"

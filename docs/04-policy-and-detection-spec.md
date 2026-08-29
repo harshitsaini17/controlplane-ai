@@ -444,11 +444,19 @@ This supersedes the v1 ban, which was unenforceable as written: it claimed schem
 
 ## 5. Failure semantics (fail-open / fail-closed) — FR-POL-006
 
-On `DetectorTimeout`/`DetectorError` the gateway synthesizes a **`DetectorFailureRecord`** —
-a distinct type, **never a `Signal`** (ADR-027):
+On `DetectorTimeout`/`DetectorError`/`DetectorHang` the gateway synthesizes a
+**`DetectorFailureRecord`** — a distinct type, **never a `Signal`** (ADR-027):
 ```
-{failure_id, detector, error_class, stage, fail_mode_applied, ts}
+{failure_id, detector, error_class, stage, fail_mode_applied, ts, attributable_ms}
 ```
+`attributable_ms` (ADR-036 item 4) is the **in-thread execution measured for the faulting
+call**, or `null` when nothing measured it. Present always: a recorded `null` says "nothing
+measured this" — the normal case for a `DetectorHang`, whose worker never returned — where an
+absent key would say "we did not record", the distinction 05 §3 already draws for the id lists.
+It exists because the misattribution ADR-036 removed was invisible *precisely* because no record
+carried this number: a budget breach and a queue-wait artifact both arrived as `DetectorTimeout`
+with nothing to tell them apart. `DetectorHang` is the wall-clock backstop firing (ADR-036
+item 3) and is **not** an NFR-P-002 breach; it is a separate `error_class` for that reason.
 A detector fault is an **operational event, not a content risk**: no span, no plane, not
 detector-emitted, and not mapped by the label→action table — `fail_mode` governs it, per
 detector class. It therefore has no place in the closed §1.1 taxonomy, and `Signal` is right to

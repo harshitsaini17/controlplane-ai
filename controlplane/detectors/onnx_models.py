@@ -227,6 +227,15 @@ SERVED: dict[str, tuple[str, frozenset[str]]] = {
         "madhurjindal/Jailbreak-Detector",
         frozenset({"jailbreak", "injection", "unsafe"}),
     ),
+    # ADR-031: `{non-toxic, toxic}`. The positive set is exactly `{"toxic"}` — membership is
+    # exact rather than substring (`positive_index_for` tests `name.lower() in positive_names`),
+    # so "non-toxic" does not match and the two columns stay distinguishable. A substring test
+    # here would match BOTH classes and raise the ambiguity error instead of inverting silently,
+    # which is the failure mode that function was written to force.
+    "tier2_toxicity": (
+        "martin-ha/toxic-comment-model",
+        frozenset({"toxic"}),
+    ),
 }
 
 

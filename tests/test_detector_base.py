@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,7 @@ from controlplane.detectors.base import (
     Detector,
     DetectorError,
     DetectorFailure,
+    DetectorHang,
     DetectorTimeout,
     Plane,
     ScoreKind,
@@ -39,6 +41,7 @@ from controlplane.detectors.base import (
     get_detector,
     register,
     registered_names,
+    run_in_executor,
     run_with_budget,
 )
 from controlplane.policy.schema import TAXONOMY
@@ -495,21 +498,69 @@ def test_run_with_budget_returns_signals_on_the_happy_path() -> None:
     assert len(signals) == 1 and detector.calls == 1
 
 
-def test_run_with_budget_raises_detector_timeout_past_its_budget() -> None:
-    """04 §2: a detector must not hang; the gateway enforces asyncio.wait_for."""
+def test_run_with_budget_raises_detector_hang_past_the_backstop() -> None:
+    """04 §2: a detector must not hang; `wait_for` is the backstop that ends one.
+
+    **Asserted `DetectorTimeout` until ADR-036 re-pointed the vocabulary**, and the change is
+    the substance rather than a rename. This detector `await`s — it burns no thread CPU at all,
+    so under ADR-036 it cannot breach an NFR-P-002 budget, which now binds detector-attributable
+    time. Calling this a budget breach was the misattribution ADR-036 removed. What is true of it
+    is that the call never came back, and `DetectorHang` says exactly that.
+
+    Paired with `test_run_with_budget_raises_detector_timeout_on_in_thread_overrun` below: one
+    pins the backstop, the other the budget. Either alone would be satisfied by a bug — collapse
+    the two `error_class` values into one and this test still passes while the audit loses the
+    only thing that distinguishes a real breach from a scheduling artifact.
+    """
 
     class Slow:
         name = "tier1_pii"
 
         async def detect(self, ctx: object) -> list[Signal]:
-            await asyncio.sleep(0.5)  # 500 ms vs a 2 ms budget
+            await asyncio.sleep(0.5)  # 500 ms against a 2 ms budget, 4 ms backstop
+            return []
+
+    with pytest.raises(DetectorHang) as excinfo:
+        asyncio.run(run_with_budget(Slow(), ctx=None))
+    assert excinfo.value.detector == "tier1_pii"
+    assert excinfo.value.error_class == "DetectorHang"
+    assert "ADR-036" in str(excinfo.value)
+    assert "not an NFR-P-002 breach" in str(excinfo.value)
+    assert excinfo.value.attributable_ms is None, (
+        "nothing measured in-thread work here; a number would imply the worker reported one"
+    )
+
+
+def test_run_with_budget_raises_detector_timeout_on_in_thread_overrun() -> None:
+    """ADR-036 item 2: the NFR-P-002 budget binds in-thread execution, and still bites.
+
+    The window this has to hit is narrow *by construction*, which is why it is worth pinning:
+    the budget can only be the thing that fires when attributable CPU exceeds it while
+    wall-clock stays under the 2x backstop. That is not a contrived case — it is the shape of
+    the `tier2_toxicity` breach that opened the deviation (31.0 ms attributable, 31.3 ms wall,
+    backstop 50 ms). CPU-bound work in the executor is what makes the two clocks separable.
+    """
+
+    class Grinder:
+        name = "tier1_pii"
+
+        async def detect(self, ctx: object) -> list[Signal]:
+            def burn() -> None:
+                target = time.thread_time() + 0.014  # 14 ms CPU vs a 10 ms budget
+                while time.thread_time() < target:
+                    sum(range(500))
+
+            await run_in_executor(burn, detector=self.name)
             return []
 
     with pytest.raises(DetectorTimeout) as excinfo:
-        asyncio.run(run_with_budget(Slow(), ctx=None))
-    assert excinfo.value.detector == "tier1_pii"
+        asyncio.run(run_with_budget(Grinder(), ctx=None, budget_ms=10.0))
     assert excinfo.value.error_class == "DetectorTimeout"
     assert "NFR-P-002" in str(excinfo.value)
+    assert excinfo.value.attributable_ms is not None
+    assert excinfo.value.attributable_ms > 10.0, (
+        f"the breach must be reported as measured, got {excinfo.value.attributable_ms}"
+    )
 
 
 def test_run_with_budget_wraps_a_raise_as_detector_error() -> None:

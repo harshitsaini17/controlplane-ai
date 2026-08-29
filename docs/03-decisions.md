@@ -1726,9 +1726,16 @@ Two reasons, both recorded:
 **`max_workers=1` is load-bearing, not a default.** It serializes inference across concurrent
 requests, which preserves the one-inference-at-a-time conditions **SL-5** measured under: a pool that
 let four requests infer simultaneously would push per-request parallelism toward the 1-thread column
-without any figure in this repo describing it. **Queue wait counts inside the ceiling** — a request
+without any figure in this repo describing it. ~~**Queue wait counts inside the ceiling** — a request
 that waits behind two others has genuinely waited, and a budget that excluded queueing would measure
-the detector rather than the hold NFR-P-001 is about.
+the detector rather than the hold NFR-P-001 is about.~~ **SUPERSEDED by ADR-036 (front door).** The
+first half is true and survives: a request that waits behind two others has genuinely waited. The
+inference from it does not. Queue wait is real wait, but it is not *this detector's* wait, and
+charging it to an NFR-P-002 budget made a detector's own figure depend on what else shared its lane.
+The dichotomy in the last clause was false — excluding queueing does not leave the hold unmeasured,
+because the **hold series measures it directly** and ADR-030 Amendment 3 already sums pool users to
+do so. ADR-036 splits the two: the budget binds detector-attributable time, the hold keeps
+wall-clock. Nothing is hidden by the change; one cost is charged once instead of twice.
 
 **Caveat, recorded honestly because it is a real limitation and not a detail.** A timed-out executor
 task is **abandoned, not killed**: Python cannot preempt a running thread, so `wait_for` stops
@@ -2003,3 +2010,107 @@ it is the number item 4's startup log will print. A cold host additionally downl
 **Docs touched:** `pyproject.toml` (both extras, with the superseded comment preserved quoted),
 `controlplane/detectors/availability.py` (`REQUIREMENTS`), `tests/test_ml_extra_closure.py` (new),
 `08` (deviation closed; M-32 logged), CI workflow (the `.[dev,ml]` job).
+
+---
+
+## ADR-036 — An NFR-P-002 budget binds detector-**attributable** time; wall-clock keeps a hang backstop (resolves `[D3-toxicity-wallclock-vs-25ms]`)
+
+**Status:** Accepted 2026-08-30. The filed report's Option A, approved with an attribution fix that
+the report itself did not propose — the ruling is that the 2/30 spurious-fault rate was a
+**misattribution defect, not a detector defect**, so the answer is to fix what the budget clocks
+rather than to ship the noise or revert the detector.
+
+**Context.** Wiring `tier2_toxicity` into `OUTPUT_SENTENCE` made 2 of 30 *control* fault-injection
+probes — no fault injected — record `DetectorTimeout` for it. The detector was not slow: the model
+measured **11.92 ms** p50 against a 25 ms budget. Enforcement was reading **wall-clock through the
+event loop**, which for a pool detector includes pool queue wait, GIL contention with the three
+asyncio detectors sharing its lane, and loop scheduling. The gap was ~8.5 ms and it was not the
+detector's work. **SL-5's logged exposure materialized exactly as predicted** — it warned that the
+Tier-2 <25 ms budget was measured with 6 threads free for one inference while NFR-P-002 states no
+thread count — and that is worth recording as a hit for the practice of writing exposures down:
+this arrived as a known risk with a name, not as a surprise.
+
+**Ruling.**
+
+1. **NFR-P-002 budgets bind detector-attributable time.** For a pool detector, enforcement clocks
+   **in-thread execution**, measured inside the executor task around the model call. Scheduling,
+   GIL contention and pool-queue wait belong to the **HOLD** series, where ADR-030 Amendment 3
+   already sums pool users — they are lane-composition costs, and charging them to a detector made
+   its budget depend on what else happened to share its lane.
+2. **This supersedes ADR-034's "queue wait counts inside the ceiling" sentence, by the front door.**
+   The sentence is struck in place, at its own site, with the reasoning preserved and marked rather
+   than deleted. **Anti-laundering note, stated because the timing invites the suspicion:** this was
+   ruled from a **diagnostic** that showed spurious *attribution*, before any citable bench existed,
+   and the direction of the change is what distinguishes it from target-chasing. No published number
+   is being pursued green. A budget was not widened — 25 ms is untouched, and item 3 adds a *new*
+   wall-clock guard where there was one before. What changed is which of two clocks the word
+   "budget" names, decided on the evidence that one of them was measuring other detectors' work.
+   The honest tell: this ruling makes the *hold* rows harder to satisfy, not easier, because they
+   still carry every cost the budget now excludes (item 5).
+3. **Wall-clock does not go unguarded.** `run_with_budget` keeps `asyncio.wait_for`, retargeted from
+   the budget to **`HANG_BACKSTOP_FACTOR = 2.0` x the (parametric) ceiling**, and firing it raises a
+   distinct `DetectorHang` — never `DetectorTimeout`. The two are different findings and 04 §5 now
+   records them as different `error_class` values: a budget breach says "this detector executed too
+   long", a hang says "this call did not come back". Collapsing them would rebuild the exact
+   misattribution this ADR removes, and would do it invisibly. 2x is deliberately loose: anything
+   near 1x re-enforces the budget on wall-clock through the back door. This is ADR-034 Part B's own
+   genuine-anomaly framing, applied to the failure vocabulary.
+4. **Failure records carry the measured duration.** `DetectorFailureRecord` /
+   `FailureOutcome.audit_entry()` gain **`attributable_ms`** — the in-thread figure when something
+   measured it, `null` when nothing did (the normal case for a hang, whose worker never returned).
+   The six-key shape 04 §5 and 05 §3 documented becomes **seven**. This extends ADR-034's
+   abandoned-task caveat: a real breach and a scheduling artifact are now distinguishable in the
+   audit **forever**, where before both arrived as `DetectorTimeout` with nothing to separate them.
+   A duration is not content, so NFR-SEC-001 does not reach it.
+5. **The published holds are recomputed from the stamped bench, not from this diagnostic.** The
+   affected ADR-030 Amendment 3 rows are re-derived under corrected semantics from the quiet-host
+   `bench_latency` artifact. Any row that cannot fit **publishes untargeted**, per the standing
+   per-request-sum precedent. The hold series itself still measures **wall-clock**: nothing is
+   hidden by item 1, only correctly attributed.
+
+**The instrument is a PROVISIONAL departure from the ruling's own parenthetical — batch review at
+phase end.** The ruling names `perf_counter` inside the executor task. Implemented literally, it
+made the defect **worse**: `perf_counter` in a worker thread counts every microsecond that thread
+sits blocked on the GIL while the asyncio detectors in its lane run, so it relocates the clock
+without isolating anything.
+
+| enforcement clock | spurious control faults | in-thread p50, quiet loop | in-thread p50, lane contention |
+|---|---|---|---|
+| wall-clock through the loop (pre-ruling) | 2/30 | — | — |
+| `perf_counter` in-thread (ruling's parenthetical) | **18/30** | 12.04 ms | **229.26 ms** |
+| `thread_time` in-thread (shipped) | **0/30** | 11.98 ms | 26.04 ms |
+
+`attributable_ms` under `perf_counter` tracked wall-clock to within 0.3 ms in the gateway (31.02 vs
+31.3; 48.76 vs 49.1) — the two were the same number. `time.thread_time()` is per-thread CPU time and
+excludes GIL-wait, which is what the ruling's *intent* asks for in its own words: "scheduling, GIL
+contention, and pool-queue wait belong to the HOLD series". **Every figure in this table is
+DIAGNOSTIC** — ad-hoc script, n=30/40, host load1 above `QUIET_LOAD1_MAX` — and none of it is
+citable; the citable figures come from the stamped `bench_latency` run.
+
+**Caveat, recorded rather than smoothed.** ONNX Runtime's calling thread spin-waits on its intra-op
+pool, so `thread_time` still **rises under real CPU competition**: 11.98 ms quiet against 26.04 ms
+under lane contention. It is detector-attributable CPU, not a contention-free constant, and above
+25 ms it is an honest breach rather than a misattribution — which is precisely what
+`tier2_toxicity` does when the full test suite competes for the CPU, and why
+`test_faults_are_counted_and_absent_means_zero` was re-anchored on a fault-free detector instead of
+on an empty mapping (AGENTS.md §7: the harness is not made clean to satisfy a test).
+
+**Consequences for the failure vocabulary.** A detector that merely `await`s burns no thread CPU, so
+it **cannot** breach an NFR-P-002 budget — only the backstop can end it. Two liveness tests asserted
+`DetectorTimeout` on exactly that shape and were re-pointed to `DetectorHang`; calling an awaiting
+detector a budget breach *was* the misattribution. Because that narrows `DetectorTimeout` to a real
+window — attributable CPU over budget while wall-clock stays under 2x — a companion test
+(`test_run_with_budget_raises_detector_timeout_on_in_thread_overrun`) now pins it with CPU-bound
+executor work, so budget enforcement is not left untested by the re-point.
+
+**Also closed by this sweep.** SC-3's `performance`-for-`tier2` substitution is **retired**:
+`tier2_toxicity` sits in `OUTPUT_SENTENCE`, so `faultable()` derives tier2 coverage with no harness
+edit. 07 beat 7 needed no change — it always said `--inject-fault tier2`; the harness was the side
+that deviated. The tripwire that guarded the substitution is inverted to guard the opposite risk
+(tier2 silently *losing* its carrier), per its own docstring's instructions.
+
+**Docs touched:** `controlplane/detectors/base.py` (`DetectorHang`, `HANG_BACKSTOP_FACTOR`,
+`_ATTRIBUTABLE_MS`, in-thread clocking, the superseded queue-wait rationale),
+`controlplane/policy/engine.py` + `controlplane/gateway/pipeline.py` (`attributable_ms` threaded),
+`04` §5 and `05` §3/§4 (seven-key shape, `DetectorHang`), `03` (ADR-034 sentence struck in place;
+this ADR), `08` (deviation closed; M-50), and five test files re-pointed rather than relaxed.

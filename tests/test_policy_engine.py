@@ -914,7 +914,14 @@ def test_adr027_fail_open_failure_is_recorded_but_does_not_contribute() -> None:
 
 
 def test_adr027_audit_entry_has_the_documented_shape_and_no_content() -> None:
-    """05 §3/§4: `detector_failures_json` elements carry exactly the six ruled keys."""
+    """05 §3/§4: `detector_failures_json` elements carry exactly the seven ruled keys.
+
+    Six until ADR-036 item 4 added `attributable_ms` — the measured in-thread duration that
+    makes a real NFR-P-002 breach distinguishable from a scheduling artifact after the fact.
+    Still an EXACT set: a seventh key was ruled, an eighth is a contract change. The type rule
+    is per key rather than "all strings", because a duration is a number and asserting
+    otherwise would have forced the value into a string to satisfy the test.
+    """
     policy = ALL_POLICIES["finance_advisor.yaml"]
     record = DetectorFailureRecord(
         detector="tier1_pii", error_class="DetectorTimeout", stage=Stage.INPUT
@@ -923,8 +930,12 @@ def test_adr027_audit_entry_has_the_documented_shape_and_no_content() -> None:
 
     assert set(entry) == {
         "failure_id", "detector", "error_class", "stage", "fail_mode_applied", "ts",
+        "attributable_ms",
     }
     assert entry["fail_mode_applied"] == "fail_closed"
     assert entry["stage"] == "input"
     assert entry["failure_id"] == record.failure_id
-    assert all(isinstance(v, str) for v in entry.values())
+    assert all(
+        isinstance(v, str) for k, v in entry.items() if k != "attributable_ms"
+    ), "every key but the ADR-036 duration is a string"
+    assert entry["attributable_ms"] is None, "unmeasured stays null, never 0.0"
