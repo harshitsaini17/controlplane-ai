@@ -264,6 +264,11 @@ def _render(artifact: dict[str, Any]) -> str:
             f"{certifying['load15']}  cpus={certifying['cpus']}  "
             f"quiet_max={QUIET_LOAD1_MAX}  [{quiet_verdict(certifying)}]"
         )
+    if artifact.get("citability", {}).get("longer_averages_also_inside") is False:
+        lines.append("  MARGINAL: load1 is inside the ceiling, load5/load15 are not — a "
+                     "decaying transient caught")
+        lines.append("  at its lowest instant. Citable by 06 §8, which reads load1; weigh it "
+                     "against a run with all three inside.")
     if artifact.get("quiet_gate_waited_s"):
         lines.append(f"quiet gate: waited {artifact['quiet_gate_waited_s']}s "
                      f"({len(artifact.get('quiet_gate_polls', []))} poll(s))")
@@ -329,6 +334,25 @@ def main(argv: list[str] | None = None) -> int:
     }
     certifying = _wait_for_quiet(artifact)
     artifact["load_at_process_start"] = certifying
+
+    # Citability is 06 §8's question and it reads `load1`, so that is the gate — one
+    # definition, shared with every harness through `eval/host_load.py`. But a load1 that
+    # grazes the ceiling while load5 and load15 sit above it is a decaying transient caught
+    # at its lowest instant, not a settled quiet host: the first clean-statistics run of this
+    # spike certified at 1.0 / 1.31 / 1.23, passing only because `is_quiet` uses `<=`.
+    # Recorded as a margin, NOT enforced as a second threshold — inventing a stricter local
+    # definition of "quiet" would leave two harnesses disagreeing about what the word means,
+    # which is the defect this repo keeps finding, and a gate no run can pass produces no
+    # evidence at all.
+    artifact["citability"] = {
+        "gate_reads": "load1",
+        "quiet_max": QUIET_LOAD1_MAX,
+        "margin": round(QUIET_LOAD1_MAX - certifying["load1"], 2),
+        "longer_averages_also_inside": (
+            certifying["load5"] <= QUIET_LOAD1_MAX
+            and certifying["load15"] <= QUIET_LOAD1_MAX
+        ),
+    }
 
     if artifact.get("quiet_gate_timed_out"):
         print(
