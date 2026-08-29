@@ -41,7 +41,16 @@ the fixture that proves a load stamp is necessary and not sufficient.
 
 A genuine 53-rung `reps=40` run on a quiesced host. No signals on either thread setting; its
 sequential curves agree with two independent runs to within 2.5% at every rung; its batch curve
-shows the expected U with batch 2 and batch 4 within 0.6%.
+shows the expected U.
+
+**Its batch curve is n=10, not n=40** — it predates the `CURVE_REPS` decoupling (ADR-032
+Correction 2), so `reps=40` at run level while every curve point carries `n: 10`. At n=10 a
+"p99" is `samples[8]`, so this fixture cannot evidence a *batch choice*, and the sentence here
+previously cited its "batch 2 and batch 4 within 0.6%" as if it could. What it does corroborate
+is Correction 2's diagnosis: its b2→b4 **P50** gap is +0.61%, close to the resolved run's +0.96%,
+while its P99 gap of +1.04% is nowhere near the resolved +11.4%. The flat basin is real in
+medians and absent in tails, measured twice — which is exactly why the withdrawn justification
+looked sound.
 
 Uncitable for the ordinary reason: measured from a working tree whose harness edits were not
 committed, so no committed code reproduces it (AGENTS.md §7).

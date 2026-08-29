@@ -387,8 +387,11 @@ def _ladder(threads: int) -> dict[int, dict[str, dict[str, float]]]:
 def _worst_per_window_p99(threads: int) -> tuple[int, float]:
     """Worst per-window P99 across **both** columns, and the rung it occurs at.
 
-    Both columns because ADR-032 binds `batch 4` — the batched column is the bound column,
-    so grounding on either one alone puts the ceiling below the other (Correction 1).
+    Both columns because the bound batch mode is *neither* of them: the ladder measures
+    `sequential` and `batched (all in one call)`, while ADR-032 Correction 2 binds **batch 2**.
+    Taking the envelope of both is what keeps the ceiling above real cost without depending on
+    which batch is bound — so this assertion survives a re-pick, and a re-pick that made it fail
+    would be telling us something worth knowing rather than merely breaking a test.
     """
     per_window = {
         n: max(row["sequential"]["p99"], row["batched"]["p99"]) / n

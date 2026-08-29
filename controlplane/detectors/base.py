@@ -194,9 +194,14 @@ class ParametricBudget:
     #: budget-reading consumer sees via `budget_ms()`.
     nominal_ms: float
     #: Measured cost per unit — ADR-032's 1-thread series, worst per-window P99 across
-    #: **both** columns (52.78 ms = 2797.44/53, the 53-window bound rung, sequential). Worst
-    #: across both because ADR-032 binds `batch 4`, so the batched column is the bound column
-    #: and a ceiling grounded on either one alone sits below the other (Correction 1).
+    #: **both** ladder columns (52.78 ms = 2797.44/53, the 53-window bound rung, sequential).
+    #: Worst-across-both because the *bound* batch mode is not either ladder column: the ladder
+    #: measures `sequential` and `batched (all in one call)`, while ADR-032 Correction 2 binds
+    #: **batch 2**. Grounding on the envelope of both columns is therefore conservative by
+    #: construction rather than by luck — batch 2 costs 48.63 ms/window at the 53-window rung
+    #: (2577.48/53, 1-thread), *below* this figure, so the ceiling sits above real cost, which
+    #: is the direction M-30 requires. ADR-034's own Correction 2 note says the same: this
+    #: figure is grounded on the ladder and does not move with the bound batch.
     per_unit_ms: float
     #: Length-independent cost inside the same span — tokenization, which ADR-032's table
     #: excludes (it times `sess.run` only) and a detector cannot. Measured 8.32 ms P99 (1-thread) at the
