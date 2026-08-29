@@ -1246,26 +1246,81 @@ figure is published in full and untargeted so a reader can judge it themselves.
 NFR-P-002 breaches even single-window — and the bound case costs **2541.99 ms**. GPU or dedicated
 serving hardware is roadmap, not claimed anywhere in this repo.
 
-> ⚠ **The rest of this paragraph is under an OPEN deviation and is NOT re-cited by Correction 1.**
-> `[D1-batch-4-justification-falsified-at-the-corrected-bound]` (MAJOR, filed 2026-08-29, unruled)
-> was raised **by** Correction 1's own re-measurement: at the corrected 53-window bound the b2→b4
-> gap is ~6% per window rather than the 0.6% this paragraph rests on, and batch 4 is *slower than
-> batch 8* despite half the calls. The figures below are the **withdrawn 52-window run's**, left in
-> place deliberately — rewriting the justification would be self-approving a deviation (AGENTS.md
-> §5.4). The clean curve is in `08`'s report and in `reports/spike_window_latency.json`; the
-> re-derivation check flags these figures as MISMATCH, which is the correct state for a contested
-> number. **Only this paragraph and `batch 4` in consequence 1 are blocked.**
+**Batching does not amortise, and past a small batch it hurts.** Measured at the bound
+(6 threads, 53 windows, n=40 with percentiles resolved): batch **2 → 593.60 ms P50 / 615.79 ms
+P99** (the minimum in *both* statistics), batch 4 → 599.28 / 685.98, batch 8 → 625.92 / 659.89,
+batch 16 → 671.86 / 729.98, batch 32 → 728.96 / 783.58, all-53-in-one-call → **793.86 / 834.28** —
+*worse* than 53 separate calls at 634.76 / 687.31. The cause is measurable rather than speculative:
+one window costs 49.77 ms at 1 thread and 10.92 ms at 6, a **4.56×** speedup, so ONNX Runtime
+already spreads a single window across the cores. There is no idle parallelism for a batch to
+exploit; a larger tensor only queues more work at a saturated pipeline. **Bound batch size: 2** —
+the measured minimum, in both statistics and at both thread settings (Correction 2 below records
+the decision rule and the full curve).
 
-**Batching does not amortise, and past a small batch it hurts.** Measured at the bound (6 threads,
-52 windows, P50): batch **2 → 599.20 ms** (the minimum), batch 4 → 602.66, batch 8 → 631.45,
-batch 16 → 667.03, batch 32 → 727.18, all-52-in-one-call → **800.58** — *worse* than 52 separate
-calls at 653.65. The cause is measurable rather than speculative: one window costs 49.77 ms at
-1 thread and 10.92 ms at 6, a **4.56×** speedup, so ONNX Runtime already spreads a single window
-across the cores. There is no idle parallelism for a batch to exploit; a larger tensor only queues
-more work at a saturated pipeline. **Bound batch size: 4.** Not 2, though 2 is the nominal minimum:
-599.20 and 602.66 differ by 0.6%, which is inside this harness's own run-to-run spread (below), so
-picking the minimum over-fits one run. Batch 4 sits in the same flat basin with half the call
-count, and costs ~0.6% at 1 thread where the curve is monotonically worse.
+#### Correction 2 — 2026-08-29: the batch size is 2, decided on a curve that can resolve a P99
+
+Resolves `[D1-batch-4-justification-falsified-at-the-corrected-bound]` (MAJOR, filed 2026-08-29 by
+Correction 1's own re-measurement). The ruling approved the harness change the filing named, fixed
+the decision rule in advance, and delegated only the data: **lowest bound-case P99 among b2/b4/b8
+wins; ties within 5% break toward the smaller batch** (memory and latency granularity).
+
+**Withdrawn justification, preserved.** Until this Correction the paragraph above read:
+
+> *"Measured at the bound (6 threads, 52 windows, P50): batch **2 → 599.20 ms** (the minimum),
+> batch 4 → 602.66, batch 8 → 631.45, batch 16 → 667.03, batch 32 → 727.18, all-52-in-one-call →
+> **800.58** — worse than 52 separate calls at 653.65. … **Bound batch size: 4.** Not 2, though 2
+> is the nominal minimum: 599.20 and 602.66 differ by 0.6%, which is inside this harness's own
+> run-to-run spread, so picking the minimum over-fits one run. Batch 4 sits in the same flat basin
+> with half the call count, and costs ~0.6% at 1 thread where the curve is monotonically worse."*
+
+**The re-measured curve** (`reports/spike_batch_curve.json`, commit `960a236fefca` clean, host load
+**0.96 QUIET**, `curve_reps=40`, percentiles resolved at every point, 0 contamination signals):
+
+| batch | calls | 6thr P50 | 6thr P99 | 6thr max/P50 | 1thr P50 | 1thr P99 |
+|---|---|---|---|---|---|---|
+| 1 | 53 | 634.76 | 687.31 | 1.084 | 2581.78 | 2619.06 |
+| **2** | **27** | **593.60** | **615.79** | **1.054** | **2566.23** | **2577.48** |
+| 4 | 14 | 599.28 | 685.98 | **1.200** | 2573.76 | 2761.72 |
+| 8 | 7 | 625.92 | 659.89 | 1.096 | 2606.84 | 2641.12 |
+| 16 | 4 | 671.86 | 729.98 | 1.185 | 2610.19 | 2642.64 |
+| 32 | 2 | 728.96 | 783.58 | 1.128 | 2690.30 | 2728.35 |
+| 53 | 1 | 793.86 | 834.28 | 1.146 | 2780.62 | 2801.15 |
+
+**Applying the rule.** At 6 threads b2 is lowest and nothing is within the 5% tie band (b8 +7.2%,
+b4 +11.4%), so the pick is b2. At 1 thread b2 is lowest, b8 is inside the band at +2.5% and b4 is
+outside at +7.1%; the tie-break toward the smaller batch also picks b2. **The two columns agree**,
+so the decision did not require choosing a column — worth stating, because the column choice is
+itself a documented judgement call elsewhere in this ADR (M-30).
+
+**Why the original reasoning failed, precisely.** Not because 0.6% was fabricated — at n=40 the
+b2→b4 **P50** gap is **+0.96%**, close to what was claimed. The flat basin is real *in medians* and
+absent *in tails*: the same pair differs by **+11.4% at P99**. The old paragraph read medians
+because the curve could publish nothing else — every point was n=10, where
+`_percentiles_are_distinct` is False and a "p99" is `samples[8]`. So a decision about a **tail**
+was taken on the only statistic the instrument could resolve, and the batch size that looked
+equivalent on medians is the curve's **least stable point** (max/P50 = 1.200, the worst of seven,
+reproduced from the pre-correction run's 1.135). The filing's own diagnosis — *"the instrument
+cannot settle it, and that is stated rather than worked around"* — was correct, and it is also why
+the interim figure that filing reported (a ~6% P50 gap, from n=10) does not reproduce at n=40:
+**an n=10 median was itself too noisy to quote**, in the direction that made the case look worse
+rather than better. Both are now superseded by the resolved measurement.
+
+**No contract moves.** ADR-034's ceiling is defined as *measured envelope × 2*, so it re-derives
+from whichever batch is bound; `per_unit_ms` is grounded on the **ladder's** worst per-window P99
+across both columns (52.78 ms), which this correction does not touch. Verified rather than assumed:
+`ceiling_ms("tier2_injection", 53)` = 5611.32 ms clears the winning envelope by **9.11×** at 6
+threads and **2.18×** at 1. `tier2_injection` builds on batch 2.
+
+**Why the ladder was not re-rolled.** Only the curve was re-measured (`--no-ladder`). Re-rolling
+the ladder would have invalidated the 33 figures Correction 1 had just re-derived against it,
+forcing a second full re-cite of numbers that were not in question — and each re-cite is an
+opportunity for exactly the transcription defect these corrections exist to remove. The curve is
+therefore its **own artifact** with its own provenance stamp: one artifact carries one
+`code.commit` and one `load_at_process_start`, so splicing two runs into one file would make that
+stamp certify a moment that never happened (M-33). The cost is stated rather than hidden: with no
+ladder, `contamination_signals`' **LOCAL SPIKE** and **CROSS-MEASUREMENT** checks have no input and
+are recorded as `contamination_checks_inapplicable` — *unmeasurable*, not passing. TAIL DISPERSION
+and COLD RATIO ran and returned clean.
 
 #### Correction — the deviation's cross-validation note is wrong in both directions
 
@@ -1379,22 +1434,38 @@ own re-measurement and is filed as
 
 ### Budget respecification (04 §2 / NFR-P-002)
 
-> ⚠ **Bullet 1's justification is under an OPEN deviation and is NOT re-cited by Correction 1.**
-> `[D1-two-window-budget-breach-not-reproduced-on-the-clean-artifact]` (MAJOR, filed
-> 2026-08-29, unruled) was raised by Correction 1's own re-measurement, one rung below the batch-4
-> filing. On the clean artifact two windows measure **24.76 ms P99** (sequential; batched 22.53) —
-> **under** the 25 ms budget in both columns, with the first breach at **4** windows. This flips a
-> **verdict**, not a figure, which is why the bullet is marked rather than corrected: restating it
-> would self-approve a deviation (AGENTS.md §5.4). The margin is 0.24 ms (1.0%), far inside the
-> ~26% run-to-run band this same ADR discloses, so whether the scope boundary moves is a
-> specification call. **The scoping decision itself is not contested and nothing in code depends on
-> the falsified half** — `ceiling_ms` floors the single-window case at `nominal_ms` and no test pins
-> 25.13. Only this bullet and the two-window breach claim are blocked.
+- **NFR-P-002's <25 ms is scoped to single-window inputs** (≤104 tokens), and the scope rests on
+  **principle, not on a measured miss** — corrected below, resolving `[D1-two-window-budget-breach-not-reproduced-on-the-clean-artifact]` (MAJOR, filed
+  2026-08-29, **ruled and closed 2026-08-29**, Option A). A per-detector budget is a
+  **per-inference** quantity; multi-window cost is **length-parametric by construction**
+  (ADR-034), so no flat per-call figure can describe it at *any* window count. That argument holds
+  whichever side of 25 ms the two-window measurement happens to land on, which is exactly why it is
+  now the stated ground and the measurement is not.
+  Measured, for the record: one window **12.59 ms P99**; two windows **24.76 ms P99** — *inside*
+  the 25 ms budget by **0.24 ms**. That margin is **smaller than this ADR's own disclosed
+  run-to-run band** (~26%: identical single-window work measured 11.30 and 14.27 ms in two separate
+  runs), so two windows is **indistinguishable from the budget line** rather than safely inside it.
+  The first rung that breaches at 6 threads is **4** windows.
 
-- **NFR-P-002's <25 ms is scoped to single-window inputs** (≤104 tokens), where it is measured to
-  hold at 13.01 ms P99. The boundary is not a conservative choice — it is exactly where the
-  measurement puts it: two windows measure **25.13 ms P99** against a 25 ms budget, so the target
-  fails at the first multi-window input.
+> **Withdrawn wording, preserved.** Until Correction 1 this bullet read:
+>
+> > *"**NFR-P-002's <25 ms is scoped to single-window inputs** (≤104 tokens), where it is measured
+> > to hold at 13.01 ms P99. The boundary is not a conservative choice — it is exactly where the
+> > measurement puts it: two windows measure **25.13 ms P99** against a 25 ms budget, so the target
+> > fails at the first multi-window input."*
+>
+> Both figures came from the withdrawn 52-window run and **the conclusion was false**, not merely
+> imprecise: on the clean artifact two windows pass in *both* columns (sequential 24.76, batched
+> 22.53). This is the one direction §7's anti-laundering rule does not cover — not a target moved
+> to hide a miss, but a **claimed miss that did not happen**, which had made the scope look
+> compelled by measurement when it was in fact the more conservative choice. The scope did not
+> move; only its reason did.
+>
+> **Re-scoping to ≤2 windows was considered and rejected.** Verbatim, as ratified: *B would widen a
+> target on less evidence than the ADR already disclosed as insufficient, and in the
+> self-flattering direction.* A boundary that flips on 0.24 ms should not be re-drawn on 0.24 ms —
+> and a third run could flip it back, since the gap is between-run drift that no number of reps
+> inside one run reduces.
 - **Multi-window cost is published as a window-count-bucketed, length-parametric, untargeted
   series** — the table above is its shape — with the bound case stated as a figure, not a range.
 - **Anti-laundering record.** This scopes a target *after* a measurement missed it, which is what
@@ -1408,7 +1479,8 @@ own re-measurement and is filed as
 
 ### Consequences
 
-1. `tier2_injection` is unblocked and implementable: windowed 104/26/76, MAX aggregation, batch 4,
+1. `tier2_injection` is unblocked and implementable: windowed 104/26/76, MAX aggregation, batch 2
+   (Correction 2),
    `window_count` + max-window index in signal meta.
 2. **The 512-token blind spot closes.** Full coverage is the point: an injection at token 3000 is
    now scored, where before it was outside the tokenizer's reach entirely.
@@ -1689,7 +1761,8 @@ contract this ADR itself settles.
 ### Consequences
 
 1. `tier2_injection` is implementable as ADR-032 specifies — full-coverage windows, MAX aggregation,
-   batch 4 — without either stalling the event loop or being cancelled by its own runner.
+   batch 2 (ADR-032 Correction 2) — without either stalling the event loop or being cancelled by
+   its own runner.
 2. **The execution-vehicle rule binds four further detectors** (`tier2_toxicity`, `rag_grounding`,
    `fast_consistency`, `entity_enricher`). None may run model inference inline on the loop, whatever
    its budget, and a flat 25 ms budget is not a licence to do so.

@@ -49,7 +49,16 @@ from eval.spike_window_latency import (  # noqa: E402  (after sys.path)
 )
 
 DECISIONS = REPO / "docs" / "03-decisions.md"
+#: Widened past `03` by ruling 2026-08-29: `04` §2.1 and `06` §4 carry copies of the same
+#: figures, and a copy with no mechanical guard is exactly how the original defect spread.
+SPEC = REPO / "docs" / "04-policy-and-detection-spec.md"
+EVALPLAN = REPO / "docs" / "06-evaluation-plan.md"
 DEFAULT_ARTIFACT = REPO / "reports" / "spike_window_latency.json"
+#: The batch curve lives in its OWN artifact (ADR-032 Correction 2): re-measuring it did not
+#: re-roll the ladder, and one artifact carries one provenance stamp. A figure must be derived
+#: from the run it actually came from — deriving Correction 2's curve against Correction 1's
+#: ladder artifact would be this checker committing the defect it exists to catch.
+DEFAULT_CURVE_ARTIFACT = REPO / "reports" / "spike_batch_curve.json"
 
 #: Strip markdown emphasis and approximation marks before reading a number. `~3100` and
 #: `**651.41**` are the same kind of claim as `651.41`; the decoration is presentation.
@@ -111,9 +120,11 @@ def _num(cell: str) -> float | None:
 class Check:
     """One published figure, its claimed derivation, and the verdict."""
 
-    def __init__(self, label: str, published: Any, derive: Callable[[], Any]) -> None:
+    def __init__(self, label: str, published: Any, derive: Callable[[], Any],
+                 *, absent: bool = False) -> None:
         self.label = label
         self.published = published
+        self._absent = absent
         try:
             self.derived: Any = derive()
         except (KeyError, LookupError, TypeError, ZeroDivisionError):
@@ -121,6 +132,13 @@ class Check:
 
     @property
     def verdict(self) -> str:
+        # ABSENT and NO SOURCE are both failures, but they send you to different places: ABSENT
+        # means a doc's wording drifted out from under its anchor and the figure stopped being
+        # checked (fix the regex); NO SOURCE means the artifact cannot produce a figure the doc
+        # claims to derive (fix the doc, per Correction 1). Printing both as NO SOURCE would
+        # have a silently-unchecked claim read as an ungrounded one.
+        if self._absent:
+            return "ABSENT"
         if self.derived is None:
             return "NO SOURCE"
         return "OK" if self.published == self.derived else "MISMATCH"
@@ -157,7 +175,15 @@ def _published_pair(art: dict[str, Any], threads: int, wins: int, mode: str
     return (b["p50"], b["p99"])
 
 
-def checks(art: dict[str, Any], text: str) -> list[Check]:
+def checks(art: dict[str, Any], text: str,
+           curve: dict[str, Any] | None = None) -> list[Check]:
+    """Every derivation-claiming figure, checked against the artifact it claims.
+
+    `curve` is the batch-curve artifact; it defaults to `art` so a caller with one
+    artifact still works, but the two are separate runs and Correction 2 reads the curve
+    from its own file.
+    """
+    curve = art if curve is None else curve
     out: list[Check] = []
 
     # --- ADR-032's measurement table: 6 threads, sequential + batched, P50/P99 ---------------
@@ -203,24 +229,39 @@ def checks(art: dict[str, Any], text: str) -> list[Check]:
         out.append(Check(f"Part B basis: {threads}thr row's 1-thread cost", _num(row[3]),
                          lambda: _published_pair(art, 1, 2, "sequential")[1]))
 
-    # --- the batching paragraph's P50 figures ------------------------------------------------
+    # --- the batching paragraph's figures --------------------------------------------------
     # Prose, not a table, and every one of them is a transcription from `batch_curve`. The
     # paragraph carries the "bound batch size" decision, so a stale figure here argues for a
-    # batch size the measurement no longer supports.
+    # batch size the measurement no longer supports. Since Correction 2 the paragraph quotes
+    # P50 **and** P99 (the decision rule reads the tail), so pairs are checked as pairs.
     prose = _unquoted(text)
+    paired: set[int] = set()
+    for m in re.finditer(
+            rf"batch \*{{0,2}}(\d+)\*{{0,2}} (?:{_ARROW}) \*{{0,2}}(\d+\.\d+)"
+            rf"(?: ms P50)? / (\d+\.\d+)", prose):
+        batch = int(m.group(1))
+        paired.add(batch)
+        out.append(Check(f"ADR-032 batching prose: batch {batch} P50/P99",
+                         (float(m.group(2)), float(m.group(3))),
+                         lambda b=batch: _batch_pair(curve, b)))
     for m in re.finditer(rf"batch \*{{0,2}}(\d+)\*{{0,2}} (?:{_ARROW}) \*{{0,2}}(\d+\.\d+)",
                          prose):
         batch, published = int(m.group(1)), float(m.group(2))
+        if batch in paired:                     # already checked as a pair
+            continue
         out.append(Check(f"ADR-032 batching prose: batch {batch} P50", published,
-                         lambda b=batch: _batch_p50(art, b)))
-    for m in re.finditer(rf"all-(\d+)-in-one-call (?:{_ARROW}) \*{{0,2}}(\d+\.\d+)", prose):
-        batch, published = int(m.group(1)), float(m.group(2))
-        out.append(Check(f"ADR-032 batching prose: all-{batch}-in-one-call P50", published,
-                         lambda b=batch: _batch_p50(art, b)))
-    m = re.search(r"separate\s+calls at (\d+\.\d+)", prose)
+                         lambda b=batch: _batch_p50(curve, b)))
+    for m in re.finditer(rf"all-(\d+)-in-one-call (?:{_ARROW}) \*{{0,2}}(\d+\.\d+) / (\d+\.\d+)",
+                         prose):
+        batch = int(m.group(1))
+        out.append(Check(f"ADR-032 batching prose: all-{batch}-in-one-call P50/P99",
+                         (float(m.group(2)), float(m.group(3))),
+                         lambda b=batch: _batch_pair(curve, b)))
+    m = re.search(r"separate\s+calls at (\d+\.\d+) / (\d+\.\d+)", prose)
     if m:
-        out.append(Check("ADR-032 batching prose: sequential baseline (batch 1) P50",
-                         float(m.group(1)), lambda: _batch_p50(art, 1)))
+        out.append(Check("ADR-032 batching prose: sequential baseline (batch 1) P50/P99",
+                         (float(m.group(1)), float(m.group(2))),
+                         lambda: _batch_pair(curve, 1)))
 
     # --- prose ratio claims -----------------------------------------------------------------
     # Ratios get their own anchors because a ratio names its OPERANDS, and that is precisely
@@ -250,6 +291,84 @@ def _batch_p50(art: dict[str, Any], batch: int) -> float:
     return curve[str(batch)]["p50"]
 
 
+#: Figure copies outside `03`, as (regex, derivations) pairs. Capture group *i* is checked
+#: against derivation *i*, so a claim states its own operands positionally.
+#:
+#: Deliberately grep-shaped rather than a parser (ruled 2026-08-29: "simplest mechanical form
+#: acceptable; perfection not required, coverage is"). The failure mode this accepts is a claim
+#: whose wording drifts out of its anchor and stops being checked — which is why an anchor that
+#: matches nothing is reported as **ABSENT** rather than skipped: an unmatched anchor is a
+#: finding, not a pass.
+_DOC_CLAIMS: dict[str, list[tuple[str, list[Callable[[dict[str, Any]], Any]]]]] = {
+    "04 \u00a72.1": [
+        # "by **4.12x** - 12.38 ms vs 51.05 ms per-window P99 at the **2-window rung**"
+        (r"by \*\*(\d+\.\d+)\u00d7\*\* \u2014 (\d+\.\d+) ms vs (\d+\.\d+) ms per-window P99",
+         [lambda a: _ratio(a, 1, 6, 2, 99),
+          lambda a: round(_published_pair(a, 6, 2, "sequential")[1] / 2, 2),
+          lambda a: round(_published_pair(a, 1, 2, "sequential")[1] / 2, 2)]),
+        # "measured **0.40 ms P99 at 2 windows and 8.32 ms P99 at the 4000-token bound**"
+        (r"measured \*\*(\d+\.\d+) ms P99 at 2 windows and (\d+\.\d+) ms P99 at the "
+         r"4000-token bound\*\*",
+         [lambda a: art_tok(a, coverage_tokens(2), 1)["p99"],
+          lambda a: art_tok(a, 4000, 1)["p99"]]),
+        (r"(\d+\.\d+) / (\d+\.\d+) at 6 threads",
+         [lambda a: art_tok(a, coverage_tokens(2), 6)["p99"],
+          lambda a: art_tok(a, 4000, 6)["p99"]]),
+    ],
+    "06 \u00a74": [
+        # "**22.81 ms P50 for 2 windows and 655.50 ms at the 53-window ... bound**"
+        (r"\*\*(\d+\.\d+) ms P50 for 2 windows and (\d+\.\d+) ms at the (\d+)-window",
+         [lambda a: _published_pair(a, 6, 2, "sequential")[0],
+          lambda a: _published_pair(a, 6, 53, "sequential")[0],
+          lambda a: windows_for_tokens(4000)]),
+        (r"\*\*(\d+\.\d+) ms P99 for 2 windows and (\d+\.\d+) ms P99 at the bound\*\*",
+         [lambda a: art_tok(a, coverage_tokens(2), 6)["p99"],
+          lambda a: art_tok(a, 4000, 6)["p99"]]),
+        (r"(\d+\.\d+) / (\d+\.\d+) at 1 thread",
+         [lambda a: art_tok(a, coverage_tokens(2), 1)["p99"],
+          lambda a: art_tok(a, 4000, 1)["p99"]]),
+    ],
+}
+
+
+def doc_claims(art: dict[str, Any], label: str, text: str) -> list[Check]:
+    """Check one non-`03` doc's figure copies against the artifact."""
+    out: list[Check] = []
+    prose = _unquoted(text)
+    for pattern, derivations in _DOC_CLAIMS[label]:
+        m = re.search(pattern, prose)
+        if m is None:
+            out.append(Check(f"{label}: anchor {pattern[:34]!r}",
+                                "(no line in doc matches)", lambda: None,
+                                absent=True))
+            continue
+        for i, derive in enumerate(derivations):
+            published: Any = m.group(i + 1)
+            published = float(published) if "." in published else int(published)
+            out.append(Check(f"{label}: {m.group(0)[:40]} [{i + 1}]", published,
+                             lambda d=derive: d(art)))
+    return out
+
+
+def _batch_pair(art: dict[str, Any], batch: int) -> tuple[float, float]:
+    """`batch_curve[batch]` P50/P99 at 6 threads, refusing an unresolved percentile.
+
+    Correction 2 decoupled the curve's reps from the ladder's precisely so this pair exists: at
+    n=10 `p99` is `samples[8]`, and returning it here would let a doc publish a tail figure the
+    run cannot support.
+    """
+    curve = _run(art, 6)["batch_curve"]
+    if str(batch) not in curve:
+        raise LookupError(f"artifact has no batch_curve point at batch {batch}")
+    row = curve[str(batch)]
+    resolved = row.get("percentiles_resolved")
+    if resolved is None:
+        resolved = _percentiles_are_distinct(row["n"])
+    if not resolved:
+        raise LookupError(f"n={row['n']} cannot resolve a p99 at batch {batch}")
+    return (row["p50"], row["p99"])
+
+
 def _ratio(art: dict[str, Any], threads_hi: int, threads_lo: int, wins: int, pct: int) -> float:
     """Cross-thread ratio at one rung and one percentile — stated, never inferred."""
     hi = _published_pair(art, threads_hi, wins, "sequential")[1 if pct == 99 else 0]
@@ -273,9 +392,14 @@ _RATIO_CLAIMS: dict[str, Callable[[dict[str, Any]], float]] = {
 }
 
 
-def art_tok(art: dict[str, Any], tokens: int) -> dict[str, Any]:
-    """The tokenization row for exactly `tokens` tokens, or raise."""
-    tokz = _run(art, 6).get("tokenize") or {}
+def art_tok(art: dict[str, Any], tokens: int, threads: int = 6) -> dict[str, Any]:
+    """The tokenization row for exactly `tokens` tokens, or raise.
+
+    `threads` because `04` §2.1 cites the **1-thread** column (the one ADR-034 grounds on) while
+    `03` and `06` cite the 6-thread one. A checker that silently read one column for a figure
+    published from the other would report MISMATCH on a correct doc.
+    """
+    tokz = _run(art, threads).get("tokenize") or {}
     row = tokz.get(str(tokens))
     if row is None or "error" in row:
         raise LookupError(f"artifact has no tokenization measurement at {tokens} tokens")
@@ -287,17 +411,40 @@ def art_tok(art: dict[str, Any], tokens: int) -> dict[str, Any]:
     return row
 
 
+def collect(art: dict[str, Any], curve: dict[str, Any] | None, decisions: str,
+            spec: str, evalplan: str) -> list[Check]:
+    """Every derivation-claiming figure across all three docs.
+
+    Factored out so the CLI and the landing-gate test check the *same* set. When they each built
+    their own list, the gate could pass while the committed CLI failed (or the reverse) — the
+    guard and its test drifting apart is exactly the failure this module exists to prevent.
+    """
+    return (checks(art, decisions, curve)
+            + doc_claims(art, "04 \u00a72.1", spec)
+            + doc_claims(art, "06 \u00a74", evalplan))
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--artifact", type=Path, default=DEFAULT_ARTIFACT)
+    ap.add_argument("--curve-artifact", type=Path, default=DEFAULT_CURVE_ARTIFACT)
     ap.add_argument("--decisions", type=Path, default=DECISIONS)
+    ap.add_argument("--spec", type=Path, default=SPEC)
+    ap.add_argument("--evalplan", type=Path, default=EVALPLAN)
     args = ap.parse_args(argv)
 
     art = json.loads(args.artifact.read_text())
-    results = checks(art, args.decisions.read_text())
+    # A missing curve artifact is NOT fatal and NOT silent: the batch figures become NO SOURCE,
+    # which is the honest verdict for a figure whose run is absent.
+    curve = json.loads(args.curve_artifact.read_text()) if args.curve_artifact.exists() else None
+
+    results = collect(art, curve, args.decisions.read_text(),
+                      args.spec.read_text(), args.evalplan.read_text())
 
     width = max(len(c.label) for c in results)
-    print(f"re-derivation check — {args.decisions.name} vs {args.artifact.name}\n")
+    curve_name = args.curve_artifact.name if curve is not None else "ABSENT"
+    print(f"re-derivation check — {args.decisions.name} + {args.spec.name} + "
+          f"{args.evalplan.name}\n  vs {args.artifact.name} (ladder) + {curve_name} (curve)\n")
     for c in results:
         flag = "" if c.verdict == "OK" else "  <<<"
         print(f"  {c.label:<{width}}  published {str(c.published):<22} "
@@ -305,7 +452,7 @@ def main(argv: list[str] | None = None) -> int:
 
     bad = [c for c in results if c.verdict != "OK"]
     counts = {v: sum(1 for c in results if c.verdict == v)
-              for v in ("OK", "MISMATCH", "NO SOURCE")}
+              for v in ("OK", "MISMATCH", "NO SOURCE", "ABSENT")}
     print(f"\n{len(results)} figures checked: " +
           ", ".join(f"{n} {v}" for v, n in counts.items() if n))
     if bad:
@@ -314,5 +461,5 @@ def main(argv: list[str] | None = None) -> int:
     return 1 if bad else 0
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":                                 # pragma: no cover
     raise SystemExit(main())

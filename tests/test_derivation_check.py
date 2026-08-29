@@ -21,11 +21,15 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from eval.check_derivations import checks, main  # noqa: E402
+from eval.check_derivations import checks, collect, doc_claims, main  # noqa: E402
 
 DECISIONS = REPO / "docs" / "03-decisions.md"
 ARTIFACT = REPO / "reports" / "spike_window_latency.json"
 PRE = REPO / "reports" / "spike_window_latency.pre-correction-1.json"
+CURVE = REPO / "reports" / "spike_batch_curve.json"
+SPEC = REPO / "docs" / "04-policy-and-detection-spec.md"
+EVALPLAN = REPO / "docs" / "06-evaluation-plan.md"
+VERDICTS = ("OK", "MISMATCH", "NO SOURCE", "ABSENT")
 
 
 def _ladder_tables(doc: str) -> list[str]:
@@ -62,10 +66,19 @@ def _withdrawn_ladder_table(doc: str) -> str:
     raise AssertionError("no blockquoted (withdrawn) ladder table found in ADR-032")
 
 
-def _verdicts(artifact: Path) -> dict[str, list[str]]:
+def _verdicts(artifact: Path, curve: Path | None) -> dict[str, list[str]]:
+    """Verdicts for every figure across all three docs, via the CLI's own collection path.
+
+    `curve` is separate because Correction 2's batch figures were re-measured into their own
+    artifact (one run, one provenance stamp — M-33). Passing the artifact under test as its own
+    curve is what keeps a negative test honest: with `curve=None` the batch figures would come
+    back NO SOURCE for a *missing file* rather than a real defect, and the assertion would pass
+    for the wrong reason.
+    """
     art = json.loads(artifact.read_text())
-    out: dict[str, list[str]] = {"OK": [], "MISMATCH": [], "NO SOURCE": []}
-    for c in checks(art, DECISIONS.read_text()):
+    out: dict[str, list[str]] = {v: [] for v in VERDICTS}
+    for c in collect(art, json.loads(curve.read_text()) if curve else None,
+                     DECISIONS.read_text(), SPEC.read_text(), EVALPLAN.read_text()):
         out[c.verdict].append(c.label)
     return out
 
@@ -80,7 +93,7 @@ def test_correction1_checker_still_catches_the_defects_it_was_built_for() -> Non
       * percentiles published from sample sizes that cannot resolve them,
       * a tokenization table with no measuring script at all.
     """
-    v = _verdicts(PRE)
+    v = _verdicts(PRE, PRE)
     assert v["MISMATCH"] or v["NO SOURCE"], (
         "the checker reports the pre-correction artifact as clean — it has stopped checking"
     )
@@ -116,7 +129,7 @@ def test_correction1_withdrawn_coverage_labels_are_caught_specifically() -> None
         "the withdrawn 52-window table is no longer preserved in ADR-032 Correction 1 — it is the "
         "only record of what was published, and this guard's fixture"
     )
-    v: dict[str, list[str]] = {"OK": [], "MISMATCH": [], "NO SOURCE": []}
+    v: dict[str, list[str]] = {ver: [] for ver in VERDICTS}
     for c in checks(json.loads(ARTIFACT.read_text()), doc.replace(live, withdrawn)):
         v[c.verdict].append(c.label)
     coverage = [lab for lab in v["MISMATCH"] if "coverage label" in lab]
@@ -126,15 +139,7 @@ def test_correction1_withdrawn_coverage_labels_are_caught_specifically() -> None
 
 
 @pytest.mark.skipif(not ARTIFACT.exists(), reason="no published spike artifact")
-@pytest.mark.xfail(
-    reason="Correction 1 has landed and drove this from 6 OK/22 MISMATCH/12 NO SOURCE to 33 OK/6 "
-           "MISMATCH/1 NO SOURCE. Every remaining non-OK figure is inside ADR-032's batching "
-           "paragraph, which is under the OPEN deviation "
-           "[D1-batch-4-justification-falsified-at-the-corrected-bound] — re-citing those figures "
-           "would rewrite the justification the deviation contests, i.e. self-approve it "
-           "(AGENTS.md §5.4). Clears when that deviation is ruled, not before",
-    strict=True,
-)
+@pytest.mark.skipif(not CURVE.exists(), reason="no published batch-curve artifact")
 def test_correction1_committed_docs_rederive_against_committed_artifact() -> None:
     """The landing gate. Every derivation-claiming figure in ADR-032/034 must check out.
 
@@ -143,19 +148,29 @@ def test_correction1_committed_docs_rederive_against_committed_artifact() -> Non
     failing test swept under a marker (AGENTS.md §5.4). What it asserts is unchanged and the
     checker still runs on every invocation; only the expectation is dated.
 
-    Current verdicts against the committed pair: 6 OK / 22 MISMATCH / 12 NO SOURCE. The
-    MISMATCHes are run-to-run variance (the docs cite the original run, `reports/` holds a
-    re-run) except the batching-prose rows, which are 25-28% out because they read batch-curve
-    points that `contamination_signals` independently flags in that same artifact. The NO SOURCE
-    rows are the defect this correction exists for: a P99 was published from a sample that
-    cannot resolve one.
+    **Live as of Correction 2** — no longer xfailed. The marker it carried was waiting on
+    `[D1-batch-4-justification-falsified-at-the-corrected-bound]`: while that deviation was open,
+    ADR-032's batching figures could not be re-cited without rewriting the justification under
+    dispute (AGENTS.md §5.4), so 6 MISMATCH + 1 NO SOURCE were expected. Correction 2 re-measured
+    the curve at n=40 and re-cited from it; the marker was `strict=True` precisely so it could not
+    outlive that, and retiring it here is that mechanism working rather than a test being relaxed.
+    The assertions are unchanged — only the expectation was dated.
+
+    ABSENT is failed alongside them: a doc whose wording drifted out from under its anchor is an
+    unchecked claim, and an unchecked claim passing as OK is the failure mode this file exists to
+    prevent.
     """
-    v = _verdicts(ARTIFACT)
+    v = _verdicts(ARTIFACT, CURVE)
     assert not v["MISMATCH"], f"figures contradict the artifact: {v['MISMATCH']}"
     assert not v["NO SOURCE"], (
         "figures claim a derivation the artifact cannot produce — each must gain a source or "
         f"drop the claim (ADR-032 Correction 1): {v['NO SOURCE']}"
     )
+    assert not v["ABSENT"], (
+        f"a doc's wording drifted out from under its anchor, so these stopped being checked "
+        f"(fix the pattern in _DOC_CLAIMS, do not drop the claim): {v['ABSENT']}"
+    )
+    assert len(v["OK"]) >= 50, f"only {len(v['OK'])} figures checked; coverage regressed"
 
 
 @pytest.mark.skipif(not PRE.exists(), reason="pre-correction artifact not retained")
@@ -167,18 +182,20 @@ def test_correction1_check_exits_nonzero_on_a_defect() -> None:
     have retired a live assertion to accommodate a dated one — the failing half hiding the
     working half.
     """
-    assert main(["--artifact", str(PRE)]) == 1
+    assert main(["--artifact", str(PRE), "--curve-artifact", str(PRE)]) == 1
 
 
 @pytest.mark.skipif(not ARTIFACT.exists(), reason="no published spike artifact")
-@pytest.mark.xfail(
-    reason="same single cause as the gate above: ADR-032's batching paragraph is under an open "
-           "deviation, so 6 MISMATCH + 1 NO SOURCE remain and the exit status stays 1",
-    strict=True,
-)
+@pytest.mark.skipif(not CURVE.exists(), reason="no published batch-curve artifact")
 def test_landing_gate_check_exits_zero_once_the_docs_rederive() -> None:
-    """The other half: usable as a commit gate means exit 0 has to be reachable."""
-    assert main(["--artifact", str(ARTIFACT)]) == 0
+    """The other half: usable as a commit gate means exit 0 has to be reachable.
+
+    Also no longer xfailed, same cause as the gate above (Correction 2 landed the re-cited batch
+    figures). Kept split from its negative twin so the two directions of the exit contract fail
+    independently and name their own cause.
+    """
+    assert main(["--artifact", str(ARTIFACT),
+                 "--curve-artifact", str(CURVE)]) == 0
 
 
 def test_correction1_withdrawn_tables_are_quoted_and_so_excluded_from_rederivation() -> None:
@@ -203,3 +220,38 @@ def test_correction1_withdrawn_tables_are_quoted_and_so_excluded_from_rederivati
     )
     rows = _table_after(doc, "batched (all in one call)")
     assert [r[0] for r in rows] == ["1"], f"quoted table leaked into the check: {rows}"
+
+
+@pytest.mark.skipif(not ARTIFACT.exists(), reason="no published spike artifact")
+def test_widened_checker_covers_the_figure_copies_outside_adr032() -> None:
+    """The widening has teeth: `04` and `06` carry their own copies of ADR-032's figures.
+
+    A corrected ADR with stale copies downstream is the same defect one indirection out, so the
+    ruling that widened this check asked for coverage over precision. Asserted by count rather
+    than by value because the values are already checked by the landing gate — what can silently
+    regress is `_DOC_CLAIMS` being emptied or a doc dropping out of `collect()`.
+    """
+    art = json.loads(ARTIFACT.read_text())
+    for label, doc in (("04 \u00a72.1", SPEC), ("06 \u00a74", EVALPLAN)):
+        got = doc_claims(art, label, doc.read_text())
+        assert len(got) >= 4, f"{label} contributes only {len(got)} checks: {got}"
+        assert not [c for c in got if c.verdict == "ABSENT"], (
+            f"{label}: anchors match nothing — the figures are no longer being checked"
+        )
+
+
+@pytest.mark.skipif(not ARTIFACT.exists(), reason="no published spike artifact")
+def test_drifted_wording_reports_absent_not_ok() -> None:
+    """Drifted wording must be a finding, not a silent pass.
+
+    The regex approach's one real failure mode: reword the sentence and its figures stop being
+    checked while the run stays green. So an anchor matching nothing is reported, and reported as
+    ABSENT rather than NO SOURCE — the two send a reader to different places (a broken pattern vs
+    an ungrounded figure), and collapsing them would have a drifted doc read as a bad number.
+    """
+    art = json.loads(ARTIFACT.read_text())
+    drifted = SPEC.read_text().replace("0.41 / 8.22 at 6 threads", "0.41 / 8.22 at six threads")
+    assert drifted != SPEC.read_text(), "fixture string no longer present in 04 — re-point this"
+    verdicts = [c.verdict for c in doc_claims(art, "04 \u00a72.1", drifted)]
+    assert "ABSENT" in verdicts, f"drift went unreported; verdicts were {verdicts}"
+    assert "NO SOURCE" not in verdicts, "drift was misreported as an ungrounded figure"
