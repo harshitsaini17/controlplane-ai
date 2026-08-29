@@ -146,8 +146,8 @@ breaks that pattern in the way worth recording: it was found neither by reading 
 **probing a host configuration this machine is not** — masking the `dev` extra's two packages and re-running the
 ADR-031 graph build. Nothing in the docs is ambiguous and nothing measured missed a target; three individually correct
 positions compose into an unkeepable promise, and only a probe of the composition surfaces it. That subtotal is **scoped to
-Step-4-onward filings** — **24 closed + 0 open = 24** — and the 6 pre-Step-4 filings, all
-closed, bring the whole table to **30 closed + 0 open = 30**. Both are stated because the
+Step-4-onward filings** — **24 closed + 1 open = 25** — and the 6 pre-Step-4 filings, all
+closed, bring the whole table to **30 closed + 1 open = 31**. Both are stated because the
 scoped figure alone, sitting a sentence after an unscoped "22 filed", reads as arithmetic
 that cannot balance — it was reported that way once. The scope was the missing word, not the
 sum. `tests/test_deviation_ledger.py` now parses this table and fails if either identity
@@ -1591,6 +1591,62 @@ the two columns do not share a convention and the delta is not a naive subtracti
 convention a re-derivation picks, it must be picked **once** and applied to every row; this is
 noted because it is in the same rows and would otherwise look like an inconsistency introduced by
 the correction.
+
+## DEVIATION REPORT [D3-nfr-p002-gate-reads-the-clock-adr-036-rejected]
+Severity: MAJOR
+Doc & section: 03 ADR-036 item 2 ("the budget binds detector-attributable time"); 04 §2
+per-detector budgets; 05 §5 `cp_detector_latency_ms`; 06 §4 the NFR-P-002 check
+
+The doc says: ADR-036 ruled — one day ago, on the previous filing in this same table — that
+NFR-P-002 binds **detector-attributable** time rather than wall-clock, precisely because
+`max_workers=1` makes a pool user's wall-clock include time a *different* detector held the
+pool. `controlplane/detectors/base.py:878` enforces exactly that: `attributable_ms = sum(sink)
+if sink else elapsed_ms`, and a breach raises `DetectorTimeout`.
+
+Reality says: the benchmark gate was never moved onto that quantity. `pipeline.py:352-355`
+observes `cp_detector_latency_ms` from **wall-clock** (`elapsed = (perf_counter - started) *
+1000`); `eval/bench_latency.py:526` reads that same series and `check_nfr_p002` (line 557)
+gates its P99 against `budget_ms(detector)` (line 578). So the gate judges a quantity the
+ruling rejected. The stamped artifact from this sweep publishes two rows on that basis:
+
+| Requirement | Detector | Stat | Budget | Published |
+|---|---|---|---|---|
+| NFR-P-002 | `tier2_injection` | P99 | 25.0 ms | **25.569 ms** |
+| NFR-P-002 | `tier2_toxicity` | P99 | 25.0 ms | **25.114 ms** |
+
+The proof that the two clocks have already diverged is arithmetic, not inspection: those runs
+recorded **zero detector faults**. A sample above 25.0 ms on the *enforced* quantity cannot
+exist without `run_with_budget` raising `DetectorTimeout` and the pipeline recording a detector
+failure. A published P99 of 25.569 ms with no fault therefore proves the gated series is not
+the enforced series. (`reports/latency_report.md` rows 93-94; quiet-host start stamp
+load1 = 0.95, QUIET, n = 200.)
+
+Impact if we ignore it: NFR-P-002 has no working tripwire in either direction. A real
+attributable breach passes the gate whenever pool waiting is not the dominant term, and
+ordinary queueing on a shared single-worker pool fails the gate with no detector at fault —
+which is the same event `eval/fault_injection` cannot distinguish from an injected fault.
+
+Options:
+  A) Observe attributable time as its own series (a new 05 §5 channel), gate NFR-P-002 on it,
+     and keep publishing the wall-clock series as an ungated **queueing** figure — trade-off:
+     touches 05, and the two rows above stop being NFR-P-002 verdicts. It does **not** delete
+     them: both measurements are real and stay published; what changes is which requirement
+     they are evidence for. Cost is that wall-clock overhang becomes visible-but-ungated.
+  B) Amend ADR-036 so NFR-P-002 binds wall-clock, and keep the gate where it is — trade-off:
+     reverses a one-day-old ruling and re-opens what it settled. Under `max_workers=1` a
+     detector then fails its budget for its neighbour's work, and every published
+     `tier2_injection` figure becomes a verdict about pool scheduling.
+  C) Status quo: publish both figures, gate neither, label them "measured wall-clock, neither
+     met nor breached" (what README line 137 says today) — trade-off: honest, but leaves
+     NFR-P-002 with no tripwire at all through submission.
+
+Recommendation: **A**. It is the only option in which a VIOLATION row and a recorded detector
+fault can ever agree, and it costs no measurement — the numbers stay, their label changes.
+
+Blocked work: the OVLP-01 tripwire re-point (its instruction is to *cite the bench output*, and
+that output's verdict is the contested thing); any README, proposal or dashboard sentence
+asserting NFR-P-002 met **or** breached for the two Tier-2 detectors; and the ADR-030
+Amendment-3 hold rows that compose from Tier-2 budgets.
 
 ## Rulings received 2026-08-30 — implementation pending
 
