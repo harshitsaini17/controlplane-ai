@@ -90,9 +90,11 @@ SPAN_COUNTS: tuple[int, ...] = (1, 2, 3, 4, 8)
 #: of forty, with nothing above it. The first version of this harness reported exactly that,
 #: and printed a p99 column identical to its max column in all five rows.
 #:
-#: At n=200 the P99 interpolates between the 3rd- and 2nd-worst samples, with two observations
-#: above it. It is cheap to buy here in a way it is not in the model spikes: a call is ~5 ms,
-#: not ~600 ms, so the whole curve costs seconds.
+#: At n=200 the P99 interpolates at rank 197.01 of 0..199 — between the 3rd- and 2nd-worst
+#: samples, leaving the maximum strictly above it. 200 is **not** the smallest size that
+#: qualifies: `_p99_resolves_off_the_max` first returns True at **n=101**, searched rather than
+#: assumed. The margin is bought because it is nearly free here in a way it is not in the model
+#: spikes — a call is ~5 ms, not ~600 ms, so the whole curve costs seconds.
 DEFAULT_REPS = 200
 
 #: Seconds between quiet-gate polls, and how long to wait before giving up.
@@ -110,11 +112,19 @@ def _p99_resolves_off_the_max(n: int) -> bool:
     """Whether an interpolated P99 has any sample above it at this size.
 
     Distinct from `_percentiles_are_distinct`, which asks whether p95 and p99 land on
-    different order statistics. Both were True at n=40, and yet `percentile(s, 99)` there
+    different order statistics. Both are True at n=40, and yet `percentile(s, 99)` there
     interpolates at rank 38.61 of 0..39 — inside the gap between the two worst of forty,
-    with **nothing above it**. That is a maximum wearing a percentile's name, and it is what
-    the pre-correction artifact published. Two guards because there are two ways for a
-    percentile to be a fiction, and the existing one does not catch this one.
+    with **nothing above it**. A percentile no observation exceeds is a blend of the top two
+    order statistics, not a tail estimate. Two guards, because there are two ways for a
+    percentile to be a fiction and the existing one catches only the first.
+
+    Not to be confused with the defect that prompted this, which was cruder: the first
+    version of this harness indexed with `int(round(q * (n-1)))`, and `round(38.61)` is 39 —
+    the top index — so its published p99 was the max *exactly*. Truncation, which every other
+    harness here uses, never lands on the max at any n. Interpolation is the fix for that one;
+    n=200 is the fix for this one. Distinguished because the first correction of the
+    superseded artifact explained the `round()` defect using interpolation arithmetic it did
+    not come from — this file's own subject matter, committed inside its own fix.
     """
     if n < 3:
         return False
