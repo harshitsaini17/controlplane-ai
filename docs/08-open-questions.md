@@ -1581,3 +1581,30 @@ the two columns do not share a convention and the delta is not a naive subtracti
 convention a re-derivation picks, it must be picked **once** and applied to every row; this is
 noted because it is in the same rows and would otherwise look like an inconsistency introduced by
 the correction.
+
+## Rulings received 2026-08-30 — implementation pending
+
+Recorded on receipt so a ruling is not lost between sessions. **None of the three is
+implemented yet**: the session that received them was scoped to the enricher measurement and
+an explicit "no new work". Statuses below are therefore left as they were — in particular the
+D1 ledger row still reads OPEN, because §5.5 lands an approved deviation's doc updates in the
+same commit as the change, and that change has not happened.
+
+1. **`[D1-per-hold-derivation-maxes-detectors-that-share-one-worker]` — RULED.** ADR-030's
+   table recomposes as: the five ADR-034 pool-user detectors **SUM** within a lane (one worker
+   serializes them); non-pool detectors **overlap (~max)**. Requires: re-derive the affected
+   rows; update targets **front-door** (pre-measurement, on ADR-030's own precedent, with the
+   anti-laundering note); any row that cannot fit a plausible target **publishes untargeted**
+   (per-request-sum precedent); land as **ADR-030 Amendment 3**; then close the ledger row.
+   Closure is pending that work — the row is not closed by this record. Directly unblocks
+   `tier2_toxicity` and `rag_grounding`, both of which were blocked on it.
+2. **[[M-44]] — RULED, un-provisional.** `rag_grounding` **emits the whole scored sentence as
+   its span**. FR-DET-005's canonical one-signal shape requires a span-bearing host, and 15/16
+   frozen `person_present` fixtures depend on it. The span-less provision in 04 §6 **remains,
+   for `fast_consistency` only**. Note this needs **no enricher change**: NER over "span ± its
+   sentence window" for a whole-sentence span is NER over the sentence, as M-44's own
+   resolution anticipated.
+3. **`fast_consistency` — CUT to roadmap** (deadline + credits). SL entry to read: *"specified
+   (04 §2.3), unimplemented; UC-3 performance plane covered by `rag_grounding`."* Requires
+   policy adjustment (`consistency: "off"` — quoted, per the Q-09 YAML gotcha — and
+   `policy_version` bumps). The deep audit stays cut.

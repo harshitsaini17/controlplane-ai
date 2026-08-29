@@ -221,6 +221,21 @@ Eval suite:   .venv/bin/python -m eval.run_all                       → reports
                          Such a figure gains a derivation or loses the claim; there is no
                          third state. Run it after touching any of those figures. It is also
                          a pytest gate (`tests/test_derivation_check.py`), so CI runs it.
+              .venv/bin/python -m eval.spike_enrichment_latency  → reports/spike_enrichment_latency.json
+                         The 04 §2.2 enrichment cap, measured. `entity_enricher` has an
+                         NFR-P-002 budget and **no row in any lane**, so `bench_latency`
+                         cannot reach it (that harness enumerates `LANES`); this is the only
+                         harness that can. The quantity is a **curve over span count**, not a
+                         per-call latency: M-18 ruled the 10 ms an *aggregate per sentence*,
+                         so the question is whether the hold stays bounded in k or tracks 10k.
+                         Exit codes are three-valued — 0 cap holds, 1 measured and failed,
+                         **2 could not measure on a quiet host so nothing was written**. It
+                         self-gates on load1 and refuses to publish an uncitable artifact
+                         rather than overwriting evidence. Pinned by
+                         `tests/test_spike_enrichment_latency.py`, which also fails if the
+                         percentile guards are weakened (M-46: `_percentiles_are_distinct` is
+                         True at n=40 while the p99 it certifies has no sample above it, so
+                         reps default to 200 against a guard minimum of 101).
               Measurement runs need a QUIET HOST (06 §8). Every harness stamps
                          `os.getloadavg()` + CPU count at start/end via `eval/host_load.py`;
                          an artifact whose start stamp exceeds `QUIET_LOAD1_MAX` is NOT
@@ -312,9 +327,23 @@ duration, the following replaces §5.1's stop conditions; the rest of §5 stands
    wrong, and a figure whose source is briefly absent, are each indistinguishable from the defect
    class this repo keeps finding — *a figure described by a derivation it does not come from*.
 
+**Credit-conservation mode — in effect 2026-08-30 (deadline + credits).** Terse output. What
+lightens is the *spend*, not the honesty rules: §5.4 and the §11 enumeration rule are as
+binding here as they are above.
+
+- **No speculative sweeps.** Stale prose **outside** judge-facing reports is LISTED in one
+  file (`docs/STALE-PROSE.md`) for a single final pass, not fixed inline. Prose inside a
+  judge-facing report is still fixed where it is found — that is a published claim.
+- **M-rows batch per commit** rather than one commit each.
+- **Verify via existing gates only** — `pytest`, `eval.check_derivations`, the freeze gate,
+  `bench_latency --check`. No new hand-rolled parsers or instruments unless a **published
+  number** requires one.
+
 ---
 
-*Last updated: 2026-08-29 (§11.1: **endgame mode** added — stop conditions narrowed to three,
+*Last updated: 2026-08-30 (§10: `eval.spike_enrichment_latency` added — the only harness
+that reaches the 04 §2.2 enrichment stage; three-valued exit codes; refuses to publish an
+uncitable artifact. 2026-08-29, §11.1: **endgame mode** added — stop conditions narrowed to three,
 provisional resolutions batch-reviewed at phase end, honesty rules explicitly unchanged. Earlier
 the same day, §10: `eval.check_derivations` added, plus the quiet-host rule for measurement runs —
 ADR-032 Correction 1). When this file changes, note it in the session summary so the human knows
