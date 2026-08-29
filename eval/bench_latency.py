@@ -926,13 +926,35 @@ def render(
         )
     absent = sorted(set(BUDGETS_MS) - set(dstats))
     if absent:
-        lines += [
-            "",
-            f"**Not exercised in this run:** {', '.join(f'`{d}`' for d in absent)}. These are "
-            "unimplemented or policy-gated detectors, so their budgets are untested rather "
-            "than met — the distinction M-10 draws between \"checked, clean\" and \"never "
-            "checked\", applied to a benchmark.",
-        ]
+        # Partitioned by the REASON a detector has no row, because the two are different
+        # claims and the earlier single sentence ("unimplemented or policy-gated") went
+        # false for the first stage that was neither. `entity_enricher` is implemented and
+        # runs; it has no row because 04 §2.2 makes enrichment its own stage, so it is in no
+        # `LANES` row and a lane-shaped harness cannot reach it — and its budget is a 10 ms
+        # per-sentence AGGREGATE (M-18) rather than a per-detector lane latency, a different
+        # quantity rather than a missing measurement of this one. Derived from `LANES` so the
+        # next off-lane stage classifies itself instead of being misfiled (M-45).
+        lane_members = {d for names in LANES.values() for d in names}
+        unbuilt = [d for d in absent if d in lane_members]
+        off_lane = [d for d in absent if d not in lane_members]
+        if unbuilt:
+            lines += [
+                "",
+                f"**Not exercised in this run:** {', '.join(f'`{d}`' for d in unbuilt)}. These "
+                "are unimplemented or policy-gated detectors, so their budgets are untested "
+                "rather than met — the distinction M-10 draws between \"checked, clean\" and "
+                "\"never checked\", applied to a benchmark.",
+            ]
+        if off_lane:
+            lines += [
+                "",
+                "**Implemented, but outside this harness:** "
+                + ", ".join(f"`{d}`" for d in off_lane)
+                + ". In no `LANES` row, so no lane benchmark can produce a row for it: its "
+                "budget is untested **here**, which is a narrower claim than untested. Listed "
+                "rather than omitted, because a detector silently missing from a latency "
+                "table reads as one that met its budget.",
+            ]
 
     lines += [
         "",
