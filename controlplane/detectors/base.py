@@ -23,6 +23,8 @@ detector tuning travels in policy `detector_params`, which the engine passes thr
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 import asyncio
 import re
 import time
@@ -271,6 +273,48 @@ def ceiling_ms(name: str, units: int = 1) -> float:
 # --------------------------------------------------------------------------
 # Execution vehicle for CPU-bound model detectors (ADR-034 Part A)
 # --------------------------------------------------------------------------
+
+#: The 04 §2 rule (a) roster: the detectors whose inference runs on the shared pool.
+#:
+#: Declared rather than derived, because three of the five do not exist yet — a set built by
+#: inspecting `run_on_model_pool` callers would be silently short today and would make the
+#: ADR-030 Amendment 3 composition wrong in the safe-looking direction. Pinned against 04 §2
+#: rule (a)'s own sentence by `tests/test_hold_composition.py`, so the roster and the spec
+#: cannot drift apart unnoticed.
+POOL_USERS: frozenset[str] = frozenset({
+    "tier2_injection",
+    "tier2_toxicity",
+    "rag_grounding",
+    "fast_consistency",
+    "entity_enricher",
+})
+
+#: The engine step inside every hold: `cp.policy.evaluate` + `cp.action.apply`, combined.
+#:
+#: Set by ADR-030, which is why it is not in `BUDGETS_MS` — that dict is per-detector NFR-P-002
+#: budgets, and this is neither a detector nor a budget anyone measures against. It lives here
+#: so the ADR-030 derivation and its guard read one number.
+ENGINE_STEP_MS: float = 5.0
+
+
+def compose_hold(names: "Iterable[str]") -> float:
+    """The ADR-030 Amendment 3 worst-case hold for a lane carrying `names`.
+
+    `max(Σ pool users, max(non-pool)) + engine`. Pool users **sum** because `max_workers=1`
+    serializes them (ADR-034 Part A, load-bearing); non-pool detectors **overlap** the pool work
+    rather than adding to it, since a forward pass in a worker thread releases the event loop.
+
+    ADR-030 originally composed every hold as `max(...)` over the whole lane, which is correct
+    only where a lane holds at most one pool user — and two of its six rows hold more. The
+    correction was found by reading ADR-034 against it, not by a measurement, and Amendment 3
+    records that this function is the executable form of the rule: a sixth pool user or a budget
+    edit now moves the published table or fails `eval.check_derivations`.
+    """
+    members = list(names)
+    pool = sum(budget_ms(n) for n in members if n in POOL_USERS)
+    other = [budget_ms(n) for n in members if n not in POOL_USERS]
+    return max(pool, max(other) if other else 0.0) + ENGINE_STEP_MS
+
 
 #: One process-wide, single-worker pool shared by every model detector.
 #:

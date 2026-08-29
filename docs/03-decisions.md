@@ -767,12 +767,15 @@ written; both are now ruled and are carried in the arithmetic rather than absorb
 | Input lane | `max(tier1_pii 2, tier1_blocklist 2, tier2_injection 25, cost_budget 1, loop_guard 1)` + engine 5 | **30 ms** |
 | Per-sentence, typical | `max(tier1_pii 2, tier1_blocklist 2, tier2_toxicity 25, numeric_claims 5)` + engine 5 — `rag_grounding` skipped without context docs | **30 ms** |
 | Per-sentence, typical, enriched | `+ entity_enricher 10` (**aggregate per sentence**, 04 §2.2) | **40 ms** |
-| Per-sentence, with context docs | `max(30, rag_grounding 30)` + enrichment 10 + engine 5 | **45 ms** |
-| Per-sentence, `on_sampled` boundary compare | `max(30, fast_consistency 60)` + enrichment 10 + engine 5 | **75 ms** |
+| Per-sentence, with context docs | `max(30, rag_grounding 30)` + enrichment 10 + engine 5 | **45 ms** → **70 ms** (Amendment 3) |
+| Per-sentence, `on_sampled` boundary compare | `max(30, fast_consistency 60)` + enrichment 10 + engine 5 | **75 ms** → **100 ms**, untargeted (Amendment 3) |
 
 The enrichment term is now **flat, not `10k`** — that is the whole effect of the 04 §2.2 cap. The
 input lane carries no enrichment term at all: enrichment is conditional on a span-bearing
 `hallucination.*` signal (04 §2.2) and no input-lane detector emits one.
+
+**Superseded by Amendment 3 — pool users serialize, so two of these rows were wrong.** The
+paragraph below is kept as ruled; read it with the amendment's table beside it.
 
 **Every row fits, and one adjacency is stated rather than glossed.** Worst cases 30 / 40 / 45 / 75
 against P50 < 40 and P99 < 100: the input lane clears its P50 by 10 ms and its P99 by 20; the
@@ -784,7 +787,10 @@ of all traffic would be hallucination-flagged). But it is the first place this d
 break under a budget change, so it is written down where a future budget edit will hit it.
 
 **Targets:** input-lane hold **P50 < 40 ms, P99 < 50 ms**; per-sentence hold **P50 < 40 ms,
-P99 < 100 ms**. Streaming pipelines only, as before.
+P99 < 100 ms**. Streaming pipelines only, as before. *(Amendment 2 scopes the input-lane
+target to single-window inputs. Amendment 3 scopes the per-sentence P99 to holds with at most
+one pool user besides enrichment and `rag_grounding`: the two `on_sampled` compositions it
+re-derives, at 100 and 130 ms, are published **untargeted**.)*
 
 Why these and not others. The input lane's *detector* composition is 25 ms and `tier2_injection`
 runs on *every* request, so its P50 cannot be set below 25 — 30 ms once the engine step is
@@ -1051,6 +1057,108 @@ in this amendment touches `tier1_pii`'s recall target or any figure already publ
 
 **Docs touched:** 01 §5 (NFR-P-001 input-lane scope), 06 §4 (the bucketed series + the `--check`
 narrowing), 08 (deviation closed).
+
+### Amendment 3 — 2026-08-30: pool users **serialize**, so a hold composes as `max(Σ pool, max(non-pool)) + engine` (resolves `[D1-per-hold-derivation-maxes-detectors-that-share-one-worker]`)
+
+**Status:** Accepted 2026-08-30. Recommendation **A** of the filed report, approved: re-derive the
+table with pool users composed as `sum`, keep `max_workers=1`, correct the `~max` prose.
+
+**Context.** ADR-030's derivation composes every hold as `max(...)` over its lane. ADR-034 Part A,
+ruled one day later, binds five *named* model detectors — `tier2_injection`, `tier2_toxicity`,
+`rag_grounding`, `fast_consistency`'s embedding comparison, `entity_enricher` — to one shared
+`max_workers=1` pool, and calls that setting load-bearing because it preserves the
+one-inference-at-a-time conditions **SL-5** was measured under. Both cannot hold on a lane carrying
+two pool users, and `LANES[output_sentence]` already names two of the five.
+
+### Decision — one composition rule, stated as arithmetic
+
+A hold is **`max(Σ pool users, max(non-pool detectors)) + engine 5`**.
+
+Pool users **sum** because one worker serializes them. Non-pool detectors **overlap** the pool work
+rather than adding to it: a forward pass in a worker thread releases the event loop, so the regex
+emitters run inside the model's wall time. Enrichment carries no separate term in this rule — it is
+a pool user (04 §2.2's 10 ms aggregate) and enters the Σ, which is why the rows that already
+treated it additively do not move.
+
+| Hold | Pool users (serialize) | Non-pool (overlap) | Worst case | Against the target |
+|---|---|---|---|---|
+| Input lane | `tier2_injection` 25 | 2 | **30 ms** | P99 < 50 — fits |
+| Per-sentence, typical | `tier2_toxicity` 25 | 5 | **30 ms** | P50 < 40 — fits |
+| Per-sentence, typical, enriched | 25 + `entity_enricher` 10 = 35 | 5 | **40 ms** | P50 < 40 — **zero margin, unchanged** |
+| Per-sentence, with context docs | 25 + `rag_grounding` 30 + `entity_enricher` 10 = 65 | 5 | **70 ms** *(was 45)* | P99 < 100 — fits, 30 ms margin |
+| Per-sentence, `on_sampled`, no context | 25 + `fast_consistency` 60 + `entity_enricher` 10 = 95 | 5 | **100 ms** *(was 75)* | **untargeted** (below) |
+| Per-sentence, `on_sampled` + context | 25 + 30 + 60 + 10 = 125 | 5 | **130 ms** *(newly tabulated)* | **untargeted** (below) |
+
+Three rows are unchanged, which is not a coincidence and is the reason the fix is narrow: a hold
+with **one** pool user has nothing to serialize against, so `Σ` and `max` agree. Only rows 4-6
+carry two or more.
+
+**Row 6 was never tabulated.** ADR-030's table had no `on_sampled`-with-context-docs row at all, so
+the worst case it published (75 ms) was not the worst case its own budgets allow. It is tabulated
+here rather than left implicit — an omitted row is how a derivation stays fitting.
+
+### Target disposition — the reachable rows fit, and the two that do not lose their target
+
+1. **No target moves.** Input-lane P50 < 40 / P99 < 50 and per-sentence P50 < 40 / P99 < 100 all
+   stand at their ADR-030 values. This was not the expected outcome when the ruling was issued, and
+   it is stated plainly rather than dressed as a vindication: it holds only because the rows that
+   breach are the two `fast_consistency` rows, and item 3 below makes them unreachable.
+2. **The per-sentence P99's *scope* narrows.** It covers holds composed of at most one pool user
+   plus enrichment plus `rag_grounding` — i.e. the reachable set. The two `on_sampled` rows
+   (100 ms, 130 ms) are **published untargeted**, on the per-request-sum precedent this ADR
+   established: a quantity that cannot honestly carry a target keeps its visibility and loses its
+   target, rather than the target being loosened to admit it.
+3. **`fast_consistency` is cut to roadmap** (same sweep, 2026-08-30), so rows 5-6 describe no
+   shipped path today. **This is not what resolves them.** The cut is a scope decision and the
+   untargeted publication is a specification one; landing `fast_consistency` later re-arms both
+   rows at 100 and 130 ms against P99 < 100. Recording the untargeted status now is what keeps that
+   from arriving as a surprise, so the rows stay in the table with their arithmetic intact.
+4. **The enriched-typical row's zero margin is untouched** — still exactly 40.0 against a strict
+   `< 40`, still argued not to be a P50 breach on the grounds that a median sentence is unenriched.
+   Amendment 3 neither improves nor worsens it; it is repeated here only so a reader of the new
+   table does not think the adjacency was resolved.
+
+### Anti-laundering record
+
+This amendment changes the scope of a target, so the same record ADR-030 and Amendment 2 carried:
+
+- **It lands BEFORE any measurement of the affected rows exists.** `tier2_toxicity`,
+  `rag_grounding` and `fast_consistency` are all unimplemented at the moment of ruling; nothing has
+  been run against the old figures and missed them. The re-derivation is arithmetic over 04 §2
+  budgets, exactly as ADR-030's original was.
+- **The correction was found by reading the contracts, not by a measurement that failed.** It was
+  filed while checking whether ADR-030's table survived ADR-034 — which is the honest order.
+- **Every affected row keeps being published, including the two that lose targeting and the one
+  that was never tabulated.** Nothing is withdrawn from publication.
+- **Distinct from ADR-026 §5**, which bars moving a target a measurement has already missed. That
+  bar is untouched: SL-1 (`tier1_pii` recall 0.8852 vs 0.95) remains unmet and unmoved, and ADR-026
+  §5's single re-measurement stays consumed.
+- **The old figures are not quietly overwritten.** 45 and 75 appear above as *(was 45)* / *(was 75)*
+  so the movement is legible in the table itself.
+
+### The `~max` prose is corrected where it lives
+
+02 §4 promised that at Tier-2 "lane composition becomes `~max` rather than `sum`". That is true only
+of the lane shape the trigger was written for — one pool user plus regex emitters. Both sites (02 §4
+and this ADR's concurrency-trigger ruling) now state the two-part rule. The trigger itself is
+**unchanged and still correct**: it fires on the first Tier-2 detector, and the concurrency it buys
+is real for non-pool detectors.
+
+The D1 report's `gather` diagnostics (model + 2 regex at 1.04x; model + model at 0.98x) are
+**NOT citable** — `load1` 2.39 against `QUIET_LOAD1_MAX` 1.0 (06 §8) — and this amendment does not
+rest on them. It rests on `max_workers=1`, which ADR-034 Part A rules load-bearing.
+
+### Consequence — the derivation gains the guard it never had
+
+The report's second finding was that **nothing in the repo detects this**: ADR-030's table had no
+source artifact and no test, so two rows were arithmetically wrong against a later ADR while CI was
+green. `eval.check_derivations` now re-derives this table from `BUDGETS_MS` and the pool-user set,
+which makes the composition rule executable rather than prose. A future budget edit or a sixth pool
+user moves the table or fails the gate.
+
+**Docs touched:** 03 (this amendment), 02 §4 (the `~max` sentence), 04 §2 rule (a) (the composition
+rule stated where the budgets live), 08 (deviation closed), README (NFR-P-001 projection row),
+`eval/bench_latency.py` (the projection caveat now names the ruling instead of the open deviation).
 
 ---
 

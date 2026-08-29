@@ -42,6 +42,11 @@ from typing import Any, Callable
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
+from controlplane.detectors.base import (  # noqa: E402  (after sys.path)
+    POOL_USERS,
+    budget_ms,
+    compose_hold,
+)
 from eval.spike_tier2_models import _percentiles_are_distinct  # noqa: E402
 from eval.spike_window_latency import (  # noqa: E402  (after sys.path)
     coverage_tokens,
@@ -411,6 +416,83 @@ def art_tok(art: dict[str, Any], tokens: int, threads: int = 6) -> dict[str, Any
     return row
 
 
+#: ADR-030 Amendment 3's six holds, as detector rosters. No latency is written here —
+#: `compose_hold` reads `BUDGETS_MS`, so a budget edit moves the derivation and the published
+#: table must move with it or this gate fails.
+#:
+#: This closes the D1 report's second finding: ADR-030's table had no source artifact and no
+#: test, so two of its rows were arithmetically wrong against a later ADR while CI stayed green.
+_HOLD_ROSTERS: dict[str, tuple[str, ...]] = {
+    "Input lane": (
+        "tier1_pii", "tier1_blocklist", "tier2_injection", "cost_budget", "loop_guard"),
+    "typical": (
+        "tier1_pii", "tier1_blocklist", "tier2_toxicity", "numeric_claims"),
+    "enriched": (
+        "tier1_pii", "tier1_blocklist", "tier2_toxicity", "numeric_claims", "entity_enricher"),
+    "context docs": (
+        "tier1_pii", "tier1_blocklist", "tier2_toxicity", "numeric_claims", "rag_grounding",
+        "entity_enricher"),
+    "no context": (
+        "tier1_pii", "tier1_blocklist", "tier2_toxicity", "numeric_claims", "fast_consistency",
+        "entity_enricher"),
+    "+ context": (
+        "tier1_pii", "tier1_blocklist", "tier2_toxicity", "numeric_claims", "rag_grounding",
+        "fast_consistency", "entity_enricher"),
+}
+
+
+def _roster_for(hold_cell: str) -> tuple[str, ...] | None:
+    """The roster whose key matches this Hold cell.
+
+    Longest key first: "context docs" must beat "+ context" on the row containing both words,
+    and "enriched" must beat "typical" on the enriched-typical row.
+    """
+    for key in sorted(_HOLD_ROSTERS, key=len, reverse=True):
+        if key in hold_cell:
+            return _HOLD_ROSTERS[key]
+    return None
+
+
+def hold_checks(text: str) -> list[Check]:
+    """ADR-030 Amendment 3's composition table, re-derived from the budgets.
+
+    Three checks per row, because each row makes three separable claims: the stated pool sum,
+    the stated non-pool max, and the composed worst case. Checking only the total would let a
+    row reach the right answer by the wrong arithmetic — which is the defect being fixed.
+    """
+    out: list[Check] = []
+    try:
+        rows = _table_after(_unquoted(text), "Pool users (serialize)")
+    except LookupError:
+        return [Check("ADR-030 Amd 3: composition table", "(table not found)",
+                      lambda: None, absent=True)]
+    for row in rows:
+        hold, pool_cell, other_cell, worst_cell = row[0], row[1], row[2], row[3]
+        roster = _roster_for(hold)
+        if roster is None:
+            out.append(Check(f"ADR-030 Amd 3: roster for {hold[:30]!r}",
+                             "(no roster matches)", lambda: None, absent=True))
+            continue
+        # LAST integer in the cell: detector names carry digits ("tier2_toxicity 25"), and a
+        # summed cell states its own total last ("25 + rag_grounding 30 = 55").
+        stated_pool = re.findall(r"\d+", pool_cell)
+        if stated_pool:
+            out.append(Check(
+                f"ADR-030 Amd 3: {hold[:28]} pool sum", float(stated_pool[-1]),
+                lambda r=roster: sum(budget_ms(n) for n in r if n in POOL_USERS)))
+        stated_other = _int(other_cell)
+        if stated_other is not None:
+            out.append(Check(
+                f"ADR-030 Amd 3: {hold[:28]} non-pool max", float(stated_other),
+                lambda r=roster: max(budget_ms(n) for n in r if n not in POOL_USERS)))
+        worst = _int(worst_cell)
+        if worst is not None:
+            out.append(Check(
+                f"ADR-030 Amd 3: {hold[:28]} worst case", float(worst),
+                lambda r=roster: compose_hold(r)))
+    return out
+
+
 def collect(art: dict[str, Any], curve: dict[str, Any] | None, decisions: str,
             spec: str, evalplan: str) -> list[Check]:
     """Every derivation-claiming figure across all three docs.
@@ -421,7 +503,8 @@ def collect(art: dict[str, Any], curve: dict[str, Any] | None, decisions: str,
     """
     return (checks(art, decisions, curve)
             + doc_claims(art, "04 \u00a72.1", spec)
-            + doc_claims(art, "06 \u00a74", evalplan))
+            + doc_claims(art, "06 \u00a74", evalplan)
+            + hold_checks(decisions))
 
 
 def main(argv: list[str] | None = None) -> int:

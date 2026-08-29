@@ -80,7 +80,11 @@ Never inline on the event loop. ONNX Runtime releases the GIL during `sess.run`,
 live for concurrent requests; and an awaited future is what makes `asyncio.wait_for` a real
 enforcement point rather than a dead letter, since against inline CPU work the timeout fires only
 once control returns. `max_workers=1` serializes inference, preserving the one-inference-at-a-time
-conditions **SL-5** measured under, and **queue wait counts inside the ceiling**.
+conditions **SL-5** measured under, and **queue wait counts inside the ceiling**. Serialization
+also fixes how a **lane** composes: two pool users on one lane add their budgets rather than
+overlapping, so a hold is `max(Σ pool, max(non-pool)) + engine` (ADR-030 Amendment 3).
+`compose_hold` in `detectors/base.py` is the single implementation, and `eval.check_derivations`
+re-derives the published table from it.
 
 A timed-out executor task is **abandoned, not killed** — Python cannot preempt a running thread, so
 the request proceeds under policy `fail_mode` while the thread finishes. Counted by
