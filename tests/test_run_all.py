@@ -36,6 +36,7 @@ from eval.run_all import (
     SKIPPED,
     UNLOADABLE,
     V1_BASELINE,
+    _calibration_section,
     _demote_unloadable,
     DetectorResult,
     LabelScore,
@@ -47,6 +48,7 @@ from eval.run_all import (
     load_cases,
     main,
 )
+from eval.suggest_thresholds import Band, Calibration
 from eval.validate_dataset import DATASET_DIR, load_policies
 
 #: The 06 §3.3 matrices are identical for every test in this module, and computing them runs
@@ -351,8 +353,120 @@ def test_report_computes_both_policy_matrices_and_keeps_them_separate() -> None:
     assert "Reconciliation" in report
     assert "masked" in report
 
-    # Calibration remains genuinely absent — the rule still binds where it applies.
-    assert "## Threshold calibration (06 §3) — NOT COMPUTED" in report
+    # Calibration is not supplied to THIS builder call, and the seeded-τ rule must bind
+    # anyway. Asserted on the rule text rather than on the heading: the heading is now
+    # four-valued, and "— NOT COMPUTED" is a prefix of "— NOT COMPUTED IN THIS RUN", so a
+    # heading assertion would pass by substring accident and stop testing anything.
+    assert "## Threshold calibration (06 §3) — NOT COMPUTED IN THIS RUN" in report
+    assert "no figure in this report derives from a seeded τ" in report
+
+
+def test_the_calibration_section_reports_an_inverted_band_without_clamping_it() -> None:
+    """**Supersedes** this module's former "calibration is absent" premise (06 §3).
+
+    That premise was correct while both confidence-kind detectors were stubs. `rag_grounding`
+    now ships, so `main()` computes a real band — and the band INVERTS (SL-7). The assertion
+    is transitioned rather than dropped, and to something strictly stronger: the section must
+    publish the failed band, name it invalid, and still state the seeded-τ rule. A section
+    that quietly clamped τ_low below τ_high would manufacture a shippable-looking number out
+    of a failed calibration (AGENTS.md §5.4, §7), and nothing else in the suite would notice.
+
+    Synthetic `Calibration` on purpose — this pins the *reporting* contract, not the
+    measurement. The measurement is `eval.suggest_thresholds` on a quiet host (06 §8).
+    """
+    cal = Calibration(
+        alpha=0.10,
+        band=Band(
+            tau_low=0.8365,
+            tau_high=0.7157,
+            n_calibration=55,
+            n_eval=23,
+            achieved={"no": (11, 12), "yes": (5, 6), "borderline": (0, 5)},
+            inverted=True,
+        ),
+        spread={"tau_low": (0.8039, 0.8808), "tau_high": (0.6546, 0.7980)},
+        score_summary={
+            "no": {"n": 41, "min": 0.0801, "median": 0.6380, "max": 0.9583},
+            "borderline": {"n": 16, "min": 0.6609, "median": 0.8188, "max": 0.9309},
+            "yes": {"n": 21, "min": 0.1302, "median": 0.8766, "max": 1.0},
+        },
+        auc=0.8751,
+        oracle=(56, 78),
+        alpha_sweep=[
+            (0.10, 0.8365, 0.7157, True, 56, 78),
+            (0.20, 0.7886, 0.8101, False, 51, 78),
+        ],
+        overlap={
+            "yes_min": 0.1302,
+            "yes_n": 21,
+            "no_max": 0.9583,
+            "no_n": 41,
+            "no_at_or_above_tau_high": 11,
+            "yes_below_tau_low": 7,
+        },
+        inverted_seeds=(5, 5),
+    )
+    section = "\n".join(_calibration_section(cal))
+
+    # The failure is in the heading, not buried in a footnote.
+    assert "MEASURED, AND THE BAND INVERTS (SL-7)" in section
+    # Both edges published as measured, in the inverted order, unclamped.
+    assert "0.8365" in section and "0.7157" in section
+    assert "not clamped" in section
+    # The mechanism is the tails, and it is quantified rather than asserted.
+    assert "tails overlap" in section
+    assert "11 of 41" in section and "7 of 21" in section
+    # Not one unlucky split, counted over seeds.
+    assert "all 5" in section
+    # The ceiling is what makes it unfixable by any α.
+    assert "56/78" in section
+    assert "no calibration at any α can beat" in section
+    # α is swept and explicitly NOT re-selected (AGENTS.md §7, §11.1 item 3).
+    assert "swept, not selected" in section
+    assert "α stays at 0.1" in section
+    # And the consequence for every other figure in the report.
+    assert "SEED(pre-calibration)" in section
+    assert "no figure in this report derives from a seeded τ" in section
+
+
+def test_the_calibration_section_does_not_assert_a_finding_the_numbers_contradict() -> None:
+    """A well-ordered corpus must NOT print the inversion prose.
+
+    This is the negative control for the whole section. An earlier draft hardcoded its
+    diagnosis, so it kept printing a finding after the finding stopped being true — the exact
+    defect class this repo keeps catching in its own prose. Derived verdicts are testable;
+    hardcoded ones are not, which is why this test can exist at all.
+    """
+    cal = Calibration(
+        alpha=0.10,
+        band=Band(0.30, 0.70, 50, 20, achieved={"yes": (6, 6)}, inverted=False),
+        spread={"tau_low": (0.29, 0.31), "tau_high": (0.69, 0.71)},
+        score_summary={
+            "no": {"n": 20, "min": 0.01, "median": 0.15, "max": 0.28},
+            "borderline": {"n": 10, "min": 0.35, "median": 0.50, "max": 0.65},
+            "yes": {"n": 20, "min": 0.75, "median": 0.90, "max": 0.99},
+        },
+        auc=1.0,
+        oracle=(50, 50),
+        alpha_sweep=[(0.10, 0.30, 0.70, False, 50, 50)],
+        overlap={
+            "yes_min": 0.75,
+            "yes_n": 20,
+            "no_max": 0.28,
+            "no_n": 20,
+            "no_at_or_above_tau_high": 0,
+            "yes_below_tau_low": 0,
+        },
+        inverted_seeds=(0, 5),
+    )
+    section = "\n".join(_calibration_section(cal))
+    assert "INVERTS" not in section
+    assert "INVERTED" not in section
+    assert "Band order valid" in section
+    assert "no seed inverted" in section
+    assert "They do, in this run" in section
+    # The seeded-τ consequence still holds: this band is a proposal, not applied (04 §7 step 4).
+    assert "no figure in this report derives from a seeded τ" in section
 
 
 def test_report_names_every_unscored_detector_and_its_lost_positives() -> None:
