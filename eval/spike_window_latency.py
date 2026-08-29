@@ -156,25 +156,18 @@ if coverage_tokens(max(WINDOW_COUNTS)) < POLICY_BOUND_TOKENS:
         f"{POLICY_BOUND_TOKENS}: the bound case would under-cover (ADR-032 Correction 1)"
     )
 
-def _reps_for(n_windows: int, reps: int) -> int:
-    """Reps for the **batch curve**, scaled down as the work per rep grows.
-
-    The batch curve publishes **p50 only** (ADR-032's batching paragraph reads medians), and a
-    median of 10 samples is a median, so its points stay cheap.
-
-    **The ladder deliberately does not use this** — ADR-032 Correction 1 item 3. The ladder
-    publishes percentiles, and `_percentiles_are_distinct` is False below n=40: at n=10 both
-    `int(0.95*9)` and `int(0.99*9)` are 8, so a "p99" from 10 samples is `samples[8]`, the
-    second-worst of ten, wearing a p99 label. ADR-032's first table did exactly that at its four
-    largest rungs — the figures were real, the percentile they claimed was not, and the symptom
-    was a bound-case "P99" that moved 10.9% between two runs whose p50s agreed to 1.2%. The
-    ladder therefore runs full `reps` at every rung and pays the wall-clock for it.
-    """
-    if n_windows >= 32:
-        return max(5, reps // 4)
-    if n_windows >= 8:
-        return max(10, reps // 2)
-    return reps
+#: Reps for the **batch curve**, decoupled from the ladder's (ADR-032 Correction 2).
+#:
+#: It used to be `_reps_for(top_rung, reps)`, which quartered the reps at the bound and left
+#: every curve point at n=10. That was defensible only while the curve published p50 alone:
+#: `_percentiles_are_distinct` is False below n=40, so at n=10 both `int(0.95*9)` and
+#: `int(0.99*9)` are 8 and a "p99" is `samples[8]` — the second-worst of ten wearing a
+#: percentile's label. The batch-4 deviation then needed exactly the figure that resolution
+#: could not supply: `[D1-batch-4-justification-falsified-at-the-corrected-bound]` had to
+#: report that the instrument could not order b2 against b4, because the curve's own reps were
+#: derived from the ladder's. Two axes that answer different questions must be set
+#: independently, so they now are.
+CURVE_REPS = 40
 
 
 # `load_stamp`, `QUIET_LOAD1_MAX` and `quiet_verdict` live in `eval/host_load.py` — one
@@ -331,14 +324,21 @@ def _feeds(win: dict[str, Any], fed: list[str], batch: int) -> list[dict[str, An
     return out
 
 
-def _measure(threads: int, reps: int) -> dict[str, Any]:
+def _measure(threads: int, reps: int, curve_reps: int = CURVE_REPS,
+             ladder: bool = True) -> dict[str, Any]:
     """One thread setting: window-count ladder + batch curve + tokenization curve.
 
     Three load stamps bracket the phases (Correction 1 item 2). `load_before_batch_curve` is
     not decoration: the batch curve is the phase a concurrent export poisoned, and it is the
     phase whose points are cheapest (10 reps), so it is the one a transient can ruin whole.
     """
-    run: dict[str, Any] = {"threads": threads, "reps": reps}
+    run: dict[str, Any] = {"threads": threads, "reps": reps, "curve_reps": curve_reps}
+    if not ladder:
+        # Three-valued, not silently clean: `contamination_signals` reads the ladder for
+        # LOCAL SPIKE and CROSS-MEASUREMENT, so with no ladder those two are *unmeasurable*
+        # rather than passing. An artifact that returned 0 signals without saying which
+        # checks could not run would read as clean when it is merely unchecked.
+        run["contamination_checks_inapplicable"] = ["LOCAL SPIKE", "CROSS-MEASUREMENT"]
     # A DIAGNOSTIC, not the citability stamp. `_measure` runs once per thread setting, and load
     # averages decay over ~60 s, so the second call's "start" reads back the first call's own
     # load — measured at 6.66 on a host that was quiet, which under `QUIET_LOAD1_MAX` would
@@ -383,7 +383,7 @@ def _measure(threads: int, reps: int) -> dict[str, Any]:
         # samples is `samples[8]` wearing a p99 label, which is the defect class Correction 1
         # exists to remove, so the wall-clock is paid instead.
         run["ladder"] = {}
-        for n_windows in WINDOW_COUNTS:
+        for n_windows in (WINDOW_COUNTS if ladder else ()):
             win = _windows_for(text, tok, n_windows)
             row: dict[str, Any] = {
                 "windows": n_windows,
@@ -399,8 +399,7 @@ def _measure(threads: int, reps: int) -> dict[str, Any]:
         win = _windows_for(text, tok, max(WINDOW_COUNTS))
         for batch in BATCH_SIZES:
             feeds = _feeds(win, fed, batch)
-            run["batch_curve"][str(batch)] = _time_calls(
-                sess, feeds, _reps_for(max(WINDOW_COUNTS), reps))
+            run["batch_curve"][str(batch)] = _time_calls(sess, feeds, curve_reps)
     except Exception as exc:                       # noqa: BLE001 — recorded, not raised
         run["error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
     finally:
@@ -630,6 +629,13 @@ def main(argv: list[str] | None = None) -> int:
     # A cheaper smoke run is still available via `--reps`; `percentiles_resolved` and
     # `eval.check_derivations` are what stop one being published.
     ap.add_argument("--reps", type=int, default=40)
+    # Decoupled from --reps deliberately (Correction 2): the curve's resolution is what
+    # the batch decision reads, and tying it to the ladder's is what left the batch-4
+    # question unanswerable at n=10.
+    ap.add_argument("--curve-reps", type=int, default=CURVE_REPS)
+    ap.add_argument("--no-ladder", action="store_true",
+                    help="measure the batch curve only; the ladder is not re-rolled, so a "
+                         "landed ladder figure keeps its artifact (Correction 2)")
     ap.add_argument("--out", default="reports/spike_window_latency.json")
     ap.add_argument("--render", metavar="FILE",
                     help="re-render an existing artifact; measures nothing")
@@ -661,7 +667,8 @@ def main(argv: list[str] | None = None) -> int:
         "runs": [],
     }
     for threads in (args.threads or [6, 1]):
-        art["runs"].append(_measure(threads, args.reps))
+        art["runs"].append(_measure(threads, args.reps, args.curve_reps,
+                                    ladder=not args.no_ladder))
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
