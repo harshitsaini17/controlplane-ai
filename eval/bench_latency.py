@@ -1095,15 +1095,30 @@ def render(
         "sentence-level interception promises — each hold is the delay before *that* sentence "
         "appears — and the total is published untargeted beside it so a reader can see both.",
         "",
-        "**The fit is now unconditional (M-18 / M-19 closed).** It was conditional when ADR-030 "
-        "was accepted: `entity_enricher` was budgeted per *span*, so a heavily-enriched sentence "
-        "composed to `60 + 10k` and crossed the 100 ms per-sentence P99 at **k = 4**, with no doc "
-        "bounding `k`. 04 §2.2 now caps enrichment at **10 ms aggregate per sentence**, so `k` "
-        "leaves the arithmetic entirely, and the policy+action step carries a **combined 5 ms "
-        "budget** instead of sitting untracked inside a targeted quantity. Worst cases become "
-        "30 / 40 / 45 / 75 ms and every row fits. Both caps were ruled where the budget lives "
-        "(04 §2.2) rather than inside the target that needed them — inventing a bound to make "
-        "one's own target fit is the move AGENTS.md §5.4 forbids.",
+        "**The unconditional fit (M-18 / M-19) is now contested — see below.** It was "
+        "conditional when ADR-030 was accepted: `entity_enricher` was budgeted per *span*, so a "
+        "heavily-enriched sentence composed to `60 + 10k` and crossed the 100 ms per-sentence P99 "
+        "at **k = 4**, with no doc bounding `k`. 04 §2.2 now caps enrichment at **10 ms aggregate "
+        "per sentence**, so `k` leaves the arithmetic entirely, and the policy+action step carries "
+        "a **combined 5 ms budget** instead of sitting untracked inside a targeted quantity. Both "
+        "caps were ruled where the budget lives (04 §2.2) rather than inside the target that "
+        "needed them — inventing a bound to make one's own target fit is the move AGENTS.md §5.4 "
+        "forbids.",
+        "",
+        "**ADR-030's worst cases (30 / 40 / 45 / 75 ms) are under an open deviation, and this "
+        "paragraph no longer claims every row fits** "
+        "(`[D1-per-hold-derivation-maxes-detectors-that-share-one-worker]`, 08). Those figures "
+        "compose each hold as `max` over its lane, but ADR-034 Part A binds five *named* model "
+        "detectors to one shared `max_workers=1` pool — so two pool users on one lane compose as "
+        "`sum`, and `LANES[output_sentence]` already names two of the five. The contested rows are "
+        "the context-docs row (45 → 70 ms) and the `on_sampled` row (75 → 100 ms, zero margin); "
+        "the untabulated `on_sampled`-with-context-docs case reaches 130 ms against a published "
+        "P99 < 100 ms. The figures are left as ADR-030 states them, and flagged rather than "
+        "re-derived, because re-deriving would either propagate a contested table or pre-empt a "
+        "ruling that has three non-equivalent options. **The measured rows above and the two "
+        "computed projection readings are unaffected**: this section already publishes the `sum` "
+        "and `max` readings side by side, and the true pool-aware composition lies between them, "
+        "which is what reporting both was for.",
         "",
         "One adjacency ADR-030 records rather than rounds away: the **enriched typical** row "
         "lands at exactly **40.0 ms** against a strict `< 40` P50. It is not a breach, because "
