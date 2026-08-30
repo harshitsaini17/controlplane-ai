@@ -36,6 +36,7 @@ from eval.run_all import (
     SKIPPED,
     UNLOADABLE,
     V1_BASELINE,
+    _alpha_sweep_block,
     _calibration_section,
     _demote_unloadable,
     DetectorResult,
@@ -427,6 +428,46 @@ def test_the_calibration_section_reports_an_inverted_band_without_clamping_it() 
     # And the consequence for every other figure in the report.
     assert "SEED(pre-calibration)" in section
     assert "no figure in this report derives from a seeded τ" in section
+
+
+def test_the_sweep_scopes_its_best_row_claim_to_schema_valid_bands() -> None:
+    """★ M-56: the shipped report contradicted its own arithmetic.
+
+    It read "no α clears the 56/78 = 0.718 oracle ceiling — the best row here reaches
+    59/78 = 0.756", because `best` was taken over ALL sweep rows while the ceiling is fitted
+    over valid bands only, and an inverted row's count is inflated by the inversion itself.
+
+    The fixture reproduces that exact shape: the highest-scoring row is INVERTED and beats the
+    ceiling, while the best valid row does not. A correct section must quote the valid row.
+    """
+    cal = Calibration(
+        alpha=0.10,
+        band=Band(
+            tau_low=0.8365, tau_high=0.7157, n_calibration=55, n_eval=23,
+            achieved={"no": (11, 12), "yes": (5, 6), "borderline": (0, 5)}, inverted=True,
+        ),
+        oracle=(56, 78),
+        alpha_sweep=[
+            (0.05, 0.8975, 0.6546, True, 59, 78),   # inverted AND above the ceiling
+            (0.10, 0.8365, 0.7157, True, 56, 78),
+            (0.20, 0.7886, 0.8101, False, 51, 78),  # the best VALID row
+            (0.25, 0.7356, 0.8295, False, 55, 78),  # ...and a better valid one
+        ],
+        inverted_seeds=(5, 5),
+    )
+    report = "\n".join(_alpha_sweep_block(cal))
+
+    assert "0.705" in report, "the best VALID row (55/78) is the one the claim may quote"
+    assert "59/78 = 0.756 at α" not in report, (
+        "an inverted row was quoted as the best — the comparison M-56 exists to prevent"
+    )
+    assert "schema-valid" in report
+    assert "†" in report, "inverted rows must be marked as non-comparable"
+    assert "unsatisfiable" in report, "the section must say why they are not comparable"
+
+    # The inflated figure is still PUBLISHED — suppressing a real computation is the other
+    # failure mode. It appears in the table; it just may not be called best.
+    assert "59/78" in report
 
 
 def test_the_calibration_section_does_not_assert_a_finding_the_numbers_contradict() -> None:

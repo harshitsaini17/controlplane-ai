@@ -31,6 +31,7 @@ from eval.suggest_thresholds import (
     _auc,
     _band_from,
     _conformal_quantile,
+    _in_band,
     _oracle_band,
     calibrate,
     load_calibration_cases,
@@ -129,6 +130,56 @@ def test_the_oracle_ceiling_is_below_total_when_the_middle_class_is_misplaced() 
     ok, total = _oracle_band(scored)
     assert total == 6
     assert ok < 6
+
+
+def test_an_inverted_band_places_no_borderline_case_and_overlaps_its_outer_arms() -> None:
+    """★ The degeneracy that made a published comparison invalid (M-56).
+
+    `_in_band` is only a partition of the line when `tau_low < tau_high`. Inverted, the
+    `borderline` arm is unsatisfiable and the two outer arms overlap on `[tau_high, tau_low)`,
+    so the count *inflates* with inversion depth rather than degrading. Pinned in algebra
+    because a report sentence was derived from comparing such a count to a ceiling fitted over
+    valid bands only.
+    """
+    # The fixture INTERLEAVES `yes` and `no`, which is the corpus's actual shape (SL-7: `yes`
+    # reaches down to 0.1302 while `no` reaches up to 0.9583). That matters — a first attempt
+    # at this test used cleanly separable classes and failed, because there a valid band scores
+    # well and beats the inverted one. The inflation is only visible where no valid band can
+    # separate the outer classes, which is exactly the case calibration ran into.
+    pts = [("no", 0.1), ("no", 0.2), ("no", 0.3), ("no", 0.4),
+           ("yes", 0.15), ("yes", 0.25), ("yes", 0.35), ("yes", 0.9),
+           ("borderline", 0.5)]
+    lo, hi = 0.95, 0.05                          # inverted: lo > hi
+    assert lo > hi
+
+    placed_borderline = sum(1 for l, s in pts if l == "borderline" and lo <= s < hi)
+    assert placed_borderline == 0, "an inverted band cannot place a borderline case at all"
+
+    # Both outer arms credit a point in the overlap region, so neither is a real constraint.
+    overlap = [s for _, s in pts if hi <= s < lo]
+    assert overlap, "fixture must exercise the overlap region"
+
+    # The inflation, stated as the inequality the fixed report relies on.
+    inverted_hits = _in_band(pts, lo, hi)
+    best_valid, _ = _oracle_band(pts)
+    assert inverted_hits > best_valid, (
+        "the fixture must show an inverted band out-scoring every valid one — that is the "
+        f"defect: inverted {inverted_hits} vs best valid {best_valid}"
+    )
+
+
+def test_the_oracle_ceiling_is_fitted_over_valid_bands_only() -> None:
+    """So an inverted count is not bounded by it, and must never be compared to it (M-56)."""
+    pts = [("no", 0.1), ("no", 0.2), ("no", 0.3), ("no", 0.4),
+           ("yes", 0.15), ("yes", 0.25), ("yes", 0.35), ("yes", 0.9),
+           ("borderline", 0.5)]
+    ok, total = _oracle_band(pts)
+    assert total == len(pts)
+    assert _in_band(pts, 0.95, 0.05) > ok, (
+        "an inverted band exceeding the ceiling is the expected, documented consequence of "
+        "the oracle skipping `lo >= hi` — if this ever fails, the two are commensurable and "
+        "the M-56 scoping in `_alpha_sweep_block` can be simplified"
+    )
 
 
 def test_the_oracle_beats_or_matches_every_calibrated_band_on_the_same_points() -> None:

@@ -949,21 +949,36 @@ def _alpha_sweep_block(cal: Any) -> list[str]:
     ]
     for a, tl, th, inv, hits, n in cal.alpha_sweep:
         mark = " ← **in force** (M-52)" if abs(a - cal.alpha) < 1e-9 else ""
+        # `†` on an inverted row: its count is not comparable to the ceiling (M-56).
         out.append(
             f"| {a:.2f} | {tl} | {th} | {'**INVERTED**' if inv else 'valid'} | "
-            f"{hits}/{n} = {hits / n:.3f}{mark} |"
+            f"{hits}/{n} = {hits / n:.3f}{'&nbsp;†' if inv else ''}{mark} |"
         )
-    best = max(cal.alpha_sweep, key=lambda r: r[4])
+    # Scoped to VALID rows on purpose (M-56). An inverted band's in-band count is inflated by
+    # the inversion itself — `_in_band`'s borderline arm goes unsatisfiable while the outer arms
+    # overlap — and the oracle ceiling is fitted over valid bands only, so `max` over all rows
+    # produced a published sentence that contradicted its own arithmetic: "no α clears the
+    # 56/78 = 0.718 ceiling — the best row here reaches 59/78 = 0.756".
+    best = max(valid, key=lambda r: r[4]) if valid else None
     if valid:
         lo = min(row[0] for row in valid)
         out += [
             "",
             f"**Partly yes, and it changes nothing.** Band *order* recovers at α ≥ {lo:.2f}. "
-            f"But no α clears the {ok}/{tot} = {ok / tot:.3f} oracle ceiling — the best row "
-            f"here reaches {best[4]}/{best[5]} = {best[4] / best[5]:.3f} at α={best[0]:.2f}, "
-            f"and the α values that un-invert score *lower* in-band than the inverted one at "
-            f"α={cal.alpha}. So a valid-looking band is available and would still be a bad "
+            f"But no **schema-valid** α clears the {ok}/{tot} = {ok / tot:.3f} oracle ceiling "
+            f"— the best valid row reaches {best[4]}/{best[5]} = {best[4] / best[5]:.3f} at "
+            f"α={best[0]:.2f}. So a valid-looking band is available and would still be a bad "
             f"one, which is the substantive finding rather than the inversion itself.",
+            "",
+            "**The inverted rows' in-band counts are marked `†` and are NOT comparable to the "
+            "ceiling** (M-56). An inverted band does not partition the line: the `borderline` "
+            "arm `τ_low ≤ s < τ_high` is unsatisfiable, so it places nothing, while the outer "
+            "arms overlap on `[τ_high, τ_low)` and each grade against a looser threshold than "
+            "any valid band could use. The count therefore *inflates* with inversion depth — "
+            "which is why the most inverted row scores highest — and the oracle is fitted over "
+            "valid bands only. Published rather than suppressed, because the number is a real "
+            "computation and the inflation is the point; comparing it to the ceiling is what "
+            "was wrong.",
             "",
             f"**α stays at {cal.alpha}.** It was fixed blind by M-52 before any score was "
             f"seen, and re-picking it *because* that value failed would be tuning a parameter "
@@ -976,8 +991,12 @@ def _alpha_sweep_block(cal: Any) -> list[str]:
     else:
         out += [
             "",
-            f"**No.** Every α swept inverts, and none clears the {ok}/{tot} = "
-            f"{ok / tot:.3f} ceiling. α stays at {cal.alpha} per M-52.",
+            f"**No — every α swept inverts, so the sweep offers no schema-valid band at "
+            f"all.** No in-band count below is comparable to the {ok}/{tot} = {ok / tot:.3f} "
+            f"oracle ceiling (M-56): an inverted band leaves the `borderline` arm "
+            f"unsatisfiable and lets the outer arms overlap, so the counts inflate with "
+            f"inversion depth instead of degrading. The ceiling stands unbeaten because "
+            f"nothing valid was produced to test it. α stays at {cal.alpha} per M-52.",
             "",
         ]
     return out

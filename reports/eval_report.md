@@ -14,11 +14,11 @@ Every number below is reproducible from this state (NFR-INT-001).
 
 | Field | Value |
 |---|---|
-| Generated (UTC) | 2026-08-29T23:14:33+00:00 |
+| Generated (UTC) | 2026-08-30T00:22:35+00:00 |
 | Dataset digest | `6a3ecbbe75fd020bf806bf647d572c85ee187198fb9828eaac5e1c6e00737fbd` |
 | Frozen at | `f162959f7d29` — MATCHES |
 | Cases loaded | 280 (derived from the files, never asserted) |
-| Code commit | `c838964ca3d9` + uncommitted changes |
+| Code commit | `5c1e98ba8c52` + uncommitted changes |
 | Python | 3.14.6 |
 | Platform | Linux 7.1.2-arch3-1 · x86_64 |
 | Command | `python -m eval.run_all` |
@@ -295,16 +295,18 @@ Procedure per 06 §3 on the `rag_grounding` confidence score: non-conformity qua
 
 | α | τ_low | τ_high | band order | in-band |
 |---:|---:|---:|:--|---:|
-| 0.05 | 0.8975 | 0.6546 | **INVERTED** | 59/78 = 0.756 |
-| 0.10 | 0.8365 | 0.7157 | **INVERTED** | 56/78 = 0.718 ← **in force** (M-52) |
-| 0.15 | 0.8038 | 0.798 | **INVERTED** | 53/78 = 0.679 |
+| 0.05 | 0.8975 | 0.6546 | **INVERTED** | 59/78 = 0.756&nbsp;† |
+| 0.10 | 0.8365 | 0.7157 | **INVERTED** | 56/78 = 0.718&nbsp;† ← **in force** (M-52) |
+| 0.15 | 0.8038 | 0.798 | **INVERTED** | 53/78 = 0.679&nbsp;† |
 | 0.20 | 0.7886 | 0.8101 | valid | 51/78 = 0.654 |
 | 0.25 | 0.7356 | 0.8295 | valid | 55/78 = 0.705 |
 | 0.30 | 0.6974 | 0.8351 | valid | 53/78 = 0.679 |
 | 0.40 | 0.6853 | 0.8662 | valid | 50/78 = 0.641 |
 | 0.50 | 0.638 | 0.8766 | valid | 44/78 = 0.564 |
 
-**Partly yes, and it changes nothing.** Band *order* recovers at α ≥ 0.20. But no α clears the 56/78 = 0.718 oracle ceiling — the best row here reaches 59/78 = 0.756 at α=0.05, and the α values that un-invert score *lower* in-band than the inverted one at α=0.1. So a valid-looking band is available and would still be a bad one, which is the substantive finding rather than the inversion itself.
+**Partly yes, and it changes nothing.** Band *order* recovers at α ≥ 0.20. But no **schema-valid** α clears the 56/78 = 0.718 oracle ceiling — the best valid row reaches 55/78 = 0.705 at α=0.25. So a valid-looking band is available and would still be a bad one, which is the substantive finding rather than the inversion itself.
+
+**The inverted rows' in-band counts are marked `†` and are NOT comparable to the ceiling** (M-56). An inverted band does not partition the line: the `borderline` arm `τ_low ≤ s < τ_high` is unsatisfiable, so it places nothing, while the outer arms overlap on `[τ_high, τ_low)` and each grade against a looser threshold than any valid band could use. The count therefore *inflates* with inversion depth — which is why the most inverted row scores highest — and the oracle is fitted over valid bands only. Published rather than suppressed, because the number is a real computation and the inflation is the point; comparing it to the ceiling is what was wrong.
 
 **α stays at 0.1.** It was fixed blind by M-52 before any score was seen, and re-picking it *because* that value failed would be tuning a parameter toward a desired outcome (AGENTS.md §7; §11.1 item 3 keeps first-contact discipline unchanged in endgame mode). Whether ~28% unplaceable points could ever be acceptable is a policy question, and it is not resolved by moving α.
 

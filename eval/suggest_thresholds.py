@@ -210,6 +210,20 @@ def _in_band(scored: Sequence[tuple[str, float]], tau_low: float, tau_high: floa
 
     Shared by the α sweep and the oracle so the two are commensurable — a ceiling measured
     by a different rule than the thing it bounds would not be a ceiling.
+
+    **Commensurable only for a schema-VALID band** (`tau_low < tau_high`), which is all
+    `_oracle_band` ever passes: it skips `lo >= hi`. Fed an INVERTED band the three arms stop
+    partitioning the line, and the count inflates rather than degrades:
+
+    - the `borderline` arm `tau_low <= s < tau_high` is **unsatisfiable** — it places nothing;
+    - the outer arms **overlap** on `[tau_high, tau_low)`, so a point there scores for `yes`
+      (`s >= tau_high`) *and* would for `no` (`s < tau_low`) — each class is graded against a
+      looser threshold than any valid band could use.
+
+    So a more deeply inverted band can out-score every valid one, and comparing an inverted
+    row's count to the oracle ceiling is not a comparison. Callers that sweep must therefore
+    scope any "best" or "clears the ceiling" claim to valid rows — see `_alpha_sweep_block`,
+    where exactly that comparison shipped into a judge-facing report (M-56).
     """
     ok = 0
     for label, s in scored:
