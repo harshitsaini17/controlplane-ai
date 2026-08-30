@@ -38,10 +38,12 @@ import uuid
 import warnings
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from controlplane.audit import review
 from controlplane.audit.db import init_db
@@ -460,6 +462,12 @@ async def warm_detector_models(state: Gateway) -> None:
         _LOG.info("rag_grounding encoder warmed in %.0f ms", grounding_ms)
 
 
+#: The static console (dashboard/static/), resolved from this file rather than the CWD —
+#: uvicorn is not guaranteed to run from the repo root. Absent directory means the mount is
+#: skipped, so the gateway still boots for anyone who has not built the console.
+CONSOLE_DIR = Path(__file__).resolve().parents[2] / "dashboard" / "static"
+
+
 def create_app(gateway: Gateway | None = None) -> FastAPI:
     """Build the ASGI app. `gateway` is injectable so tests need no real upstream.
 
@@ -524,6 +532,19 @@ def create_app(gateway: Gateway | None = None) -> FastAPI:
     @app.get("/metrics")
     async def metrics() -> Any:
         return state.metrics.snapshot()
+
+    # -- operator console (static; same-origin with /metrics and /admin/*) --
+    # Mounted LAST so it cannot shadow an API route: Starlette matches in order, and a
+    # mount at "/console" would otherwise swallow nothing here anyway — but the ordering
+    # is the property that keeps it true if the prefix ever changes.
+    #
+    # The console is plain HTML/CSS/JS served from this same origin deliberately: it calls
+    # `/metrics` and `/admin/review` with relative URLs, so there is no CORS surface and no
+    # second server to run for the demo. It inherits the admin surface's documented lack of
+    # authentication (module docstring, 05 §2) — it does not add one, and it does not widen
+    # it either, since it can reach nothing a curl to the same port cannot.
+    if CONSOLE_DIR.is_dir():
+        app.mount("/console", StaticFiles(directory=CONSOLE_DIR, html=True), name="console")
 
     return app
 

@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Verdict console — ControlPlane.ai</title>
+<link rel="stylesheet" href="cp.css"></head>
+<body>
+<div class="bar">Accenture Innovation Challenge 2026 — every figure traces to a committed report.</div>
+<nav class="nav">
+  <a class="brand" href="index.html">ControlPlane<b>.ai</b></a>
+  <ul>
+    <li><a class="lnk" href="index.html">Overview</a></li>
+    <li><a class="lnk" href="dashboard.html" aria-current="page">Console</a></li>
+    <li><a class="lnk" href="chat.html">Test chat</a></li>
+  </ul>
+  <button class="btn-o" id="refresh" type="button">Refresh</button>
+</nav>
+
+<main class="wrap sec-sm">
+  <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:var(--s-lg);flex-wrap:wrap">
+    <div>
+      <p class="ml">Oversight console</p>
+      <h1 class="h-prod" style="margin-top:var(--s-md)">Verdict board</h1>
+    </div>
+    <p class="live" id="feed"><span class="dot"></span><span id="feedtxt">connecting to /metrics…</span></p>
+  </div>
+
+  <!-- LIVE counters, dark navy band (design system's security/finance band colour) -->
+  <div class="band band-navy" style="margin-top:var(--s-xl)">
+    <p class="ml">Live counters · <code class="mono">GET /metrics</code></p>
+    <div class="grid g3" id="kpis" style="margin-top:var(--s-xl)">
+      <div class="kpi"><span class="ml">Requests judged</span><span class="n" id="k-req">—</span>
+        <span class="cap"><code class="mono">cp_requests_total</code></span></div>
+      <div class="kpi"><span class="ml">Interventions</span><span class="n" id="k-act">—</span>
+        <span class="cap">edit + block + escalate</span></div>
+      <div class="kpi"><span class="ml">PII spans intercepted</span><span class="n" id="k-pii">—</span>
+        <span class="cap"><code class="mono">cp_pii_intercepts_total</code> — category only, never the value</span></div>
+    </div>
+    <div class="grid g2" style="margin-top:var(--s-xl)">
+      <div>
+        <p class="ml">Verdicts by pipeline</p>
+        <div class="scroll" style="margin-top:var(--s-md)">
+          <table id="ledger"><thead><tr><th>Pipeline</th><th>Verdict</th><th class="num">Count</th></tr></thead>
+          <tbody><tr><td colspan="3" class="cap">no requests recorded yet</td></tr></tbody></table>
+        </div>
+      </div>
+      <div>
+        <p class="ml">Gateway overhead, this process</p>
+        <div class="scroll" style="margin-top:var(--s-md)">
+          <table id="live-oh"><thead><tr><th>Pipeline</th><th class="num">n</th><th class="num">P50</th><th class="num">P99</th></tr></thead>
+          <tbody><tr><td colspan="4" class="cap">awaiting samples</td></tr></tbody></table>
+        </div>
+        <p class="src">Live process telemetry — a session sample, not a benchmark. The measured
+        figures are the committed table below.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Review queue -->
+  <section class="sec-sm">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;gap:var(--s-lg);flex-wrap:wrap">
+      <h2 class="h-sec">Human review queue</h2>
+      <p class="cap"><code class="mono">GET /admin/review</code> · <code class="mono">POST /admin/review/{id}</code></p>
+    </div>
+    <p class="lead" style="margin-top:var(--s-md)">Escalated responses are quarantined, never delivered, until a
+    reviewer decides. A decision is one-shot and is written into the audit lineage.</p>
+    <div id="queue" style="margin-top:var(--s-xl)"><p class="cap">loading…</p></div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- Committed measured figures -->
+  <section class="sec-sm">
+    <h2 class="h-sec">Measured detector latency</h2>
+    <p class="lead" style="margin-top:var(--s-md)">These are not live readings. Every number below is copied from a
+    committed report, on the clock the runner actually enforces — detector-attributable time, quiet host, n as stated.</p>
+    <div class="scroll" style="margin-top:var(--s-xl)">
+      <table>
+        <thead><tr><th>Detector</th><th class="num">Budget</th><th class="num">n</th><th class="num">P50</th>
+          <th class="num">P95</th><th class="num">P99</th><th class="num">max</th><th>Within budget (P99)</th></tr></thead>
+        <tbody>
+          <tr><td><code class="mono">tier1_blocklist</code></td><td class="num">2 ms</td><td class="num">583</td>
+            <td class="num">0.012</td><td class="num">0.014</td><td class="num">0.020</td><td class="num">0.029</td>
+            <td><span class="v v-pass"><span class="dot"></span>yes</span></td></tr>
+          <tr><td><code class="mono">tier1_pii</code></td><td class="num">2 ms</td><td class="num">583</td>
+            <td class="num">0.053</td><td class="num">0.093</td><td class="num">0.133</td><td class="num">0.266</td>
+            <td><span class="v v-pass"><span class="dot"></span>yes</span></td></tr>
+          <tr><td><code class="mono">numeric_claims</code></td><td class="num">5 ms</td><td class="num">283</td>
+            <td class="num">0.077</td><td class="num">0.234</td><td class="num">0.277</td><td class="num">0.372</td>
+            <td><span class="v v-pass"><span class="dot"></span>yes</span></td></tr>
+          <tr><td><code class="mono">tier2_toxicity</code></td><td class="num">25 ms</td><td class="num">283</td>
+            <td class="num">19.553</td><td class="num">21.635</td><td class="num">23.741</td><td class="num">25.880</td>
+            <td><span class="v v-pass"><span class="dot"></span>yes · 2 fail_open faults</span></td></tr>
+          <tr><td><code class="mono">tier2_injection</code></td><td class="num">25 ms</td><td class="num">300</td>
+            <td class="num">20.032</td><td class="num">22.749</td><td class="num"><strong>25.348</strong></td><td class="num">28.317</td>
+            <td><span class="v v-block"><span class="dot"></span>NO — SL-8</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="src">Source: <code class="mono">reports/latency_report.md</code> §Per-detector · regenerate with
+    <code class="mono">python -m eval.bench_latency --check</code>. The injection breach is published as measured; the
+    budget was not moved.</p>
+
+    <div class="grid g2" style="margin-top:var(--s-xxl)">
+      <div class="card">
+        <h3 class="h-feat">User-perceived hold</h3>
+        <div class="scroll" style="margin-top:var(--s-md)">
+          <table><thead><tr><th>Series</th><th class="num">n</th><th class="num">P50</th><th class="num">P99</th><th>Target</th></tr></thead>
+            <tbody>
+              <tr><td><code class="mono">input_hold_ms</code></td><td class="num">200</td><td class="num">21.58</td>
+                <td class="num">27.49</td><td class="cap">&lt; 40 / &lt; 50 ms — met</td></tr>
+              <tr><td><code class="mono">sentence_holds_ms</code></td><td class="num">231</td><td class="num">21.00</td>
+                <td class="num">39.59</td><td class="cap">&lt; 40 / &lt; 100 ms — met</td></tr>
+            </tbody></table>
+        </div>
+        <p class="src">Source: <code class="mono">reports/latency_report.md</code> §NFR-P-001. Holds, not requests — a
+        ten-sentence response contributes ten samples.</p>
+      </div>
+      <div class="card">
+        <h3 class="h-feat">Accuracy, including the misses</h3>
+        <ul class="ticks" style="margin-top:var(--s-md)">
+          <li><span>Engine conformance, perfect detection assumed</span><strong style="margin-left:auto">1.000</strong></li>
+          <li><span>End-to-end, <code class="mono">support_bot</code> / <code class="mono">hr_copilot</code></span><strong style="margin-left:auto">0.851</strong></li>
+          <li><span>End-to-end, <code class="mono">finance_advisor</code></span><strong style="margin-left:auto">0.825</strong></li>
+          <li><span>Tier-1 PII recall — target 0.95, missed</span><strong style="margin-left:auto">0.8852</strong></li>
+          <li><span>Injection precision / recall — no target set</span><strong style="margin-left:auto">1.000 / 0.150</strong></li>
+        </ul>
+        <p class="src">Source: <code class="mono">reports/eval_report.md</code> · end-to-end covers 194 of 280 cases —
+        a case scores only when every label it expects has a detector that exists.</p>
+      </div>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <section class="sec-sm">
+    <h2 class="h-sec">Fail-open / fail-closed</h2>
+    <p class="lead" style="margin-top:var(--s-md)">One identical injected fault, three policies. The failure mode is the
+    policy's decision, not the runner's.</p>
+    <div class="scroll" style="margin-top:var(--s-lg)">
+      <table><thead><tr><th>Pipeline</th><th>Configured mode</th><th>Verdict</th><th class="num">HTTP</th>
+        <th>Fault recorded</th><th>Drove the verdict</th></tr></thead>
+        <tbody>
+          <tr><td><code class="mono">support_bot</code></td><td>fail_open</td>
+            <td><span class="v v-pass"><span class="dot"></span>pass</span></td><td class="num">200</td><td>yes</td><td>no</td></tr>
+          <tr><td><code class="mono">hr_copilot</code></td><td>fail_open</td>
+            <td><span class="v v-pass"><span class="dot"></span>pass</span></td><td class="num">200</td><td>yes</td><td>no</td></tr>
+          <tr><td><code class="mono">finance_advisor</code></td><td>fail_closed</td>
+            <td><span class="v v-escalate"><span class="dot"></span>escalate</span></td><td class="num">202</td><td>yes</td><td>yes</td></tr>
+        </tbody></table>
+    </div>
+    <p class="src">Source: <code class="mono">reports/fault_injection_report.md</code> · regenerate with
+    <code class="mono">python -m eval.fault_injection</code>. The suite is <strong>3 of 5 quiet-host runs at 39/39</strong>;
+    two runs recorded 38/39 on one control-probe assertion, cause recorded as M-60 rather than tuned away.</p>
+  </section>
+</main>
+
+<footer><div class="wrap sec-sm">
+  <p class="micro">Live panels read this gateway process. Static tables are transcribed from committed reports and are
+  labelled with the command that regenerates them.</p>
+</div></footer>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const VC = {pass:'v-pass', edit:'v-edit', block:'v-block', escalate:'v-escalate'};
+const chip = v => `<span class="v ${VC[v]||'v-unknown'}"><span class="dot"></span>${esc(v)}</span>`;
+const num = n => (n === null || n === undefined) ? '—' : (+n).toFixed(2);
+
+function feed(state, msg) {
+  const el = $('#feed'), t = $('#feedtxt');
+  el.className = 'live ' + (state === 'live' ? 'ok' : state === 'replay' ? 'warn' : 'err');
+  t.textContent = msg;
+}
+
+function series(snap, name) {
+  const m = snap && snap[name];
+  return (m && Array.isArray(m.series)) ? m.series : [];
+}
+
+async function loadMetrics() {
+  let snap;
+  try {
+    const r = await fetch('/metrics', {headers: {'Accept': 'application/json'}});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    snap = await r.json();
+  } catch (e) {
+    // Honest indicator: no invented numbers stand in for a failed fetch.
+    feed('replay', 'no live gateway — static report figures below are unaffected (' + e.message + ')');
+    $('#k-req').textContent = 'n/a'; $('#k-act').textContent = 'n/a'; $('#k-pii').textContent = 'n/a';
+    return;
+  }
+  const reqs = series(snap, 'cp_requests_total');
+  const total = reqs.reduce((a, s) => a + (s.value || 0), 0);
+  const acted = reqs.filter(s => s.labels && s.labels.verdict !== 'pass')
+                    .reduce((a, s) => a + (s.value || 0), 0);
+  const pii = series(snap, 'cp_pii_intercepts_total').reduce((a, s) => a + (s.value || 0), 0);
+  $('#k-req').textContent = total; $('#k-act').textContent = acted; $('#k-pii').textContent = pii;
+  feed('live', total ? `live · ${total} request${total === 1 ? '' : 's'} judged this process`
+                     : 'live · gateway up, no requests yet');
+
+  const rows = reqs.slice().sort((a, b) => (b.value || 0) - (a.value || 0)).map(s =>
+    `<tr><td><code class="mono">${esc(s.labels?.use_case)}</code></td><td>${chip(s.labels?.verdict)}</td>
+     <td class="num">${s.value}</td></tr>`);
+  $('#ledger tbody').innerHTML = rows.length ? rows.join('')
+    : '<tr><td colspan="3" class="cap">no requests recorded yet — send one from the test chat</td></tr>';
+
+  const oh = series(snap, 'cp_gateway_overhead_ms').map(s =>
+    `<tr><td><code class="mono">${esc(s.labels?.use_case)}</code></td><td class="num">${s.count ?? '—'}</td>
+     <td class="num">${num(s.p50)}</td><td class="num">${num(s.p99)}</td></tr>`);
+  $('#live-oh tbody').innerHTML = oh.length ? oh.join('')
+    : '<tr><td colspan="4" class="cap">awaiting samples</td></tr>';
+}
+
+async function loadQueue() {
+  const box = $('#queue');
+  let items;
+  try {
+    const r = await fetch('/admin/review?status=pending', {headers: {'Accept': 'application/json'}});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    items = await r.json();
+  } catch (e) {
+    box.innerHTML = `<p class="cap err">review queue unreachable (${esc(e.message)})</p>`;
+    return;
+  }
+  if (!items.length) {
+    box.innerHTML = '<div class="card"><p class="cap">Queue empty. An escalate verdict on the test chat puts an item here.</p></div>';
+    return;
+  }
+  box.innerHTML = items.map(it => `
+    <div class="card" style="margin-bottom:var(--s-lg)">
+      <div style="display:flex;justify-content:space-between;gap:var(--s-md);flex-wrap:wrap">
+        <span class="v v-escalate"><span class="dot"></span>quarantined</span>
+        <span class="micro mono">${esc(it.review_id)}</span>
+      </div>
+      <p class="ml" style="margin-top:var(--s-lg)">Withheld text</p>
+      <pre class="pre" style="margin-top:var(--s-sm)">${esc(it.quarantined_text)}</pre>
+      <p class="cap" style="margin-top:var(--s-md)">request <code class="mono">${esc(it.request_id)}</code> ·
+        created ${esc(it.ts_created)}</p>
+      <div style="margin-top:var(--s-lg)">
+        <label for="n-${esc(it.review_id)}">Reviewer note</label>
+        <input type="text" id="n-${esc(it.review_id)}" placeholder="why this decision (written into the audit lineage)">
+      </div>
+      <div style="display:flex;gap:var(--s-md);margin-top:var(--s-lg);flex-wrap:wrap">
+        <button class="btn" data-id="${esc(it.review_id)}" data-d="approve" type="button">Approve &amp; release</button>
+        <button class="btn-o" data-id="${esc(it.review_id)}" data-d="reject" type="button">Reject</button>
+        <span class="cap" id="s-${esc(it.review_id)}"></span>
+      </div>
+    </div>`).join('');
+  box.querySelectorAll('button[data-id]').forEach(b => b.addEventListener('click', decide));
+}
+
+async function decide(ev) {
+  const btn = ev.currentTarget, id = btn.dataset.id, decision = btn.dataset.d;
+  const note = document.getElementById('n-' + id)?.value || null;
+  const status = document.getElementById('s-' + id);
+  btn.disabled = true; status.textContent = 'submitting…';
+  try {
+    const r = await fetch('/admin/review/' + encodeURIComponent(id), {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({decision, note})
+    });
+    const body = await r.json();
+    if (!r.ok) throw new Error(body.detail || body.message || ('HTTP ' + r.status));
+    status.className = 'cap ok';
+    status.textContent = `recorded: ${body.status} at ${body.decision_ts || 'now'}`;
+    setTimeout(() => { loadQueue(); loadMetrics(); }, 700);
+  } catch (e) {
+    btn.disabled = false;
+    status.className = 'cap err';
+    status.textContent = 'failed: ' + e.message;
+  }
+}
+
+function refresh() { loadMetrics(); loadQueue(); }
+$('#refresh').addEventListener('click', refresh);
+refresh();
+setInterval(loadMetrics, 5000);
+</script>
+</body></html>
