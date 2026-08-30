@@ -199,12 +199,25 @@ Freeze gate:  .venv/bin/python -m eval.validate_dataset            # consistency
               approved state and is what eval/run_all.py calls before computing anything.
               A frozen case is not editable as a fix — that is a new freeze cycle.
 
-Run gateway:  .venv/bin/uvicorn --factory controlplane.gateway.app:create_app --reload
-              `app.py` exposes the `create_app()` factory and NO module-level `app`, by
-              design (the Gateway docstring: a module global would leave a stale copy
-              behind a hot reload) — so `--factory` is required, not stylistic.
+Run gateway:  set -a; . ./.env; set +a          # NOTHING in the repo loads .env (M-63)
+              .venv/bin/uvicorn --factory controlplane.gateway.app:create_live_app --port 8080
+              TWO factories, and the difference is provenance, not style (M-62):
+                create_live_app()  serving. Activates `groq` (measured class), so its token
+                                   counts and cost figures are citable (ADR-018).
+                create_app()       offline/injectable. Inherits the shipped dev-class
+                                   `active_provider`, which is what tests,
+                                   `demo.run_script --replay` and `eval.fault_injection`
+                                   need — a fixture reports no prompt tokens, and for a
+                                   MEASURED provider FR-GW-006 makes that boot-fatal.
+              Do NOT promote `active_provider` to a measured provider to "fix" serving: it
+              also re-classes every offline path and every regenerated report (M-62).
+              `app.py` exposes factories and NO module-level `app`, by design (a module
+              global would leave a stale copy behind a hot reload) — `--factory` is required.
               Do NOT serve on port 8000: `kiro-local`'s base_url is http://localhost:8000,
               so the gateway would proxy to itself. Default 8000 → pick another port.
+              The env line is not optional: without it every keyed provider sees an unset
+              variable, the canary reports UNVERIFIED (not satisfied), and the console chat
+              renders a verdict with no model text — the pipeline runs, nothing answers.
 Eval suite:   .venv/bin/python -m eval.run_all                       → reports/eval_report.md
                          (per-detector P/R/F1 + both policy matrices; runs the freeze
                          gate first. Prints `NFR-EVAL-001: MISSED` — that is SL-1, a real

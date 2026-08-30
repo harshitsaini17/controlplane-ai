@@ -468,6 +468,25 @@ async def warm_detector_models(state: Gateway) -> None:
 CONSOLE_DIR = Path(__file__).resolve().parents[2] / "dashboard" / "static"
 
 
+LIVE_PROVIDER = "groq"
+"""Provider `create_live_app` activates: measured class, verified live 2026-08-30."""
+
+
+def create_live_app() -> FastAPI:
+    """Serving entry point — the shipped config with a measured-class live upstream.
+
+    `create_app` is the injectable/offline factory and inherits the shipped dev-class
+    default, which is what tests and `--replay` need. This one is what serves real
+    traffic:
+
+        uvicorn --factory controlplane.gateway.app:create_live_app --port 8080
+
+    Not port 8000 — `kiro-local`'s base_url is http://localhost:8000, so a gateway there
+    would proxy to itself.
+    """
+    return create_app(Gateway(config=load_gateway_config(active=LIVE_PROVIDER)))
+
+
 def create_app(gateway: Gateway | None = None) -> FastAPI:
     """Build the ASGI app. `gateway` is injectable so tests need no real upstream.
 

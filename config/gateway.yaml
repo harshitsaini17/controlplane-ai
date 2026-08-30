@@ -152,7 +152,37 @@ providers:
 
 # Which provider serves traffic. Anything eval/ or demo/ touches must be `measured`
 # class unless --allow-dev is passed (which taints the output filename).
-active_provider: kiro-local                # dev class — fine for building, not for numbers
+# Which provider serves traffic BY DEFAULT. Anything eval/ or demo/ touches must be
+# `measured` class unless --allow-dev is passed (which taints the output filename).
+#
+# This stays `kiro-local` (dev class) DELIBERATELY, and not because kiro-local works — it
+# does not. Verified 2026-08-30: it returns HTTP 401 (its UPSTREAM_API_KEY is empty), which
+# is why the console chat page rendered no model text (the pipeline ran and the verdict was
+# computed; there was simply nothing to show). `groq` is verified live on this key: 14
+# models visible, both bound ids answer with usage present, and the FR-GW-006 canary passes
+# on it as measured class (reported 121 vs estimate 64, inside the [32, 128] band).
+#
+# The reason the default is still dev anyway: this key has THREE consumers, not one. It
+# selects the upstream, it sets the ADR-018 provenance class that
+# `require_measured_upstream()` gates judge-facing reports on, and it is the class every
+# OFFLINE path inherits when it builds a `Gateway` with no explicit config — tests,
+# `demo.run_script --replay`, `eval.fault_injection`. A fixture upstream reports no prompt
+# tokens, and for a `measured` provider that is boot-fatal by ruling (FR-GW-006), so a
+# measured default makes those paths refuse to boot while claiming a provenance a fixture
+# cannot have. Every artifact in reports/ was also generated under dev class and says so in
+# its own prose; a measured default would let the next regeneration drop that caveat
+# silently, which is the defect class this repo keeps finding.
+#
+# Live serving therefore names its provider explicitly instead:
+#   uvicorn --factory controlplane.gateway.app:create_live_app --port 8080
+# Promoting groq to the shipped default is a real upgrade — measured class with first-party
+# prices for both bound ids would make cost figures from that path citable — but it is an
+# owner ruling about published provenance, not a side effect of fixing a chat page.
+#
+# Note M-15: the canary margin on groq is ~7 tokens, caused by a ~72-token fixed
+# chat-template preamble rather than tokenizer variance. If that template grows, a
+# measured-class provider REFUSES TO BOOT. No knob was widened to buy margin.
+active_provider: kiro-local                # dev class — see the three consumers above
 
 # ---------------------------------------------------------------------------
 # FR-GW-006 — startup canary + usage-sanity invariant (as ruled by ADR-028).
