@@ -45,7 +45,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from controlplane.audit import review
+from controlplane.audit import forensics, review
 from controlplane.audit.db import init_db
 from controlplane.audit.records import (
     RECORD_STATUS_COMPLETE,
@@ -539,6 +539,40 @@ def create_app(gateway: Gateway | None = None) -> FastAPI:
     @app.get("/admin/review/{review_id}/released")
     async def released(review_id: str) -> Any:
         return {"review_id": review_id, "text": review.released_text(state.conn, review_id)}
+
+    # -- per-request forensic trace (read-only projection of audit_records) --
+    # Registered before the console mount and after /admin/review so the literal
+    # "/admin/requests" cannot be shadowed. No new table and no new write path: every
+    # field is the stored row or a named derivation of it (see audit/forensics.py).
+    @app.get("/admin/requests")
+    async def list_requests(limit: int = 50) -> Any:
+        return {"requests": forensics.list_requests(state.conn, limit=limit),
+                "source": forensics.SOURCE_LIVE}
+
+    @app.get("/admin/requests/{request_id}")
+    async def request_trace(request_id: str) -> Any:
+        # The use case is read first because the policy is keyed by it, and the 404 has to
+        # come from the row's absence rather than from a KeyError raised deeper in.
+        row = state.conn.execute(
+            "SELECT use_case FROM audit_records WHERE request_id = ?", (request_id,)
+        ).fetchone()
+        if row is None:
+            return JSONResponse(
+                status_code=404,
+                content={"error": {"code": "ERR-ADM-404",
+                                   "message": f"no audit record {request_id}",
+                                   "request_id": request_id}},
+            )
+        use_case = row["use_case"]
+        # Read live, and possibly a NEWER version than the one that decided this verdict —
+        # `policy_context.policy_matches_record` is what states whether they agree.
+        policy = state.store.get(use_case) if state.store.has(use_case) else None
+        others = {name: state.store.get(name) for name in state.store.use_cases}
+        return forensics.trace(
+            state.conn, request_id,
+            lanes=pipeline.LANES, span_of=pipeline.SPAN_OF,
+            policy=policy, all_policies=others,
+        )
 
     @app.post("/admin/policies/reload")
     async def reload_policies() -> Any:

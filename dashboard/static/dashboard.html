@@ -66,6 +66,37 @@
     <div id="queue" style="margin-top:var(--s-xl)"><p class="cap">loading…</p></div>
   </section>
 
+
+  <hr class="rule">
+
+  <!-- Request forensics -->
+  <section class="sec-sm">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;gap:var(--s-lg);flex-wrap:wrap">
+      <h2 class="h-sec">Request forensics</h2>
+      <p class="cap"><code class="mono">GET /admin/requests</code> ·
+        <code class="mono">GET /admin/requests/{id}</code></p>
+    </div>
+    <p class="lead" style="margin-top:var(--s-md)">One request, opened up: which stage it reached, which detector
+    looked and which did not, and the arithmetic that turned those signals into a verdict. Everything below is a
+    read-only projection of the append-only audit record — nothing here is simulated, and a quantity the schema
+    does not store reads <span class="cap">not recorded</span> rather than a plausible number.</p>
+
+    <div style="margin-top:var(--s-xl)">
+      <p class="ml">Requests, newest first</p>
+      <div class="scroll" style="margin-top:var(--s-sm)">
+        <table class="fx-pick" id="fx-list">
+          <thead><tr>
+            <th>When (UTC)</th><th>Pipeline</th><th>Verdict</th><th>Delivery</th><th>Labels</th>
+            <th class="num">Detectors ran</th><th class="num">Hold</th><th>Upstream</th><th class="num">Cost</th>
+          </tr></thead>
+          <tbody><tr><td colspan="9" class="cap">loading…</td></tr></tbody>
+        </table>
+      </div>
+      <p class="src" id="fx-list-src">Live process telemetry — this gateway's audit table, polled every 3 s.</p>
+    </div>
+
+    <div id="fx-trace" style="margin-top:var(--s-xxl)"></div>
+  </section>
   <hr class="rule">
 
   <!-- Committed measured figures -->
@@ -273,9 +304,355 @@ async function decide(ev) {
   }
 }
 
-function refresh() { loadMetrics(); loadQueue(); }
+/* ---- Request forensics -------------------------------------------------
+   Honesty rules (G), enforced here rather than trusted:
+   * every panel that shows a figure names its source, via `.src` under it;
+   * `nr()` is the ONLY renderer for an absent value — no zero, no dash that
+     could read as "instant", no interpolation;
+   * the four detector states are rendered from `state` verbatim, so a state
+     the backend cannot determine cannot be flattened into a nicer-looking one;
+   * a failed fetch renders an empty state naming the error, never rows.        */
+const NR = '<span class="cap">not recorded</span>';
+const nr = v => (v === null || v === undefined || v === '') ? NR : esc(v);
+const ms = v => (v === null || v === undefined) ? NR : `${num(v)}<span class="cap"> ms</span>`;
+const DS = {'RAN-CLEAN':'ds-clean','RAN-FIRED':'ds-fired','FAILED':'ds-failed',
+            'UNAVAILABLE':'ds-unavail','NOT-RUN':'ds-notrun'};
+let fxSel = null, fxSeen = new Set(), fxBusy = false;
+
+async function getJSON(url) {
+  const r = await fetch(url, {headers: {'Accept': 'application/json'}});
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body?.error?.message || body.detail || ('HTTP ' + r.status));
+  return body;
+}
+
+async function loadRequests() {
+  const tb = $('#fx-list tbody');
+  let payload;
+  try {
+    payload = await getJSON('/admin/requests?limit=50');
+  } catch (e) {
+    tb.innerHTML = `<tr><td colspan="9" class="cap err">request list unreachable (${esc(e.message)})</td></tr>`;
+    return;
+  }
+  const rows = payload.requests || [];
+  $('#fx-list-src').textContent = payload.source
+    ? `Source: ${payload.source} · polled every 3 s.` : '';
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="9" class="cap">no requests recorded yet — send one from the test chat</td></tr>';
+    $('#fx-trace').innerHTML = '';
+    fxSeen = new Set();
+    return;
+  }
+  const first = fxSeen.size === 0;
+  tb.innerHTML = rows.map(r => {
+    const fresh = !first && !fxSeen.has(r.request_id);
+    return `<tr data-id="${esc(r.request_id)}" tabindex="0"
+      ${r.request_id === fxSel ? 'aria-selected="true"' : ''} class="${fresh ? 'fx-new' : ''}">
+      <td><code class="mono">${esc(r.ts_utc)}</code></td>
+      <td><code class="mono">${esc(r.use_case)}</code></td>
+      <td>${chip(r.verdict)}</td>
+      <td class="cap">${nr(r.stream_mode)}</td>
+      <td>${r.labels?.length ? r.labels.map(l => `<span class="chip">${esc(l)}</span>`).join(' ')
+                             : '<span class="cap">none</span>'}</td>
+      <td class="num">${r.detectors_ran_count}</td>
+      <td class="num">${ms(r.total_hold_ms)}</td>
+      <td class="cap">${nr(r.upstream_class)}</td>
+      <td class="num">${r.est_cost_usd === null || r.est_cost_usd === undefined
+                        ? NR : '$' + (+r.est_cost_usd).toFixed(6)}</td>
+    </tr>`;
+  }).join('');
+  rows.forEach(r => fxSeen.add(r.request_id));
+  tb.querySelectorAll('tr[data-id]').forEach(tr => {
+    const pick = () => selectRequest(tr.dataset.id);
+    tr.addEventListener('click', pick);
+    tr.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); pick(); } });
+  });
+  // Auto-select the newest only when nothing is selected: a poll must never
+  // steal a selection the operator is reading.
+  if (fxSel === null) selectRequest(rows[0].request_id);
+  else if (!rows.some(r => r.request_id === fxSel)) {
+    // Selection fell off the window (older than limit). Say so; do not silently jump.
+    $('#fx-trace').innerHTML =
+      `<p class="cap">selected request <code class="mono">${esc(fxSel)}</code> is older than the
+       50-request window — pick a row above.</p>`;
+    fxSel = null;
+  }
+}
+
+async function selectRequest(id) {
+  if (fxBusy) return;
+  fxSel = id; fxBusy = true;
+  document.querySelectorAll('#fx-list tbody tr[data-id]').forEach(tr =>
+    tr.setAttribute('aria-selected', String(tr.dataset.id === id)));
+  const box = $('#fx-trace');
+  box.innerHTML = '<p class="cap">loading trace…</p>';
+  try {
+    box.innerHTML = renderTrace(await getJSON('/admin/requests/' + encodeURIComponent(id)));
+  } catch (e) {
+    box.innerHTML = `<p class="cap err">trace unavailable for <code class="mono">${esc(id)}</code>
+                     (${esc(e.message)})</p>`;
+  } finally { fxBusy = false; }
+}
+
+function fxTimeline(t) {
+  const flow = [];
+  t.timeline.forEach((n, i) => {
+    if (i) flow.push('<span class="fx-arrow">&rarr;</span>');
+    const extra = n.key === 'verdict' && n.verdict ? chip(n.verdict) : '';
+    flow.push(`<div class="fx-node st-${esc(n.state)}">
+      <span class="nl">${esc(n.label)}</span>
+      <span class="nv">${ms(n.elapsed_ms)}</span>
+      <span class="nr">${n.reason ? esc(n.reason) : esc(n.state)}</span>
+      ${extra ? `<span class="nr">${extra}</span>` : ''}
+    </div>`);
+    // Streaming: one node per sentence, in order, so a mid-stream catch is
+    // visible as sentence 3 of 5 rather than hidden in an aggregate.
+    (n.units || []).forEach(u => {
+      flow.push('<span class="fx-arrow">&middot;</span>');
+      flow.push(`<div class="fx-node fx-unit st-clean">
+        <span class="nl">sentence ${u.index} of ${u.of}</span>
+        <span class="nv">${ms(u.hold_ms)}</span>
+        <span class="nr">hold recorded${u.per_unit_attribution === null
+          ? '; signal attribution not recorded' : ''}</span>
+      </div>`);
+    });
+  });
+  const un = t.timeline.find(n => n.unit_note)?.unit_note;
+  return `<p class="ml">Stage timeline</p>
+    <div class="fx-flow" style="margin-top:var(--s-md)">${flow.join('')}</div>
+    <p class="src">Per-stage elapsed is the span written for that stage
+      (<code class="mono">latency_json</code>, this process). A grey node carries the record's own
+      reason it was not reached. ${un ? esc(un) + '.' : ''}</p>`;
+}
+
+function fxDetectors(t) {
+  const order = {'RAN-FIRED':0,'FAILED':1,'UNAVAILABLE':2,'RAN-CLEAN':3,'NOT-RUN':4};
+  const rows = t.detectors.slice().sort((a, b) =>
+    (order[a.state] ?? 9) - (order[b.state] ?? 9) || a.detector.localeCompare(b.detector));
+  const body = rows.map(d => {
+    const budget = d.budget_ms === null ? NR : `${d.budget_ms}<span class="cap"> ms</span>`;
+    let verdictCell;
+    if (d.breach === true) verdictCell = '<span class="ds ds-failed">over budget</span>';
+    else if (d.breach === false) verdictCell = '<span class="ds ds-clean">within</span>';
+    else verdictCell = `<span class="cap">${d.breach_note ? 'not comparable' : 'not recorded'}</span>`;
+    return `<tr class="${d.state === 'NOT-RUN' ? 'dim' : ''}">
+      <td><code class="mono">${esc(d.detector)}</code>
+        <span class="cap"> ${esc(d.stage)}</span></td>
+      <td><span class="ds ${DS[d.state] || 'ds-notrun'}">${esc(d.state)}</span>
+        ${d.state_detail ? `<div class="cap">${esc(d.state_detail)}</div>` : ''}
+        ${d.fail_mode_applied ? `<div class="cap">fail mode applied:
+          <code class="mono">${esc(d.fail_mode_applied)}</code></div>` : ''}</td>
+      <td>${d.score === null || d.score === undefined ? NR
+            : `<code class="mono">${(+d.score).toFixed(3)}</code>
+               <span class="cap"> ${esc(d.score_kind)}</span>`}
+        ${d.threshold ? `<div class="cap">${d.threshold.kind === 'band'
+            ? (d.threshold.tau_low === null ? esc(d.threshold.reason)
+               : `band &tau; ${d.threshold.tau_low}&ndash;${d.threshold.tau_high},
+                  borderline &rarr; ${esc(d.threshold.borderline_action)}`)
+            : esc(d.threshold.reason)}</div>` : ''}</td>
+      <td>${d.labels?.length ? d.labels.map(l => `<span class="chip">${esc(l)}</span>`).join(' ')
+                             : '<span class="cap">&mdash;</span>'}
+        ${d.spans?.length ? `<div class="cap">spans (offsets only):
+          <code class="mono">${d.spans.map(s => `[${s[0]},${s[1]}]`).join(' ')}</code></div>` : ''}</td>
+      <td class="num">${ms(d.attributable_ms)}
+        ${d.attributable_shared_span ? `<div class="cap">shared span
+          <code class="mono">${esc(d.span_key)}</code></div>` : ''}</td>
+      <td class="num">${budget}</td>
+      <td>${verdictCell}${d.breach_note ? `<div class="cap">${esc(d.breach_note)}</div>` : ''}</td>
+    </tr>`;
+  }).join('');
+  const counts = Object.keys(DS).map(s => {
+    const n = rows.filter(d => d.state === s).length;
+    return `<span class="ds ${DS[s]}">${s} ${n}</span>`;
+  }).join(' ');
+  return `<p class="ml" style="margin-top:var(--s-xxl)">Detector coverage</p>
+    <div style="display:flex;gap:var(--s-sm);flex-wrap:wrap;margin-top:var(--s-sm)">${counts}</div>
+    <div class="scroll" style="margin-top:var(--s-md)"><table>
+      <thead><tr><th>Detector</th><th>State</th><th>Score</th><th>Labels &amp; spans</th>
+        <th class="num">Attributable</th><th class="num">Budget</th><th>Budget verdict</th></tr></thead>
+      <tbody>${body || '<tr><td colspan="7" class="cap">no lane was reached</td></tr>'}</tbody>
+    </table></div>
+    <p class="src">Five states, deliberately distinct: <b>NOT-RUN</b> and <b>UNAVAILABLE</b> both produced
+      no result, and only one of them means the system knows it could not look. <b>FAILED</b> is a fault, never
+      a risk signal (ADR-027). Span offsets are shown; matched text is never returned by this endpoint
+      (NFR-SEC-001).</p>`;
+}
+
+function fxConvergence(t) {
+  const c = t.convergence;
+  const labels = c.label_resolution.map(r => `<tr class="${r.contributed ? '' : 'dim'}">
+    <td><span class="chip">${esc(r.label)}</span></td>
+    <td><code class="mono">${esc(r.detector)}</code></td>
+    <td><code class="mono">${nr(r.matched_rule)}</code></td>
+    <td>${r.action ? chip(r.action) : NR}</td>
+    <td class="cap">${r.contributed ? 'contributed' : 'not contributing'}</td>
+  </tr>`).join('');
+  const floors = c.failure_inputs.map(f => `<tr>
+    <td><code class="mono">${esc(f.detector)}</code></td>
+    <td><code class="mono">${esc(f.error_class)}</code></td>
+    <td><code class="mono">${nr(f.fail_mode_applied)}</code></td>
+    <td class="cap">${f.forced_escalate_floor ? 'forced the escalate floor'
+      : f.contributed ? 'contributed' : 'recorded, did not raise the floor'}</td>
+  </tr>`).join('');
+  const ladder = c.severity_ladder.map(l => `<div class="fx-rung ${l.winning ? 'win' : ''}">
+    <span>${esc(l.action)}</span><span>severity ${l.severity}${l.winning ? ' &larr; won' : ''}</span>
+  </div>`).join('');
+  const why = c.won_by_escalate_floor
+    ? 'won by the escalate floor: a detector fault forced escalate independently of any label (ADR-027)'
+    : c.won_by_labels.length
+      ? `won by label${c.won_by_labels.length > 1 ? 's' : ''} ${c.won_by_labels.join(', ')}`
+      : 'no winning label row and no escalate floor — decided by the policy default action';
+  return `<p class="ml" style="margin-top:var(--s-xxl)">Convergence &mdash; how the verdict was reached</p>
+    <div class="grid g3" style="margin-top:var(--s-md);align-items:start">
+      <div style="grid-column:span 2">
+        <div class="scroll"><table>
+          <thead><tr><th>Label</th><th>From</th><th>Matched rule</th><th>Action</th><th>Weight</th></tr></thead>
+          <tbody>${labels || '<tr><td colspan="5" class="cap">no labels raised</td></tr>'}</tbody>
+        </table></div>
+        ${floors ? `<p class="ml" style="margin-top:var(--s-lg)">Failure inputs (not label rows)</p>
+          <div class="scroll" style="margin-top:var(--s-sm)"><table>
+            <thead><tr><th>Detector</th><th>Error class</th><th>Fail mode</th><th>Effect</th></tr></thead>
+            <tbody>${floors}</tbody></table></div>` : ''}
+      </div>
+      <div class="card card-stone">
+        <p class="ml">Severity ladder</p>
+        <div class="fx-lad" style="margin-top:var(--s-md)">${ladder}</div>
+        <p class="cap" style="margin-top:var(--s-md)">${esc(why)}</p>
+      </div>
+    </div>
+    <p class="src">${esc(c.note)} · Source: ${esc(c.source)}. Per-label actions are resolved by the same
+      <code class="mono">expand_actions</code> precedence the engine uses (specific &gt; wildcard &gt; default),
+      not a re-implementation of it.</p>`;
+}
+
+function fxActions(t) {
+  const a = t.actions, edits = [...(a.input_redactions || []), ...(a.applied || [])];
+  const body = edits.map(e => `<tr>
+    <td class="cap">${esc(e.stage)}</td>
+    <td><code class="mono">${esc(e.transform)}</code></td>
+    <td><span class="chip">${esc(e.category || e.label)}</span></td>
+    <td><code class="mono">${e.span ? `[${e.span[0]},${e.span[1]}]`
+      : (e.whole_sentence ? 'whole sentence' : '&mdash;')}</code></td>
+  </tr>`).join('');
+  const rv = t.review;
+  return `<p class="ml" style="margin-top:var(--s-xxl)">Actions applied &amp; delivery</p>
+    <div class="grid g3" style="margin-top:var(--s-md);align-items:start">
+      <div style="grid-column:span 2">
+        <div class="scroll"><table>
+          <thead><tr><th>Stage</th><th>Transform</th><th>Category</th><th>Span</th></tr></thead>
+          <tbody>${body || '<tr><td colspan="4" class="cap">no transform applied</td></tr>'}</tbody>
+        </table></div>
+        ${a.notes?.length ? `<p class="cap" style="margin-top:var(--s-md)">${a.notes.map(esc).join(' · ')}</p>` : ''}
+      </div>
+      <div class="card">
+        <p class="ml">Delivery</p>
+        <p class="mono" style="margin-top:var(--s-sm);font-size:19px">${esc(a.delivery)}</p>
+        <p class="cap" style="margin-top:var(--s-md)">
+          ${a.promoted_to_escalate ? 'promoted to escalate by the fault floor<br>' : ''}
+          ${edits.length} transform${edits.length === 1 ? '' : 's'} recorded
+        </p>
+        ${rv ? `<p class="cap" style="margin-top:var(--s-md)">review
+          <code class="mono">${esc(rv.review_id)}</code> &middot; ${esc(rv.status)}<br>
+          ${esc(rv.note)}<br><a href="#queue">go to the review queue</a></p>`
+             : (a.review_id ? `<p class="cap" style="margin-top:var(--s-md)">review
+                <code class="mono">${esc(a.review_id)}</code> referenced by the record but no queue item
+                is readable</p>` : '')}
+      </div>
+    </div>
+    <p class="src">Categories and offsets only &mdash; the matched value is never carried out of the audit
+      record. Quarantined text stays behind <code class="mono">/admin/review/{id}/released</code>.
+      Source: ${esc(a.source)}.</p>`;
+}
+
+function fxPolicy(t) {
+  const p = t.policy_context, id = t.identity;
+  const gov = Object.entries(p.governing_rules || {}).map(([l, act]) =>
+    `<tr><td><span class="chip">${esc(l)}</span></td><td>${chip(act)}</td></tr>`).join('');
+  let cross = '';
+  // F: included only because it IS derivable from committed policy config, and
+  // labelled as the projection it is. When the request raised no labels there is
+  // nothing to project, and the backend omits the key — so nothing is rendered.
+  if (p.cross_pipeline_projection) {
+    cross = `<p class="ml" style="margin-top:var(--s-lg)">The same labels under the other pipelines</p>
+      <div class="scroll" style="margin-top:var(--s-sm)"><table>
+        <thead><tr><th>Pipeline</th><th>Most severe action</th><th>Per label</th></tr></thead>
+        <tbody>${Object.entries(p.cross_pipeline_projection).map(([name, v]) => `<tr><td><code class="mono">${esc(name)}</code>
+          ${name === id.use_case ? '<span class="cap"> (this request)</span>' : ''}</td>
+          <td>${v.most_severe ? chip(v.most_severe) : NR}</td>
+          <td class="cap">${Object.entries(v.per_label).map(([l, act]) =>
+            `${esc(l)} &rarr; ${esc(act)}`).join(' · ')}</td></tr>`).join('')}</tbody>
+      </table></div>
+      <p class="src"><b>Projection, not a re-run.</b> ${esc(p.cross_pipeline_caveat)}</p>`;
+  }
+  return `<p class="ml" style="margin-top:var(--s-xxl)">Policy context</p>
+    <div class="band band-navy" style="margin-top:var(--s-md)">
+      <p class="ml">Governing policy</p>
+      <p class="micro" style="margin-top:var(--s-sm)">
+        <code class="mono">${esc(id.use_case)}</code> · policy version recorded on this row:
+        <code class="mono">${nr(p.policy_version_recorded)}</code> · loaded now:
+        <code class="mono">${nr(p.policy_version_loaded_now)}</code>
+        ${p.policy_matches_record ? '' : ' — <b>these differ: the rules shown below are today\'s, '
+          + 'not necessarily the ones that decided this verdict</b>'}
+      </p>
+      <p class="micro" style="margin-top:var(--s-sm)">default
+        <code class="mono">${nr(p.default_action)}</code> · borderline
+        <code class="mono">${nr(p.borderline_action)}</code> · &tau;
+        <code class="mono">${nr(p.thresholds?.tau_low)}&ndash;${nr(p.thresholds?.tau_high)}</code> · route
+        <code class="mono">${nr(p.thresholds?.tau_route)}</code> · streaming
+        <code class="mono">${String(p.streaming)}</code> · geography
+        <code class="mono">${nr(p.geography)}</code> · risk appetite
+        <code class="mono">${nr(p.risk_appetite)}</code></p>
+      <p class="micro" style="margin-top:var(--s-sm)">fail mode — tier1
+        <code class="mono">${nr(p.fail_mode?.tier1)}</code> · tier2
+        <code class="mono">${nr(p.fail_mode?.tier2)}</code> · performance
+        <code class="mono">${nr(p.fail_mode?.performance)}</code> · cost
+        <code class="mono">${nr(p.fail_mode?.cost)}</code></p>
+    </div>
+    ${gov ? `<div class="scroll" style="margin-top:var(--s-lg)"><table>
+      <thead><tr><th>Label raised</th><th>Action this policy assigns</th></tr></thead>
+      <tbody>${gov}</tbody></table></div>` : ''}
+    ${cross}
+    <p class="src">Source: ${esc(p.source)}.</p>`;
+}
+
+function renderTrace(t) {
+  const id = t.identity;
+  return `<div class="card" style="padding:var(--s-xl)">
+    <div style="display:flex;justify-content:space-between;gap:var(--s-lg);flex-wrap:wrap;align-items:baseline">
+      <div>
+        <span class="v v-lg ${VC[id.verdict] || 'v-unknown'}"><span class="dot"></span>${esc(id.verdict)}</span>
+        <p class="micro" style="margin-top:var(--s-sm)"><code class="mono">${esc(id.request_id)}</code></p>
+      </div>
+      <p class="micro" style="text-align:right"><code class="mono">${esc(id.ts_utc)}</code><br>
+        <code class="mono">${esc(id.use_case)}</code> · ${esc(id.stream_mode)} ·
+        record <code class="mono">${esc(id.record_status)}</code></p>
+    </div>
+    <div class="grid g3" style="margin-top:var(--s-xl)">
+      <div class="kpi"><p class="ml">Model used</p><p class="n mono" style="font-size:20px">${nr(id.model_used)}</p>
+        <p class="cap">tier requested ${nr(id.tier_requested)}${id.cascade_escalated
+          ? ' · cascade escalated' : ''} · upstream class ${nr(id.upstream_class)}</p></div>
+      <div class="kpi"><p class="ml">Tokens in / out</p>
+        <p class="n mono" style="font-size:20px">${nr(id.tokens_in)} / ${nr(id.tokens_out)}</p>
+        <p class="cap">deep sample: ${id.sampled_deep ? 'yes' : 'no'}</p></div>
+      <div class="kpi"><p class="ml">Estimated cost</p>
+        <p class="n mono" style="font-size:20px">${id.est_cost_usd === null || id.est_cost_usd === undefined
+          ? NR : '$' + (+id.est_cost_usd).toFixed(6)}</p>
+        <p class="cap">${id.cost_note ? esc(id.cost_note) : 'priced from the measured upstream'}</p></div>
+    </div>
+    <p class="src">Source: ${esc(id.source)}.</p>
+    <div style="margin-top:var(--s-xl)">${fxTimeline(t)}</div>
+    ${fxDetectors(t)}
+    ${fxConvergence(t)}
+    ${fxActions(t)}
+    ${fxPolicy(t)}
+  </div>`;
+}
+
+function refresh() { loadMetrics(); loadQueue(); loadRequests(); }
 $('#refresh').addEventListener('click', refresh);
 refresh();
 setInterval(loadMetrics, 5000);
+setInterval(loadRequests, 3000);
 </script>
 </body></html>
