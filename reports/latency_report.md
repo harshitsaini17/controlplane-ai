@@ -6,19 +6,19 @@ NFR-P-001 (gateway hot-path overhead, **streaming pipelines**) and NFR-P-002 (pe
 
 | Field | Value |
 |---|---|
-| Generated (UTC) | 2026-08-29T23:15:30+00:00 |
+| Generated (UTC) | 2026-08-30T06:16:07+00:00 |
 | Dataset digest | `6a3ecbbe75fd020bf806bf647d572c85ee187198fb9828eaac5e1c6e00737fbd` |
 | Frozen at | `f162959f7d29` — MATCHES |
 | Requests attempted | 300 |
 | Samples recorded | 300 |
 | Stub cadence | 0.5 ms/token |
-| Code commit | `c838964ca3d9` + uncommitted changes |
+| Code commit | `94992335ff6b` |
 | Python | 3.14.6 |
 | Platform | Linux 7.1.2-arch3-1 · x86_64 |
 | CPU | unreported |
 | Percentile method | linear-interpolated (`telemetry.metrics.percentile`) |
-| Host load at process start (1/5/15) | 0.95 / 1.92 / 1.96 · 12 CPUs — **QUIET** |
-| Host load at end (1/5/15) | 3.02 / 2.31 / 2.08 · 12 CPUs |
+| Host load at process start (1/5/15) | 0.84 / 1.02 / 1.29 · 12 CPUs — **QUIET** |
+| Host load at end (1/5/15) | 2.44 / 1.35 / 1.39 · 12 CPUs |
 | Command | `python -m eval.bench_latency --check` |
 
 > **Upstream provenance:** the active provider `kiro-local` is **dev-class**, which `require_measured_upstream()` refuses for judge-facing output (ADR-018). **The stub-upstream tables are unaffected:** they involve no provider call at all — that is the point of a stub, and 06 §4 chose one so gateway overhead is isolated from provider variance. The gate binds only the end-to-end sanity row, which is reported as not-run below.
@@ -36,8 +36,8 @@ These two series are what NFR-P-001 targets after ADR-030, whose targets were *d
 
 | Series | Target P50 | Target P99 | n | P50 | P95 | P99 | min | max |
 |---|---|---|---|---|---|---|---|---|
-| `input_hold_ms` | < 40 ms | < 50 ms | 200 | 20.86 | 24.10 | 26.68 | 12.55 | 27.13 |
-| `sentence_holds_ms` (per hold) | < 40 ms | < 100 ms | 231 | 20.70 | 27.59 | 31.40 | 11.85 | 509.75 |
+| `input_hold_ms` | < 40 ms | < 50 ms | 200 | 21.58 | 25.67 | 27.49 | 11.83 | 29.38 |
+| `sentence_holds_ms` (per hold) | < 40 ms | < 100 ms | 231 | 21.00 | 27.53 | 39.59 | 11.85 | 539.56 |
 
 ## `total_attributable_overhead_ms` — streaming pipelines (published, no target)
 
@@ -45,9 +45,9 @@ Renamed by **ADR-030** from `gateway_overhead_ms`; **the 06 §4 formula is uncha
 
 | Pipeline | n | P50 | P95 | P99 | min | max |
 |---|---|---|---|---|---|---|
-| UC-1 `support_bot` | 100 | 41.62 | 54.20 | 65.39 | 29.34 | 529.74 |
-| UC-2 `hr_copilot` | 100 | 43.05 | 72.03 | 107.79 | 12.76 | 114.23 |
-| **all streaming** | 200 | 42.18 | 59.07 | 107.79 | 12.76 | 529.74 |
+| UC-1 `support_bot` | 100 | 43.10 | 64.04 | 74.52 | 31.64 | 560.75 |
+| UC-2 `hr_copilot` | 100 | 43.48 | 74.44 | 109.77 | 12.26 | 110.92 |
+| **all streaming** | 200 | 43.35 | 68.02 | 109.77 | 12.26 | 560.75 |
 
 ## `total_attributable_overhead_ms` — non-streaming pipelines
 
@@ -55,8 +55,8 @@ Reported separately and **not** gated by NFR-P-001, whose scope is streaming pip
 
 | Pipeline | n | P50 | P95 | P99 | min | max |
 |---|---|---|---|---|---|---|
-| UC-3 `finance_advisor` | 100 | 12.35 | 18.61 | 20.41 | 11.71 | 22.05 |
-| **all non-streaming** | 100 | 12.35 | 18.61 | 20.41 | 11.71 | 22.05 |
+| UC-3 `finance_advisor` | 100 | 12.72 | 19.91 | 20.32 | 12.18 | 21.62 |
+| **all non-streaming** | 100 | 12.72 | 19.91 | 20.32 | 12.18 | 21.62 |
 
 ### `added_time_to_last_byte_ms` — client wall-clock − upstream (streaming)
 
@@ -66,19 +66,50 @@ Reported separately and **not** gated by NFR-P-001, whose scope is streaming pip
 
 | Series | n | P50 | P95 | P99 | min | max |
 |---|---|---|---|---|---|---|
-| `added_time_to_last_byte_ms` (upper bound) | 200 | 45.23 | 61.80 | 110.57 | 15.71 | 532.73 |
+| `added_time_to_last_byte_ms` (upper bound) | 200 | 46.35 | 71.09 | 112.74 | 14.89 | 563.64 |
 
-## Per-detector latency vs NFR-P-002 budgets
+## Per-detector budget verdict — NFR-P-002, on the ATTRIBUTABLE series
 
-Budgets are also enforced at runtime: `run_with_budget` cancels past budget and raises `DetectorTimeout`. A P99 sitting at the budget therefore usually means timeouts fired, not that a call ran long — the two need different responses, so the fault count is shown beside the percentiles.
+**ADR-036 Amendment 1.** The budget binds detector-**attributable** time — in-thread CPU, the same figure `run_with_budget` enforces on. This table is the NFR-P-002 verdict and the only place one is rendered. Wall-clock follows below, untargeted.
+
+A breaching call IS in this series: the figure is recorded before the raise. Were it otherwise the only samples able to fail the gate would be ones the gate never sees.
 
 | Detector | Budget | n | P50 | P95 | P99 | max | Faults | Within budget (P99) |
 |---|---|---|---|---|---|---|---|---|
-| `numeric_claims` | 5 ms | 283 | 0.079 | 0.242 | 0.309 | 0.378 | 0 | yes |
-| `tier1_blocklist` | 2 ms | 583 | 0.014 | 0.018 | 0.024 | 0.068 | 0 | yes |
-| `tier1_pii` | 2 ms | 583 | 0.058 | 0.094 | 0.124 | 0.234 | 0 | yes |
-| `tier2_injection` | 25 ms | 300 | 20.136 | 23.372 | 25.569 | 26.909 | 0 | **NO** |
-| `tier2_toxicity` | 25 ms | 283 | 19.883 | 22.915 | 25.114 | 31.629 | 2 (fail_open ×2) | **NO** |
+| `numeric_claims` | 5 ms | 283 | 0.077 | 0.234 | 0.277 | 0.372 | 0 | yes |
+| `tier1_blocklist` | 2 ms | 583 | 0.012 | 0.014 | 0.020 | 0.029 | 0 | yes |
+| `tier1_pii` | 2 ms | 583 | 0.053 | 0.093 | 0.133 | 0.266 | 0 | yes |
+| `tier2_injection` | 25 ms | 300 | 20.032 | 22.749 | 25.348 | 28.317 | 0 | **NO** |
+| `tier2_toxicity` | 25 ms | 283 | 19.553 | 21.635 | 23.741 | 25.880 | 2 (fail_open ×2) | yes |
+
+### Superseded verdict — preserved, not deleted
+
+> The run of **2026-08-30** published these two rows as NFR-P-002 violations, rendered on **wall-clock** — the clock ADR-036 had already rejected (`[D3-nfr-p002-gate-reads-the-clock-adr-036-rejected]`):
+>
+> | Requirement | Detector | Stat | Budget | Measured (wall-clock) |
+> |---|---|---|---|---|
+> | NFR-P-002 | `tier2_injection` | P99 | 25.0 ms | **25.569 ms**, 0 faults |
+> | NFR-P-002 | `tier2_toxicity` | P99 | 25.0 ms | **25.114 ms**, 2 faults |
+>
+> **Superseded by the attributable verdict above.** Kept because both figures are real measurements and deleting a published breach to replace it with a friendlier instrument is exactly what an instrument change must not be allowed to do (AGENTS.md §7). These are a HISTORICAL RECORD of a prior artifact, not this run's data — no figure in them is recomputed here.
+
+## Per-detector wall-clock — UNTARGETED (the holds' constituent)
+
+**Not a budget series, and never was a fair one** (ADR-036 item 5): for a pool detector this includes queue wait and GIL contention with whatever shared its lane. It stays published because it is what the holds are made of, and what a user waits for. Percentiles are over calls that **returned**; faulted calls are a separate row set below rather than mixed in — the A2 partition, so a fault and a breach can never read as one event counted twice.
+
+| Detector | n | P50 | P95 | P99 | max |
+|---|---|---|---|---|---|
+| `numeric_claims` | 283 | 0.083 | 0.241 | 0.285 | 0.380 |
+| `tier1_blocklist` | 583 | 0.015 | 0.019 | 0.026 | 0.037 |
+| `tier1_pii` | 583 | 0.059 | 0.101 | 0.144 | 0.273 |
+| `tier2_injection` | 300 | 20.758 | 24.667 | 26.778 | 29.130 |
+| `tier2_toxicity` | 281 | 20.286 | 23.292 | 26.599 | 34.268 |
+
+**Wall-clock of faulted calls** (`outcome=fault`) — published, separately. A timeout consumed real time; hiding it would make the breach invisible.
+
+| Detector | n | P50 | P99 | max |
+|---|---|---|---|---|
+| `tier2_toxicity` | 2 | 35.826 | 45.782 | 45.985 |
 
 **Not exercised in this run:** `conv_tracker`, `cost_budget`, `fast_consistency`, `loop_guard`, `rag_grounding`. These are unimplemented or policy-gated detectors, so their budgets are untested rather than met — the distinction M-10 draws between "checked, clean" and "never checked", applied to a benchmark.
 
@@ -86,12 +117,11 @@ Budgets are also enforced at runtime: `run_with_budget` cancels past budget and 
 
 ## NFR verdict
 
-**2 violation(s).** Per AGENTS.md §5.4 the response is a **D3 deviation** carrying the honest measured number — never a relaxed threshold.
+**1 violation(s).** Per AGENTS.md §5.4 the response is a **D3 deviation** carrying the honest measured number — never a relaxed threshold.
 
 | Requirement | Subject | Metric | Target | Measured |
 |---|---|---|---|---|
-| NFR-P-002 | tier2_injection | P99 | 25.0 ms | **25.569 ms** |
-| NFR-P-002 | tier2_toxicity | P99 | 25.0 ms | **25.114 ms** |
+| NFR-P-002 | tier2_injection | P99 | 25.0 ms | **25.348 ms** |
 
 ## End-to-end sanity row (real provider)
 
@@ -139,7 +169,7 @@ NFR-P-001 as ADR-030 scopes it: input-lane hold **within** its 50 ms P99, per-se
 
 One adjacency ADR-030 records rather than rounds away: the **enriched typical** row lands at exactly **40.0 ms** against a strict `< 40` P50. It is not a breach, because the P50 judges the *median* hold and a median sentence is unenriched — enrichment requires a span-bearing `hallucination.*` signal, so a median enriched sentence would mean over half of all traffic is hallucination-flagged. It is written down because it is the first place a future budget change would break the derivation.
 
-Three things this does **not** say. It is not a measurement, so it is not a D3 — a D3 needs an observed breach, and nothing here was observed: the measured sum is 107.79 ms P99 over 200 samples, against a smallest projected figure of 50 ms. It is not a claim that the budgets are wrong: 04 §2 declares them and `run_with_budget` enforces them, so a detector at budget is a detector behaving as specified. And it is not a prediction that tier2 will actually cost its full budget — a fast classifier well inside 25 ms changes the arithmetic entirely.
+Three things this does **not** say. It is not a measurement, so it is not a D3 — a D3 needs an observed breach, and nothing here was observed: the measured sum is 109.77 ms P99 over 200 samples, against a smallest projected figure of 50 ms. It is not a claim that the budgets are wrong: 04 §2 declares them and `run_with_budget` enforces them, so a detector at budget is a detector behaving as specified. And it is not a prediction that tier2 will actually cost its full budget — a fast classifier well inside 25 ms changes the arithmetic entirely.
 
 ## Scope and limitations
 
