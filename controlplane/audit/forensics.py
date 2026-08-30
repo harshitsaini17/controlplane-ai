@@ -424,12 +424,12 @@ def _timeline(
                     "cannot separate those two"
                 )
             if spans.COST_ROUTE not in latency:
-                # The surviving half of SL-9, and still true: nothing writes this span
+                # The surviving cost-plane gap (SL-10): nothing writes this span
                 # because no cascade router exists. Kept as its own field so the routing
                 # gap does not get mistaken for a fact about the budget gate.
                 node["routing"] = (
                     "not evaluated — no cascade router is implemented, so `cp.cost.route` is "
-                    "never written (SL-9)"
+                    "never written (SL-10)"
                 )
         if key == "verdict":
             node["verdict"] = verdict

@@ -247,6 +247,78 @@ def _enricher_reason() -> str:
     )
 
 
+def _cost_reason(name: str) -> str:
+    """Why a cost detector is reported and not scored — derived, for the M-42/M-43 reason.
+
+    Both rows said "not implemented — stub" while rendering into `reports/eval_report.md`,
+    and both went false the moment the detectors landed. That is a claim described by a
+    premise it no longer comes from, in a judge-facing generator — so the string is read
+    from the registry and the corpus rather than typed.
+
+    **The unscorability is structural, not a gap waiting to be filled.** These two are
+    deterministic emitters over `ctx.cost` — a spend ledger, a token estimate, a turn count.
+    None of that is a property of the *text* a labelled corpus case carries, so no amount of
+    corpus authoring makes P/R/F1 meaningful for them: the same sentence fires or does not
+    fire depending on ledger state the corpus cannot express. Their verification lives where
+    the quantity does — `tests/test_cost_plane.py` for the contract and both boundaries,
+    demo beat 7b for the end-to-end block, `reports/cost_report.md` for the cascade
+    arithmetic. Carries no figures: a count written here would be a second, unverifiable copy
+    of one the report computes (AGENTS.md §7).
+    """
+    from controlplane.gateway.pipeline import LIVE
+
+    live = name in LIVE
+    labelled = _corpus_label_count(_COST_LABELS.get(name, ()))
+    if not live:
+        return "not implemented — absent from the LIVE registry"
+    if labelled:
+        # Reachable only after a new freeze cycle adds cost-labelled cases. Says so rather
+        # than silently keeping the "no cases" reading, which would then be the false one.
+        return (
+            f"**implemented and live**, and the corpus now carries {labelled} case(s) with "
+            "its labels — scoring it is a harness change this row does not claim to have made"
+        )
+    return (
+        "**implemented and live in the gateway; not scorable by this harness** — it fires on "
+        "ledger spend, an estimated token count and a turn rate, none of which is a property "
+        "of a corpus case's text, and no frozen case carries a `cost.*` label. P/R/F1 here "
+        "would be a ratio over an empty denominator. Verified instead by "
+        "`tests/test_cost_plane.py` (both boundary rules, NFR-SEC-001, the 1 ms budget), demo "
+        "beat 7b (pre-dispatch block, 0 upstream dispatches) and `reports/cost_report.md`"
+    )
+
+
+#: The labels each cost detector emits, so `_cost_reason` asks the corpus about the right ones.
+_COST_LABELS: dict[str, tuple[str, ...]] = {
+    "cost_budget": ("cost.budget_exceeded", "cost.request_too_large"),
+    "loop_guard": ("cost.loop_detected",),
+}
+
+
+def _corpus_label_count(labels: Sequence[str]) -> int:
+    """How many frozen cases carry any of `labels`. Zero on an unreadable dataset.
+
+    Tolerant by design: this feeds a *reason string*, and a harness that refused to start
+    because it could not count would replace a prose defect with an outage. The freeze gate is
+    what asserts the dataset is present and intact.
+    """
+    if not labels:
+        return 0
+    wanted = set(labels)
+    count = 0
+    try:
+        for path in sorted(DATASET_DIR.glob("*.jsonl")):
+            for line in path.read_text().splitlines():
+                if not line.strip():
+                    continue
+                case = json.loads(line)
+                if wanted & set(case.get("labels") or ()):
+                    count += 1
+    except (OSError, ValueError):
+        return 0
+    return count
+
+
 SKIPPED: tuple[SkippedDetector, ...] = (
     SkippedDetector("fast_consistency", ("hallucination.low_confidence",),
                     "CUT to roadmap (SL-6) — specified in 04 §2.3, never implemented. "
@@ -275,10 +347,13 @@ SKIPPED: tuple[SkippedDetector, ...] = (
     SkippedDetector("entity_enricher", ("privacy.person",), _enricher_reason()),
     SkippedDetector("conv_tracker", ("conversation.cumulative_risk",),
                     "not implemented — stub (ADR-021 scope is specified, code is not)"),
+    # Reasons deferred to `_cost_reason()` for the `_enricher_reason` reason, one class of rot
+    # later: both rows read "not implemented — stub" until the detectors landed, and a
+    # hand-typed string cannot be right on both sides of that event.
     SkippedDetector("cost_budget", ("cost.budget_exceeded", "cost.request_too_large"),
-                    "not implemented — stub; the cost plane needs a priced provider"),
+                    _cost_reason("cost_budget")),
     SkippedDetector("loop_guard", ("cost.loop_detected",),
-                    "not implemented — stub"),
+                    _cost_reason("loop_guard")),
 )
 
 
