@@ -32,6 +32,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from controlplane.audit.records import serialize_detectors
+from controlplane.cost import ledger as cost_ledger
+from controlplane.detectors import conversation as conversation_mod
+from controlplane.detectors import cost as cost_mod
 from controlplane.detectors import entity_enricher
 from controlplane.detectors import numeric_claims as numeric_claims_mod
 from controlplane.detectors import rag_grounding as rag_grounding_mod
@@ -39,6 +42,7 @@ from controlplane.detectors import tier1_patterns
 from controlplane.detectors import tier2_injection as tier2_injection_mod
 from controlplane.detectors import tier2_toxicity as tier2_toxicity_mod
 from controlplane.detectors.base import (
+    CostView,
     Detector,
     DetectorContext,
     DetectorFailure,
@@ -70,6 +74,8 @@ LIVE: dict[str, Detector] = {
     "tier2_injection": tier2_injection_mod.tier2_injection,
     "tier2_toxicity": tier2_toxicity_mod.tier2_toxicity,
     "rag_grounding": rag_grounding_mod.rag_grounding,
+    "cost_budget": cost_mod.cost_budget,
+    "loop_guard": conversation_mod.loop_guard,
 }
 
 #: 04 §2 Stage column, transcribed. Order within a stage is the table's order, so a
@@ -179,6 +185,11 @@ def expected_for(stage: Stage, request: ResolvedRequest) -> tuple[str, ...]:
       here and the narrowing silently never fired, while `availability._uses` — which
       carries a comment warning about exactly this — had it right. The two now agree.
     * `conv_tracker` — 04 §2 is per-conversation, so no conversation id means no lane.
+    * `loop_guard` — same rule, same clause: 04 §2 calls it a "sliding window per
+      conversation", and a request with no conversation id has no window to slide. It is an
+      *inapplicable* detector rather than one policy switched off, which is the
+      `conv_tracker` precedent — 05 §4 keeps `not_run` answering one question, and listing a
+      detector that could not have applied would report a coverage gap that does not exist.
     """
     policy = request.policy
     out: list[str] = []
@@ -187,7 +198,7 @@ def expected_for(stage: Stage, request: ResolvedRequest) -> tuple[str, ...]:
             continue
         if name == "fast_consistency" and policy.consistency is Consistency.OFF:
             continue
-        if name == "conv_tracker" and not request.conversation_id:
+        if name in ("conv_tracker", "loop_guard") and not request.conversation_id:
             continue
         out.append(name)
     return tuple(out)
@@ -272,6 +283,82 @@ class LaneResult:
     latency: dict[str, float] = field(default_factory=dict)
 
 
+#: Characters per token for `est_request_tokens`. An ESTIMATE, and the divisor is the
+#: repo's own measurement rather than folklore: M-31 measured chars/token over this
+#: corpus at a **median of 4.29** (range 1.00–800). Rounded DOWN to 4, which biases the
+#: estimate slightly high — for a size cap, over-counting is the direction that fails
+#: visibly (an audit-only flag) instead of silently admitting an oversized request.
+#:
+#: 04 §2's row text says "tokenizer count". This is not that, and the gap is deliberate:
+#: tokenizing every request on the input lane would put a model-backed pass inside a
+#: <1 ms budget, and the only tokenizer in the tree belongs to the Tier-2 ONNX
+#: checkpoints (a *different* vocabulary from any upstream model's, so its count would
+#: be no more authoritative than this one). Every figure derived from it is labelled
+#: `est_` and its evidence carries `source=char_estimate`, so nothing downstream can
+#: mistake it for a measurement. PROVISIONAL — batch review at phase end.
+CHARS_PER_TOKEN = 4
+
+
+def estimate_tokens(messages: Sequence[Mapping[str, Any]]) -> int:
+    """Character-derived token estimate for a whole request body (see `CHARS_PER_TOKEN`).
+
+    Every message, not just the last user turn: `per_request_max_tokens` bounds what this
+    request would cost, and the gateway forwards the whole transcript, so the prior turns
+    are billed too. That is the opposite of `input_lane`'s scanning rule — which reads only
+    the last user turn because earlier turns were already *scored* on their own request —
+    and the two differ because one is measuring spend while the other is judging content.
+    """
+    chars = 0
+    for message in messages:
+        content = message.get("content") if isinstance(message, Mapping) else None
+        if isinstance(content, str):
+            chars += len(content)
+        elif isinstance(content, list):
+            chars += sum(
+                len(part.get("text", ""))
+                for part in content
+                if isinstance(part, Mapping) and isinstance(part.get("text"), str)
+            )
+    return -(-chars // CHARS_PER_TOKEN)  # ceil: a partial token still costs one
+
+
+def cost_view(stage: Stage, request: ResolvedRequest) -> CostView:
+    """Project the cost-plane scalars for `stage` (04 §2 puts both cost rows at `input`).
+
+    **The keyed ledger read happens here, not in the detector**, and `detectors/cost.py`
+    records what that costs a reader of the latency report. The short version: a ledger is
+    keyed by use case, and `DetectorContext` guarantees a detector cannot know its use case
+    (AGENTS.md §9.1).
+
+    Empty for every other stage, so no output-lane sentence pays for a SELECT it has no
+    detector to feed. `CostLedger` caches, so the once-per-request read is amortized further
+    (`ledger.CACHE_TTL_S`).
+    """
+    if stage is not Stage.INPUT:
+        return CostView()
+
+    budget = request.policy.budget
+    ledger = cost_ledger.LEDGER
+    # Recorded before the view is built so `loop_guard` sees the CURRENT turn — a repetition
+    # check that excluded the turn under judgement could never fire on the second of a pair.
+    repeated = ledger.observe_turn(request.conversation_id, last_user_text(request.messages))
+    turns = (ledger.conversation_turns(request.conversation_id)
+             if request.conversation_id else None)
+    spend = ledger.spend_in_window(request.use_case, cost_ledger.LOOP_WINDOW_S)
+    return CostView(
+        ceiling_usd=budget.monthly_usd,
+        spend_usd=ledger.month_spend_usd(request.use_case),
+        # From the rolling window, not the month: it answers "is this figure evidenced or
+        # unknown", and a month of dev-class history would drown the answer for today.
+        priced_requests=spend.priced_requests,
+        per_request_max_tokens=budget.per_request_max_tokens,
+        est_request_tokens=estimate_tokens(request.messages),
+        loop_max_requests_per_min=budget.loop_max_requests_per_min,
+        requests_in_window=turns.requests_in_window if turns else 0,
+        repeated_turn=repeated or bool(turns and turns.repeated_turn),
+    )
+
+
 async def run_lane(
     stage: Stage,
     text: str,
@@ -305,6 +392,7 @@ async def run_lane(
         conversation_id=request.conversation_id,
         blocklist_extra=list(request.policy.blocklist_extra),
         detector_params=dict(request.policy.detector_params),
+        cost=cost_view(stage, request),
     )
 
     signals: list[Signal] = []

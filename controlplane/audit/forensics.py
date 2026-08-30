@@ -305,6 +305,8 @@ def _timeline(
     signals: list[dict[str, Any]],
     failures: list[dict[str, Any]],
     actions: dict[str, Any],
+    coverage: dict[str, Any],
+    span_of: dict[tuple[Stage, str], str],
 ) -> tuple[list[dict[str, Any]], set[str]]:
     """The Part B stage timeline, plus the set of nodes the request actually reached.
 
@@ -374,10 +376,61 @@ def _timeline(
             )
             node["source"] = "evidenced by this record existing"
         if key == "cost" and not present:
-            node["reason"] = (
-                "cost plane unbuilt — cost_budget and loop_guard are stubs, absent from "
-                "the LIVE registry (disclosed as SL-9)"
+            # DERIVED, and that is the correction rather than a nicety. This said "cost plane
+            # unbuilt — cost_budget and loop_guard are stubs" until those two shipped, which
+            # made it false for every record written afterwards. A forensic view reads
+            # *history*: a fixed sentence about the build's state is a claim about the reader's
+            # present tense stamped onto a row from the past, so the only version that cannot
+            # rot is one read out of the record in hand.
+            cost_detectors = sorted(
+                name for (_stage, name), span in span_of.items()
+                if span in span_keys
             )
+            ran = set(coverage.get("ran") or [])
+            not_run = {e["detector"]: e.get("reason")
+                       for e in (coverage.get("not_run") or [])}
+            unavailable = {e["detector"]: e.get("missing")
+                           for e in (coverage.get("unavailable") or [])}
+            listed = [d for d in cost_detectors
+                      if d in ran or d in not_run or d in unavailable]
+            if any(d in ran for d in cost_detectors):
+                # Should be unreachable: `run_lane` writes the span for a detector it ran.
+                # Reported rather than smoothed over, because a coverage column and a
+                # latency column disagreeing is exactly what an operator opened this for.
+                node["reason"] = (
+                    "coverage says "
+                    + ", ".join(f"`{d}`" for d in cost_detectors if d in ran)
+                    + " ran, yet no cost span was recorded — the two columns disagree"
+                )
+            elif not_run and any(d in not_run for d in cost_detectors):
+                node["reason"] = "; ".join(
+                    f"`{d}` not run ({not_run[d] or 'no reason recorded'})"
+                    for d in cost_detectors if d in not_run
+                )
+            elif any(d in unavailable for d in cost_detectors):
+                node["reason"] = "; ".join(
+                    f"`{d}` unavailable ({unavailable[d] or 'no dependency named'})"
+                    for d in cost_detectors if d in unavailable
+                )
+            elif not listed:
+                # Ambiguous BY CONSTRUCTION, and said so instead of guessed at: 05 §4 omits a
+                # policy-disabled detector from the column entirely, so absence here reads
+                # identically to a record written before the cost plane existed. Naming one
+                # cause would be inventing evidence the column does not carry (M-10).
+                node["reason"] = (
+                    "no cost span, and no cost detector is listed in this record's coverage "
+                    "column — either policy switched them off for this use case or the record "
+                    "predates the cost plane; 05 §4 omits a disabled detector, so the column "
+                    "cannot separate those two"
+                )
+            if spans.COST_ROUTE not in latency:
+                # The surviving half of SL-9, and still true: nothing writes this span
+                # because no cascade router exists. Kept as its own field so the routing
+                # gap does not get mistaken for a fact about the budget gate.
+                node["routing"] = (
+                    "not evaluated — no cascade router is implemented, so `cp.cost.route` is "
+                    "never written (SL-9)"
+                )
         if key == "verdict":
             node["verdict"] = verdict
             node["fallback_substituted"] = bool(actions.get("fallback_used"))
@@ -555,6 +608,7 @@ def trace(
     timeline, reached = _timeline(
         latency=latency, verdict=row["verdict"], stage_summary=row["stage_summary"],
         signals=signals, failures=failures, actions=actions,
+        coverage=coverage, span_of=span_of,
     )
 
     review: dict[str, Any] | None = None

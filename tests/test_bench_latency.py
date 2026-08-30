@@ -887,7 +887,24 @@ def test_the_projection_is_labelled_a_projection_and_not_a_d3(batch, corpus):
     section = body[body.index("## Forward projection"):body.index("## Scope and limitations")]
     assert "PROJECTION, not a measurement" in section
     assert "not a D3" in section
-    assert "unimplemented" in section
+
+    # The disclosure claim has TWO branches and this pins both, because the branch it used
+    # to pin goes vacuous exactly when the build succeeds. While detectors are pending, the
+    # section must name them as unmeasurable. Once none are, "unimplemented" is absent *for
+    # the right reason* — and the sentence that replaces it is then the load-bearing claim,
+    # so it earns the same guard rather than none. Read from `projected_not_yet_live()`, the
+    # same source `render` derives the branch from, so this tracks the registry rather than a
+    # snapshot of it.
+    pending = bl.projected_not_yet_live()
+    if pending:
+        assert "unimplemented" in section
+        for detector in pending:
+            assert f"`{detector}`" in section, f"pending `{detector}` is not disclosed"
+    else:
+        assert "unimplemented" not in section
+        assert "now live and measured above" in section
+        # Still arithmetic over declared budgets, not a measurement wearing a new label.
+        assert "rather than as a forecast" in section
     # It must not claim the budgets are wrong, nor that tier2 will cost its full budget.
     assert "not a claim that the budgets are wrong" in section
     assert "not a prediction that tier2 will actually cost its full budget" in section

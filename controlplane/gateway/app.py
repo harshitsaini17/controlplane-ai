@@ -46,7 +46,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from controlplane.audit import forensics, review
-from controlplane.audit.db import init_db
+from controlplane.audit.db import init_db, resolve_db_path
+from controlplane.cost.ledger import LEDGER
 from controlplane.audit.records import (
     RECORD_STATUS_COMPLETE,
     RECORD_STATUS_PARTIAL,
@@ -215,6 +216,20 @@ class Gateway:
         # the first audited request. The connection is then discarded: `conn` hands out a
         # per-thread one, and holding this would be the very object that cannot be shared.
         init_db(db_path).close()
+        # The cost plane reads history through the same file. It binds to the PATH, not to
+        # this connection: `CostLedger` opens one connection per calling thread for the
+        # reason `conn` documents below, and handing it a connection built on the startup
+        # thread would make every read from the event-loop thread raise — which `_query`
+        # treats as absence of evidence, so `cost_budget` would go quietly silent instead of
+        # failing loudly. Resolved here rather than passed as `None` so the ledger and the
+        # audit writer are pinned to one file for this gateway's lifetime.
+        #
+        # `LEDGER` is a process global, so the most recently constructed gateway owns it.
+        # That is correct for serving (one gateway per process) and is what keeps one test's
+        # conversation turns from becoming the next test's loop; a process that runs two
+        # gateways concurrently against different databases would need a per-gateway ledger,
+        # which nothing in this build does. PROVISIONAL — batch review at phase end.
+        LEDGER.bind(db_path=db_path or resolve_db_path())
         # An empty key map is valid (header-only use-case resolution), so a `None` from the
         # loader is normalized once here rather than retried per request.
         self.key_map = key_map if key_map is not None else (load_key_map() or {})

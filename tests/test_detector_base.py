@@ -912,6 +912,13 @@ def test_fr_pol_002_ctx_carries_no_policy_and_no_action_map() -> None:
     Asserting the whole field set rather than "no policy field" is deliberate: it also
     catches the subtler version, where someone adds `use_case` or `label_actions` for
     convenience and re-opens the door a different way.
+
+    `cost` is the third projected-policy channel and is listed here on the same terms as the
+    other two: the gateway performs the use-case-keyed ledger read and projects the resulting
+    **quantities**, so `cost_budget` compares numbers it cannot attribute to a use case. It is
+    admitted to this set only because the nested field set is pinned directly below — widening
+    the outer assertion without that would trade a guard for a hole, since a nested model can
+    carry a `use_case` the outer check would never see.
     """
     assert set(DetectorContext.model_fields) == {
         "text",
@@ -920,4 +927,41 @@ def test_fr_pol_002_ctx_carries_no_policy_and_no_action_map() -> None:
         "conversation_id",
         "blocklist_extra",
         "detector_params",
+        "cost",
     }
+
+
+def test_fr_pol_002_cost_view_carries_quantities_and_nothing_identifying() -> None:
+    """The nested half of the guard above: what may travel inside `ctx.cost`.
+
+    Two separate properties, and they fail for different reasons. **No identifying field** is
+    FR-POL-002 — `use_case`, a policy or version handle, or a label→action map would each let
+    a detector learn whose budget it is enforcing (AGENTS.md §9.1). **Scalars only** is
+    NFR-SEC-001: the ledger's own inputs include turn text and salted turn hashes, and a
+    detector writes `evidence` straight into `audit_records.signals_json`, so a `str` field
+    here is one convenience edit away from user content in the audit log. `bool` is allowed
+    (`repeated_turn` is the *fact* of a repeat, which is the signal); `str` and `bytes` are
+    not.
+    """
+    from controlplane.detectors.base import CostView
+
+    assert set(CostView.model_fields) == {
+        "ceiling_usd",
+        "spend_usd",
+        "priced_requests",
+        "per_request_max_tokens",
+        "est_request_tokens",
+        "loop_max_requests_per_min",
+        "requests_in_window",
+        "repeated_turn",
+    }
+    leaked = [
+        name for name in CostView.model_fields
+        if any(token in name for token in ("use_case", "policy", "action", "text", "hash", "id"))
+    ]
+    assert leaked == [], f"identifying field(s) on the cost channel: {leaked}"
+    for name, field in CostView.model_fields.items():
+        rendered = str(field.annotation)
+        assert "str" not in rendered and "bytes" not in rendered, (
+            f"CostView.{name} can carry text ({rendered}); the cost channel is quantities only"
+        )

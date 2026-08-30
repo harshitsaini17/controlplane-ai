@@ -44,6 +44,7 @@ from typing import Any, Iterable, Sequence
 from fastapi.testclient import TestClient
 
 from controlplane.audit import db as audit_db
+from controlplane.cost.ledger import LEDGER, seed_month
 from controlplane.audit.records import canonical_view
 from controlplane.gateway.app import Gateway, create_app
 from controlplane.gateway.sse_proxy import UpstreamResponse
@@ -309,12 +310,105 @@ def beat_7() -> BeatResult:
 
 
 def beat_7b() -> BeatResult:
-    return BeatResult(
-        "7b", "BLOCK: budget exhaustion (SC-2, UC-3)", SKIPPED,
-        "the cost plane is unbuilt: `controlplane/detectors/cost.py` (cost_budget) and "
-        "`conversation.py` (loop_guard) are 6-7 line STUBs, and neither is in the LIVE "
-        "registry. No cost ledger exists to pre-seed, so `cost.budget_exceeded` cannot fire.",
-    )
+    """BLOCK on budget exhaustion — and the same request passing when the budget is intact.
+
+    **Two arms, because the block alone proves less than it looks like.** UC-3 is the
+    escalation-heavy policy, so a beat that only showed a blocked request could not tell
+    "the budget ceiling is enforced" apart from "this pipeline refuses everything". The
+    control arm fires the identical request with the ledger at its real spend and requires a
+    non-block, which is what makes the first arm attributable to the ceiling.
+
+    The seeded value is the ceiling **exactly** (`monthly_usd: 200`), which is the boundary
+    `cost_budget` compares with `>=` — a ceiling that admits one more request is not a
+    ceiling. Landing on it rather than above it is therefore the stronger arm.
+
+    Zero upstream tokens is asserted as a **delta** across the request, not as
+    `dispatcher.calls == 0`: the startup canary (FR-GW-006) legitimately calls upstream once
+    while the client's lifespan runs, so an absolute count would fail a working block.
+    """
+    conn = audit_db.connect()
+    prior = conn.execute(
+        "SELECT spent_usd FROM cost_ledger WHERE use_case = ? AND month = ?",
+        ("finance_advisor", _month_key()),
+    ).fetchone()
+    try:
+        ceiling = 200.0                      # policies/finance_advisor.yaml budget.monthly_usd
+        prompt = "Should I move my pension into small caps?"
+        reply = "Diversification reduces idiosyncratic risk."
+
+        seed_month(conn, "finance_advisor", ceiling)
+        blocked_client, blocked_disp = _client(reply)
+        with blocked_client:
+            before = blocked_disp.calls
+            _rid, blocked, _status = _fire(blocked_client, use_case="finance_advisor",
+                                           prompt=prompt)
+            dispatch_delta = blocked_disp.calls - before
+
+        # Control arm: same request, ledger back to its own measured spend.
+        _restore(conn, prior)
+        pass_client, pass_disp = _client(reply)
+        with pass_client:
+            _rid2, unblocked, _status2 = _fire(pass_client, use_case="finance_advisor",
+                                               prompt=prompt)
+
+        cost_signals = [s for s in (blocked.get("signals") or [])
+                        if "cost.budget_exceeded" in (s.get("labels") or [])]
+        control_labels = [l for s in (unblocked.get("signals") or [])
+                          for l in (s.get("labels") or [])]
+
+        checks = {
+            "verdict is block": blocked.get("verdict") == "block",
+            "cost.budget_exceeded fired": bool(cost_signals),
+            "zero upstream tokens (no dispatch)": dispatch_delta == 0,
+            "label is request-level (span is null)": bool(cost_signals)
+            and all(s.get("span") is None for s in cost_signals),
+            "control arm does not block": unblocked.get("verdict") != "block",
+            "control arm raises no cost signal": not any(
+                l.startswith("cost.") for l in control_labels
+            ),
+        }
+        failed = [name for name, ok in checks.items() if not ok]
+        evidence = cost_signals[0].get("evidence") if cost_signals else "no cost signal"
+        return BeatResult(
+            "7b", "BLOCK: budget exhaustion (SC-2, UC-3)", PASS if not failed else FAIL,
+            f"spend seeded to the ${ceiling:.0f} ceiling -> {blocked.get('verdict')}, "
+            f"upstream dispatches during the request: {dispatch_delta}; "
+            f"same request under the real ledger -> {unblocked.get('verdict')}",
+            [f"failed: {name}" for name in failed] or [
+                f"blocked: {evidence}",
+                f"control: verdict={unblocked.get('verdict')}, "
+                f"labels={control_labels or 'none'}",
+            ],
+        )
+    finally:
+        # The ledger is the real audit DB, and beat 8 plus any later run read it. A seed left
+        # behind would make the NEXT UC-3 request block for a reason that is no longer true —
+        # the contamination is real and was observed before this cleanup existed.
+        _restore(conn, prior)
+        conn.close()
+
+
+def _month_key() -> str:
+    """The `cost_ledger.month` key for now, read from the ledger so the two cannot drift."""
+    from controlplane.cost import ledger as _ledger
+
+    return _ledger._iso(_ledger._now())[:7]
+
+
+def _restore(conn: Any, prior: Any) -> None:
+    """Put `cost_ledger` back exactly as found — including *absent*, which is not zero.
+
+    A row of `0.0` is an affirmative "spent nothing this month"; no row at all is "nothing
+    has been carried". `seed_month(..., 0.0)` cannot express the second, so a DELETE is the
+    only honest undo for a use case that had no row to begin with.
+    """
+    if prior is None:
+        with conn:
+            conn.execute("DELETE FROM cost_ledger WHERE use_case = ? AND month = ?",
+                         ("finance_advisor", _month_key()))
+        LEDGER.invalidate()
+    else:
+        seed_month(conn, "finance_advisor", float(prior["spent_usd"]))
 
 
 def beat_8() -> BeatResult:

@@ -681,6 +681,50 @@ class Signal(BaseModel):
 # --------------------------------------------------------------------------
 
 
+class CostView(BaseModel):
+    """Cost-plane scalars for `cost_budget` / `loop_guard`, projected by the gateway.
+
+    **Numbers and one boolean. No text, no ids, no hashes** — a cost detector needs the
+    *quantities* a ceiling is compared against and nothing else, so this model cannot carry
+    content into `evidence` even by accident (NFR-SEC-001).
+
+    It is plain data for the reason `DetectorContext` already gives: a ledger is keyed by
+    use case, and a detector that could see its use case is one conditional away from being
+    the policy engine (AGENTS.md §9.1). So the gateway performs the keyed ledger read and
+    hands over the result; the detector does arithmetic. The trade-off is recorded in
+    `detectors/cost.py` — the detector's measured latency is the arithmetic only, not the
+    lookup 04 §2's row text implies.
+
+    A `None` limit means *no policy figure reached us*, which is distinct from a limit of
+    zero. Both cost detectors treat a null limit as "nothing has been shown to be breached"
+    and stay silent, rather than inferring a breach from absent evidence.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    #: `budget.monthly_usd` for this request's use case.
+    ceiling_usd: Annotated[float, Field(ge=0.0)] | None = None
+    #: Spend counted against that ceiling: carried `cost_ledger` baseline + measured rows.
+    spend_usd: Annotated[float, Field(ge=0.0)] = 0.0
+    #: How many rows in the window carried a non-null `est_cost_usd`. A dev-class provider
+    #: writes NULL (ADR-018/022), so a low count beside a low spend means "unknown", not
+    #: "cheap" — the detector reports it so an auditor can tell those apart.
+    priced_requests: Annotated[int, Field(ge=0)] = 0
+
+    #: `budget.per_request_max_tokens`.
+    per_request_max_tokens: Annotated[int, Field(ge=0)] | None = None
+    #: Estimated tokens for this request. An ESTIMATE, and named one: see
+    #: `pipeline.estimate_tokens` for the divisor and why it is not a tokenizer count.
+    est_request_tokens: Annotated[int, Field(ge=0)] = 0
+
+    #: `budget.loop_max_requests_per_min`.
+    loop_max_requests_per_min: Annotated[int, Field(ge=0)] | None = None
+    #: Requests seen for this conversation in the trailing `ledger.LOOP_WINDOW_S`.
+    requests_in_window: Annotated[int, Field(ge=0)] = 0
+    #: Whether this turn is near-identical to the previous one, normalized.
+    repeated_turn: bool = False
+
+
 class DetectorContext(BaseModel):
     """What a detector receives. 04 §2 writes `async detect(ctx) -> list[Signal]` and
     never says what `ctx` holds, so this is the minimal shape the *documented* detector
@@ -693,6 +737,9 @@ class DetectorContext(BaseModel):
     * `conversation_id` — `loop_guard` and `conv_tracker` are per-conversation (04 §2).
     * `blocklist_extra` / `detector_params` — the two policy fields 04 §2/§3 hand to a
       detector.
+    * `cost` — the cost-plane scalars (`CostView`) `cost_budget` and `loop_guard` read.
+      Projected by the gateway for the same reason the two fields above are: plain data,
+      never a `Policy` and never a ledger handle.
 
     **Policy values arrive as plain data, never as a `Policy` object.** base.py's stated
     asymmetry is that nothing here reads a policy, and it is what keeps FR-POL-002 true:
@@ -709,6 +756,7 @@ class DetectorContext(BaseModel):
     conversation_id: str | None = None
     blocklist_extra: list[str] = Field(default_factory=list)
     detector_params: dict[str, dict[str, ParamValue]] = Field(default_factory=dict)
+    cost: CostView = Field(default_factory=CostView)
 
     def params_for(self, detector: str) -> dict[str, ParamValue]:
         """Per-detector overrides (04 §3 `detector_params`), empty when unset.
