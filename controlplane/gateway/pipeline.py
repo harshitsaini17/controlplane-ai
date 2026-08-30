@@ -330,14 +330,19 @@ async def run_lane(
             continue
 
         started = time.perf_counter()
+        outcome = "ok"
+        attributable: list[float] = []
         try:
             # `ceiling_ms`, never `BUDGETS_MS[name]`: a parametric entry is an object, and
             # indexing the mapping here handed it straight to `wait_for` — which surfaced as
             # `DetectorError: raised TypeError` on the first multi-window detector to go live,
             # a budget breach wearing a detector fault's clothes. Flat entries are unaffected by
             # `units`, so one call site serves both kinds (ADR-034 Part C).
-            produced = await run_with_budget(detector, ctx, ceiling_ms(name, units))
+            produced = await run_with_budget(
+                detector, ctx, ceiling_ms(name, units), attributable_out=attributable
+            )
         except DetectorFailure as exc:
+            outcome = "fault"
             failures.append(
                 DetectorFailureRecord(
                     detector=name,
@@ -352,7 +357,19 @@ async def run_lane(
             elapsed = (time.perf_counter() - started) * 1000.0
             # Recorded even when the detector faulted: a timeout consumed real wall-clock,
             # and hiding it would make the budget it breached invisible in the histogram.
-            registry.observe("cp_detector_latency_ms", elapsed, detector=name)
+            # ADR-036 Amendment 1 (A2): now LABELLED by outcome rather than merged, so a fault
+            # and a budget breach can never read as the same event counted twice. That collapse
+            # was live — `tier2_toxicity` published a P99 over budget *and* 2 faults, where the
+            # top 1% of n=283 is ~3 samples and nothing in the series could separate them.
+            registry.observe("cp_detector_latency_ms", elapsed, detector=name, outcome=outcome)
+            # The NFR-P-002 instrument (ADR-036 Amendment 1). Present whenever a worker
+            # measured in-thread time — INCLUDING a call that breached, because
+            # `run_with_budget` records before it raises. Were it otherwise, the only samples
+            # able to fail the gate would be the ones the gate never sees, and NFR-P-002 would
+            # be structurally unfailable. Absent for a hang and a crash, where no in-thread
+            # figure exists and a zero would be a measurement nobody made.
+            for value in attributable:
+                registry.observe("cp_detector_attributable_ms", value, detector=name)
             key = SPAN_OF.get((stage, name))
             if key is not None:
                 latency[key] = latency.get(key, 0.0) + elapsed

@@ -260,7 +260,8 @@ cp.policy.evaluate  cp.action.apply  cp.audit.write
 Metrics (name → labels):
 ```
 cp_requests_total{use_case,verdict}       cp_gateway_overhead_ms{use_case}   (histogram)
-cp_detector_latency_ms{detector}          cp_detector_failures_total{detector,fail_mode}
+cp_detector_latency_ms{detector,outcome}  cp_detector_failures_total{detector,fail_mode}
+cp_detector_attributable_ms{detector}     # ADR-036 Amendment 1: the NFR-P-002 instrument
 cp_pii_intercepts_total{category,use_case}
 cp_est_cost_usd_total{use_case,model}     cp_cascade_escalations_total{use_case}
 cp_review_items_total{use_case,status}    cp_deep_audit_entropy{use_case}    (gauge)
@@ -271,6 +272,15 @@ cp_enrichment_skipped_total{use_case,reason}                    # 04 §2.2 cap
 cp_detector_unavailable_total{detector}                         # ADR-033 state (c)
 cp_detector_timeout_abandoned_total{detector}                    # ADR-034 Part A
 ```
+**ADR-036 Amendment 1 — two detector-timing series, and which one carries the verdict.** ADR-036 ruled that an NFR-P-002 budget binds detector-**attributable** time, but the benchmark gate kept reading the wall-clock histogram, so a published verdict was rendered against the clock the ruling rejected (`[D3-nfr-p002-gate-reads-the-clock-adr-036-rejected]`). The vocabulary now carries both quantities explicitly, because they answer different questions and neither substitutes for the other:
+
+* **`cp_detector_attributable_ms{detector}`** — in-thread CPU per call, the same figure `run_with_budget` enforces on. **This is the NFR-P-002 series**, and the only one a budget verdict may be rendered against.
+* **`cp_detector_latency_ms{detector,outcome}`** — wall-clock through the event loop, **untargeted**. It is not a budget series and never was a fair one: for a pool detector it includes queue wait and GIL contention with whatever else shared the lane. It stays published because it is the **constituent of the holds** (ADR-036 item 5), which are what a user actually waits for, and withdrawing it would delete a real measurement.
+
+`outcome` is the **A2 partition**: `ok` for a call that returned, `fault` for one that raised. Wall-clock is observed for **both** — a timeout consumed real time and hiding it would make the breach invisible in the histogram — but they are now separable, so a fault and a budget breach can never be the same event counted twice under two names. That collapse was live: `tier2_toxicity` published a P99 over budget *and* 2 faults, where the top 1% of n=283 is ~3 samples, and nothing in the series could say whether those were the same two events.
+
+The label is on wall-clock only. `cp_detector_attributable_ms` has no `outcome`: an in-thread figure exists only when a worker measured one, so its absence is already the distinction, and a hang (whose worker never returned) contributes nothing rather than a zero.
+
 The definition of `cp_gateway_overhead_ms` / `latency_json.total_attributable_overhead_ms` is **normative in 06 §4** — implementations and dashboards must use that formula, not an ad-hoc one.
 
 **ADR-030 renamed that key** (`gateway_overhead_ms` → `total_attributable_overhead_ms`; same formula, no longer the targeted figure) and added two series: `input_hold_ms` and `sentence_holds_ms` (a **list**, one entry per sentence — the only non-scalar in this vocabulary, because NFR-P-001 now takes percentiles over holds rather than over requests). This vocabulary is **enforced at the audit write path** by `check_latency_keys`, so these are the contract here. `input_hold_ms` and `sentence_holds_ms` **are emitted** on both delivery paths (ADR-030's targeted series; the list carries one entry per released unit, and one for the buffered response on a non-streaming pipeline per M-11). The **rename is emitted** as of 2026-08-28: the write path, `spans.py`'s enforced vocabulary and the single 06 §4 formula implementation all carry `total_attributable_overhead_ms`, and the function computing it was renamed with the key — a helper still called `gateway_overhead_ms` while writing the new key is the drift **M-20** was filed for. `added_time_to_last_byte_ms` is **not a key of this column at all**, and that is a decision rather than a pending item: **ADR-030 Amendment 1** re-sited it to **06 §4** as a benchmark-client quantity. Its definition begins "client-observed", and the gateway has no client vantage on either delivery path — a completed ASGI `send()` means *handed to the transport*, not received, the buffered write precedes the response by M-13's deliberate ordering, and the table is insert-only, so there is no later phase in which a post-delivery figure could arrive. Emitting a handoff delta under a name that promises a client stopwatch would have published a number whose label overstates it (AGENTS.md §7). It remains **published**, in the latency report, where the process holding the stopwatch is the one that measures it. **M-20's remainder closes with that re-siting**, not with an emission. The metric name `cp_gateway_overhead_ms` is **unchanged**: renaming a metric would orphan history for a figure whose definition did not change.

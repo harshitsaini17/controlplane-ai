@@ -64,8 +64,14 @@ REGISTRY: dict[str, MetricSpec] = {
                    "one per request, by verdict (FR-OBS-001 verdict mix)"),
         MetricSpec("cp_gateway_overhead_ms", "histogram", ("use_case",),
                    "hot-path overhead; 06 §4 formula is normative (NFR-P-001)"),
-        MetricSpec("cp_detector_latency_ms", "histogram", ("detector",),
-                   "per-detector latency vs the NFR-P-002 budgets"),
+        # ADR-036 Amendment 1: TWO series, and only one of them carries a budget verdict.
+        # Wall-clock is untargeted (it is the holds' constituent) and partitioned by `outcome`
+        # so a fault and a breach can never be one event counted twice; `attributable` is the
+        # NFR-P-002 instrument, the same in-thread figure `run_with_budget` enforces on.
+        MetricSpec("cp_detector_latency_ms", "histogram", ("detector", "outcome"),
+                   "per-detector WALL-CLOCK, untargeted; `outcome` is ok|fault (A2)"),
+        MetricSpec("cp_detector_attributable_ms", "histogram", ("detector",),
+                   "per-detector in-thread CPU — the NFR-P-002 series (ADR-036 Am. 1)"),
         MetricSpec("cp_detector_failures_total", "counter", ("detector", "fail_mode"),
                    "detector faults by resolution mode (04 §5, ADR-027)"),
         MetricSpec("cp_pii_intercepts_total", "counter", ("category", "use_case"),

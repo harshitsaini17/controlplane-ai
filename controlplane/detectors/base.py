@@ -795,6 +795,8 @@ async def run_with_budget(
     detector: Detector,
     ctx: Any,
     budget_ms: float | None = None,
+    *,
+    attributable_out: list[float] | None = None,
 ) -> list[Signal]:
     """Run one detector under its NFR-P-002 budget.
 
@@ -802,6 +804,19 @@ async def run_with_budget(
     caller has exactly one failure vocabulary to map onto policy `fail_mode` (04 §5).
     This function never consults a policy and never decides an action — it cannot tell
     fail_open from fail_closed, and that separation is the point.
+
+    `attributable_out`, when given, receives the single in-thread figure this call was
+    JUDGED on — the ADR-036 Amendment 1 quantity, and the only one an NFR-P-002 verdict may
+    be rendered against. An explicit out-list rather than a metrics call, because the
+    detector layer holds no telemetry dependency on the hot path (§2 of this module) and,
+    decisively, because the benchmark reads a *specific* registry instance: observing into
+    `REGISTRY_DEFAULT` from here would leave `bench_latency` with an empty series and no way
+    to tell that from a detector that never ran. Appended, never assigned, so a caller
+    reusing one list across a lane accumulates rather than silently overwrites.
+
+    A hang contributes NOTHING to it, deliberately: its worker never returned, so no
+    in-thread figure exists, and an absent observation is the honest record where a zero
+    would be a measurement nobody made.
 
     `latency_ms` is stamped here, on the measured wall-clock of the call, for any
     signal that left it at 0.0. Detectors are free to report their own finer-grained
@@ -874,6 +889,8 @@ async def run_with_budget(
     # attributable time — so the fallback needs no `POOL_USERS` branch here, and a detector
     # moving between pools cannot change which clock judges it.
     attributable_ms = sum(sink) if sink else elapsed_ms
+    if attributable_out is not None:
+        attributable_out.append(attributable_ms)
     if attributable_ms > budget_ms:
         raise DetectorTimeout(
             name,

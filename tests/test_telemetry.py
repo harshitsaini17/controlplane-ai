@@ -231,7 +231,7 @@ def test_truncation_is_disclosed_not_silent(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr("controlplane.telemetry.metrics.MAX_OBSERVATIONS", 2)
     r = MetricsRegistry()
     for value in (1.0, 2.0, 3.0, 4.0):
-        r.observe("cp_detector_latency_ms", value, detector="tier1_pii")
+        r.observe("cp_detector_latency_ms", value, detector="tier1_pii", outcome="ok")
     series = r.snapshot()["cp_detector_latency_ms"]["series"][0]
     assert series["truncated"] is True
     assert series["count"] == 4, "the true count is still reported"

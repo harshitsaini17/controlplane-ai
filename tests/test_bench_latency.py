@@ -627,7 +627,15 @@ def test_check_exits_nonzero_on_a_violation(tmp_path, monkeypatch):
         # a slow *sum* can no longer trip anything — a tripwire test built on it would pass by
         # asserting nothing. Overshooting `tier1_pii`'s 2 ms budget exercises the same
         # exit-code path against a requirement that is still live.
-        batch.metrics.observe("cp_detector_latency_ms", 5_000.0, detector="tier1_pii")
+        #
+        # ★ **RE-POINTED for ADR-036 Amendment 1**, and the re-point is the point. This
+        # previously seeded `cp_detector_latency_ms` (wall-clock). The gate now reads
+        # `cp_detector_attributable_ms`, so the old fixture would have kept the label error's
+        # place and then passed by asserting nothing — the identical failure mode the comment
+        # above already warns about, one requirement over. Seeding the series the gate does not
+        # read is now its own negative control, in
+        # `test_a_wall_clock_breach_alone_renders_no_budget_verdict`.
+        batch.metrics.observe("cp_detector_attributable_ms", 5_000.0, detector="tier1_pii")
         return batch
 
     monkeypatch.setattr(bl, "run_batch", slow)
@@ -651,7 +659,8 @@ def test_without_check_a_violation_still_exits_zero(tmp_path, monkeypatch):
 
     def slow(mix, *, cadence_ms=bl.DEFAULT_CADENCE_MS):
         batch = real(mix, cadence_ms=cadence_ms)
-        batch.metrics.observe("cp_detector_latency_ms", 5_000.0, detector="tier1_pii")
+        # The gated series (ADR-036 Amendment 1) — see the sibling test's note on the re-point.
+        batch.metrics.observe("cp_detector_attributable_ms", 5_000.0, detector="tier1_pii")
         return batch
 
     monkeypatch.setattr(bl, "run_batch", slow)
@@ -663,6 +672,46 @@ def test_without_check_a_violation_still_exits_zero(tmp_path, monkeypatch):
     # at the interpolated value rather than at the number handed in.
     assert "| NFR-P-002 | tier1_pii | P99 | 2.0 ms |" in body
     assert "never a relaxed threshold" in body
+
+
+def test_a_wall_clock_breach_alone_renders_no_budget_verdict(tmp_path, monkeypatch):
+    """★ The regression that produced `[D3-nfr-p002-gate-reads-the-clock-adr-036-rejected]`.
+
+    ADR-036 ruled that NFR-P-002 binds attributable time; the gate kept reading wall-clock, and
+    two VIOLATION rows shipped on the rejected clock. So the contract has two halves and this
+    test pins both:
+
+    1. a wall-clock overshoot with NO attributable overshoot renders **no** verdict — gating on
+       wall-clock would charge a detector for pool queue wait and GIL contention with whatever
+       else shared its lane, and call the result its budget;
+    2. the overshoot is still **PUBLISHED**, untargeted, because it is the holds' constituent
+       (ADR-036 item 5) and suppressing a real measurement is the other failure mode.
+
+    Half 2 is what makes this a test of the ruling rather than of the gate: an implementation
+    that simply stopped recording wall-clock would satisfy half 1 and be wrong.
+    """
+    real = bl.run_batch
+
+    def slow(mix, *, cadence_ms=bl.DEFAULT_CADENCE_MS):
+        batch = real(mix, cadence_ms=cadence_ms)
+        batch.metrics.observe(
+            "cp_detector_latency_ms", 5_000.0, detector="tier1_pii", outcome="ok"
+        )
+        return batch
+
+    monkeypatch.setattr(bl, "run_batch", slow)
+    out = tmp_path / "latency.md"
+    assert bl.main(["--requests", "6", "--out", str(out), "--check"]) == 0, (
+        "a wall-clock overshoot tripped the NFR-P-002 gate — the gate is reading the series "
+        "ADR-036 rejected, which is the open deviation this amendment closes"
+    )
+    body = out.read_text()
+    assert "| NFR-P-002 | tier1_pii | P99 | 2.0 ms |" not in body
+    assert "5000.000" in body, (
+        "the wall-clock overshoot must stay published (untargeted) — dropping it would "
+        "delete a real measurement to make an instrument change look clean"
+    )
+    assert "UNTARGETED" in body
 
 
 def test_the_command_stamp_reproduces_the_actual_invocation(tmp_path):

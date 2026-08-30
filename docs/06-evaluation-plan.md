@@ -293,6 +293,16 @@ Four consequences, stated so they are not rediscovered later:
   exist while its own contents are being generated. This is the same convention §1 uses for the
   frozen dataset hash, for the same reason. A report generated from a dirty tree stamps
   `+ uncommitted changes` and is **not** citable evidence; regenerate from a clean tree first.
+  **Files under `reports/` that are untracked solely because the measuring run itself wrote
+  them do not dirty the tree for citation purposes** (M-55): a measurement run writes sibling
+  artifacts as it goes, so read without this exemption the rule condemns every artifact this
+  repo emits, and a rule that condemns everything grades nothing. The exemption is narrow and
+  audited: **untracked** paths under `reports/` only — a modified *tracked* report still
+  disqualifies, since the same section already requires a report to be committed in the change
+  that cites it — and the stamp **lists what it excused** (`clean except run-generated: …`)
+  rather than silently absorbing it, so a reader who sees an unexpected path there knows the
+  stamp is excusing dirt the run did not create. Any other untracked or modified file still
+  disqualifies the artifact.
 
 - **Measurement runs execute on a quiet host, and an artifact whose recorded load contradicts
   that is not citable.** Every measurement harness stamps `os.getloadavg()` and the CPU count at

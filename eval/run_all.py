@@ -56,7 +56,7 @@ from eval.policy_matrix import (
     reconcile,
     render_matrix,
 )
-from eval.host_load import git_stamp
+from eval.host_load import code_commit_cell, git_stamp
 from eval.suggest_thresholds import CALIBRATION_FRACTION, RESHUFFLE_SEEDS, calibrate
 from eval.validate_dataset import (
     DATASET_DIR,
@@ -534,8 +534,6 @@ def _provenance(cases: Sequence[dict[str, Any]], dataset_dir: Path) -> list[str]
     # One definition in `eval/host_load.py`; this copy lacked `cwd`, so it read whichever
     # directory the process started in rather than the repo.
     code = git_stamp()
-    head = code["commit"] or "unavailable"
-    dirty = code["dirty"]
     return [
         "## Provenance",
         "",
@@ -547,7 +545,7 @@ def _provenance(cases: Sequence[dict[str, Any]], dataset_dir: Path) -> list[str]
         f"| Dataset digest | `{digest}` |",
         f"| Frozen at | `{FROZEN_COMMIT[:12]}` — {'MATCHES' if digest == dataset_digest(DATASET_DIR) and not check_freeze(dataset_dir) else 'MISMATCH'} |",
         f"| Cases loaded | {len(cases)} (derived from the files, never asserted) |",
-        f"| Code commit | `{head[:12]}`{' + uncommitted changes' if dirty else ''} |",
+        f"| Code commit | {code_commit_cell(code)} |",
         f"| Python | {platform.python_version()} |",
         f"| Platform | {platform.system()} {platform.release()} · {platform.machine()} |",
         f"| Command | `python -m eval.run_all` |",

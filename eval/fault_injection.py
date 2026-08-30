@@ -82,7 +82,7 @@ from controlplane.gateway.sse_proxy import UpstreamResponse
 from controlplane.policy.engine import DETECTOR_FAIL_CLASS
 from controlplane.policy.store import PolicyStore
 from controlplane.telemetry.metrics import MetricsRegistry
-from eval.host_load import git_stamp
+from eval.host_load import code_commit_cell, git_stamp
 from eval.validate_dataset import (
     DATASET_DIR,
     FROZEN_COMMIT,
@@ -494,8 +494,6 @@ def _provenance(dataset_dir: Path, provenance_note: str) -> list[str]:
     digest = dataset_digest(dataset_dir)
     # One definition in `eval/host_load.py` (AGENTS.md §7).
     code = git_stamp()
-    head = code["commit"] or "unavailable"
-    dirty = code["dirty"]
     return [
         "## Provenance",
         "",
@@ -507,7 +505,7 @@ def _provenance(dataset_dir: Path, provenance_note: str) -> list[str]:
         f"{'MATCHES' if not check_freeze(dataset_dir) else 'MISMATCH'} |",
         f"| Probe case | `{PROBE_CASE}` (frozen; prompt **and** stub response) |",
         f"| Injected fault | `{FAULT.__name__}` (06 §5 \"raise timeout\") |",
-        f"| Code commit | `{head[:12]}`{' + uncommitted changes' if dirty else ''} |",
+        f"| Code commit | {code_commit_cell(code)} |",
         f"| Python | {platform.python_version()} |",
         f"| Platform | {platform.system()} {platform.release()} · {platform.machine()} |",
         f"| Command | `python -m eval.fault_injection` |",

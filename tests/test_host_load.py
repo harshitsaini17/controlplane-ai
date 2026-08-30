@@ -19,9 +19,12 @@ sys.path.insert(0, str(REPO))
 
 from eval.host_load import (  # noqa: E402
     QUIET_LOAD1_MAX,
+    classify_porcelain,
+    code_commit_cell,
     is_quiet,
     load_stamp,
     quiet_verdict,
+    reproducibility_verdict,
 )
 
 
@@ -91,3 +94,95 @@ def test_correction1_unknown_load_is_not_reported_as_a_dirty_host() -> None:
     assert "not recorded" in unknown
     assert "NOT QUIET" not in unknown
     assert "NOT QUIET" in busy
+
+
+# --- The amended citability rule (06 §8 / M-55) ------------------------------------------------
+#
+# These pin a *definition*, not a behaviour: what counts as a tree dirty enough to disqualify an
+# artifact. It was widened by adjudication, and the reason it is pinned this densely is that the
+# agent whose artifacts the rule grades is the one that implemented it — so each boundary the
+# ruling drew gets a test that fails if the boundary moves outward.
+
+
+def test_m55_an_untracked_report_the_run_itself_wrote_does_not_dirty_the_tree() -> None:
+    """The whole point of the amendment: a run writes reports, so it cannot condemn itself.
+
+    Before this, `dirty` was `bool(porcelain)` and any measurement run was dirty by construction
+    from the moment it wrote its first artifact.
+    """
+    dirty, excused = classify_porcelain("?? reports/latency_report.md")
+    assert dirty is False
+    assert excused == ["reports/latency_report.md"]
+
+
+def test_m55_a_modified_tracked_report_still_disqualifies() -> None:
+    """The exemption is for *untracked* run output, not for edits to committed evidence.
+
+    06 §8 already requires a report to be committed in the change that cites it, so a tracked
+    report showing as modified is a stale edit or a hand-edit — the two things the section most
+    wants to catch. Widening the allowlist to cover it would excuse exactly those.
+    """
+    dirty, excused = classify_porcelain(" M reports/latency_report.md")
+    assert dirty is True
+    assert excused == []
+
+
+def test_m55_an_untracked_file_outside_reports_still_disqualifies() -> None:
+    """`reports/` is the whole allowlist. A stray file elsewhere is unreviewed code or docs."""
+    dirty, excused = classify_porcelain("?? DESIGN-notes.md")
+    assert dirty is True
+    assert excused == []
+
+
+def test_m55_mixed_dirt_is_disqualifying_even_though_some_of_it_is_excused() -> None:
+    """One disqualifying entry condemns the artifact regardless of how much run output sits
+    beside it — the excused list is not a majority vote."""
+    dirty, excused = classify_porcelain(
+        "?? reports/fault_injection_report.md\n M controlplane/detectors/base.py"
+    )
+    assert dirty is True
+    assert excused == ["reports/fault_injection_report.md"]
+
+
+def test_m55_a_path_containing_spaces_is_not_split_into_two_paths() -> None:
+    """Porcelain v1 is `XY<space>PATH`; splitting on whitespace truncates such a path to its
+    first word, which would then miss the `reports/` prefix or invent a phantom entry."""
+    dirty, excused = classify_porcelain("?? reports/latency report.md")
+    assert dirty is False
+    assert excused == ["reports/latency report.md"]
+
+
+def test_m55_the_stamp_lists_what_it_excused_rather_than_absorbing_it() -> None:
+    """06 §8 requires the listing. An exemption a reader cannot see is a blanket exemption: the
+    listing is what lets them notice the stamp excusing dirt the run did not create."""
+    cell = code_commit_cell(
+        {"commit": "abcdef123456789", "dirty": False,
+         "run_generated": ["reports/latency_report.md"]}
+    )
+    assert "clean except run-generated" in cell
+    assert "reports/latency_report.md" in cell
+
+
+def test_m55_a_genuinely_clean_tree_claims_no_exemption() -> None:
+    """The listing must not appear when nothing was excused, or it stops being a signal."""
+    cell = code_commit_cell({"commit": "abcdef123456789", "dirty": False, "run_generated": []})
+    assert "run-generated" not in cell
+    assert "uncommitted" not in cell
+
+
+def test_m57_an_unrecorded_tree_state_is_not_reported_as_a_clean_tree() -> None:
+    """Third value, same reasoning as `is_quiet`: absent is not the same as good.
+
+    When git is unavailable `git_stamp` can still return a commit from elsewhere but knows
+    nothing about the tree. Rendering that as `clean` would report unverified dirt as
+    verified-absent — the one conflation this module exists to refuse.
+    """
+    unknown = reproducibility_verdict(
+        {"commit": "abcdef123456789", "dirty": None, "run_generated": None}
+    )
+    assert "not recorded" in unknown
+    assert "NOT CITABLE" in unknown
+    assert "clean" not in unknown
+    assert "not recorded" in code_commit_cell(
+        {"commit": "abcdef123456789", "dirty": None, "run_generated": None}
+    )

@@ -2114,3 +2114,85 @@ that deviated. The tripwire that guarded the substitution is inverted to guard t
 `controlplane/policy/engine.py` + `controlplane/gateway/pipeline.py` (`attributable_ms` threaded),
 `04` §5 and `05` §3/§4 (seven-key shape, `DetectorHang`), `03` (ADR-034 sentence struck in place;
 this ADR), `08` (deviation closed; M-50), and five test files re-pointed rather than relaxed.
+
+
+### Amendment 1 — 2026-08-30: the NFR-P-002 gate reads the **attributable** series, and the wall-clock series is partitioned by outcome (resolves `[D3-nfr-p002-gate-reads-the-clock-adr-036-rejected]`)
+
+ADR-036 ruled that an NFR-P-002 budget binds detector-**attributable** time and that wall-clock
+keeps only a hang backstop. The benchmark did not follow it. `bench_latency` went on rendering its
+per-detector budget verdict from `cp_detector_latency_ms` — the wall-clock series — so the two
+`VIOLATION` rows it published (`tier2_injection` P99 25.569 ms, `tier2_toxicity` P99 25.114 ms,
+both against a 25.0 ms budget) were **rendered on the clock this ADR rejected**. The gate was
+enforcing the quantity the ADR had just finished explaining does not bind.
+
+That is a measurement-integrity defect in an already-published number, which is why it stopped
+work rather than being resolved in passing.
+
+**1. The verdict is rendered against the attributable series.** `cp_detector_attributable_ms` is
+now emitted per detector call and is the *only* series `check_nfr_p002` reads. This is not a
+relabelling: it is the quantity `run_with_budget` actually enforces, measured with
+`time.thread_time()` inside the worker, so the figure the report grades and the figure the code
+gates are now the same number. A wall-clock P99 above budget renders **no** verdict — pinned by
+`test_a_wall_clock_breach_alone_renders_no_budget_verdict`, which asserts both halves: exit 0, and
+the 5000 ms overshoot still present in the report under `UNTARGETED`.
+
+The plumbing carries one departure worth recording. `run_with_budget` takes a keyword-only
+`attributable_out` list rather than calling the metrics registry itself, because the detector layer
+holds no telemetry dependency and the benchmark reads a *specific* registry instance rather than a
+global. The list is appended to, never assigned, so a detector that hangs contributes nothing —
+which is correct, since a hang produces no in-thread figure to attribute.
+
+**A breaching sample must reach the gated series.** The append happens *before* the budget raise.
+Without that ordering the gate would be structurally unfailable: a call that overran its budget
+would raise, never record, and NFR-P-002 could then only ever be met — the failure mode where a
+green gate means "nothing was measured" and reads identically to "nothing breached".
+
+**2. (A2) The wall-clock series is partitioned by outcome.** `cp_detector_latency_ms` gained an
+`outcome` label, `ok|fault`. The bench previously pooled faulted and successful attempts into one
+distribution, so a *fault* — an injected failure, or a budget overrun, which reaches the audit
+record as a detector failure and is indistinguishable from one — inflated the same percentile the
+budget verdict was read from. **A fault and a breach could be the same event counted twice.**
+Reports now select rather than merge (`detector_stats(batch, outcome=…)`): percentiles of a union
+are not recoverable from two P99s, so a row set is chosen, and the faulted wall-clock rows are
+published in their own table rather than folded away.
+
+`cp_detector_attributable_ms` deliberately carries **no** `outcome` label. An in-thread figure
+exists only where a worker measured one, so the partition would be vacuous — and worse than
+vacuous, it would invite the reading that an absent row means "no breach". Absence in that series
+means *nothing was measured* (a hang), while a breaching call **is** present. The two report
+sections say which, in the same wording `eval/host_load.py` uses for a load stamp that was never
+taken versus one taken and failed.
+
+**3. Anti-laundering — nothing is deleted.** A correction that removes the numbers it corrects is
+indistinguishable from a correction that improves them, and this repo has now twice found the
+defect class *a figure described by a derivation it does not come from*. So:
+
+- The **wall-clock series stays published**, untargeted, per ADR-036 item 5. It is the constituent
+  of the ADR-030 hold figures and remains the only thing that can catch a queue-wait or GIL
+  pathology; it simply carries no budget verdict.
+- The **two superseded `VIOLATION` rows are preserved verbatim**, blockquoted under
+  `### Superseded verdict — preserved, not deleted`, with the note that they were *rendered on the
+  rejected clock; superseded by the attributable verdict below*. A reader who cites the earlier
+  figure finds it, next to what replaced it and why.
+- **Whatever the attributable series shows is the verdict published** — including a genuine
+  `tier2_toxicity` breach under contention. This amendment changes *which clock is read*, and
+  changes it because ADR-036 already said so; it does not change what an honest result looks like.
+  AGENTS.md §7 is untouched: if the attributable P99 breaches, the honest measured number plus a
+  fresh D3 is the correct output.
+
+Both existing bench tripwires were **re-pointed** onto the attributable series rather than left in
+place. Left on wall-clock they would still have passed, while asserting a property nothing gates —
+a green test whose subject the ADR had removed.
+
+**4. What this unblocks.** The re-run is a single stamped, quiet-host measurement, and three things
+read from it: the OVLP-01 re-point (which cites the attributable bench verdict), the ADR-030
+Amendment-3 hold-row recompute, and `fault_injection`'s re-run — expected 39/39 now that a budget
+overrun is no longer counted where a fault is counted, and published as whatever it is. The
+deviation closes citing this amendment.
+
+**Docs touched:** `05` §5 (both series, the A2 partition, why attributable has no `outcome`
+label), `controlplane/telemetry/metrics.py` (REGISTRY), `controlplane/detectors/base.py`
+(`attributable_out`, and the ordering argument above), `controlplane/gateway/pipeline.py` (lane
+loop records both series), `eval/bench_latency.py` (`detector_attributable_stats`, the gate, four
+report sections), `08` (deviation closed; M-53/M-54 disposition), and three test files — two
+tripwires re-pointed, one negative control added, one mechanical label fix.

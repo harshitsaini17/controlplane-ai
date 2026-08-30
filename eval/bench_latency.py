@@ -65,7 +65,7 @@ from controlplane.gateway.sentence_buffer import Segmentation
 from controlplane.gateway.sse_proxy import UpstreamResponse
 from controlplane.policy.store import PolicyStore
 from controlplane.telemetry.metrics import MetricsRegistry, percentile
-from eval.host_load import git_stamp, load_stamp, quiet_verdict
+from eval.host_load import code_commit_cell, git_stamp, load_stamp, quiet_verdict
 from eval.validate_dataset import (
     DATASET_DIR,
     FROZEN_COMMIT,
@@ -520,20 +520,63 @@ def nfr_p001_measurable(batch: Batch) -> bool:
     return any(s.hold_series for s in batch.samples)
 
 
-def detector_stats(batch: Batch) -> dict[str, Stats]:
-    """Per-detector latency percentiles, read from the registry the gateway reported into."""
+def _stats_of_row(row: dict[str, Any]) -> Stats:
+    return Stats(
+        n=int(row["count"]),
+        p50=float(row["p50"]), p95=float(row["p95"]), p99=float(row["p99"]),
+        minimum=float(row["min"]), maximum=float(row["max"]),
+    )
+
+
+def detector_stats(batch: Batch, *, outcome: str = "ok") -> dict[str, Stats]:
+    """Per-detector **WALL-CLOCK** percentiles for one `outcome` — never a budget verdict.
+
+    ADR-036 Amendment 1 partitions this series by `outcome` (A2), which means a detector now
+    has up to TWO rows here. `outcome` selects one rather than combining them, because
+    combining is not available: the snapshot carries precomputed percentiles, and the P99 of a
+    union is not recoverable from two P99s. Selecting is honest; averaging them would publish a
+    figure no sample supports.
+
+    Defaults to `"ok"` so the published wall-clock table describes calls that *returned* —
+    a fault's wall-clock is real and stays published under `outcome="fault"`, but mixing an
+    abandoned timeout into the same percentile as completed work is what made the old series
+    unreadable.
+
+    **Not the NFR-P-002 series.** Use `detector_attributable_stats` for that; this one is the
+    holds' constituent and is published untargeted (ADR-036 item 5).
+    """
     snapshot = batch.metrics.snapshot()
     series = snapshot.get("cp_detector_latency_ms", {}).get("series", [])
     out: dict[str, Stats] = {}
     for row in series:
-        detector = row["labels"]["detector"]
-        if row.get("count"):
-            out[detector] = Stats(
-                n=int(row["count"]),
-                p50=float(row["p50"]), p95=float(row["p95"]), p99=float(row["p99"]),
-                minimum=float(row["min"]), maximum=float(row["max"]),
-            )
+        labels = row["labels"]
+        if labels.get("outcome") != outcome or not row.get("count"):
+            continue
+        out[labels["detector"]] = _stats_of_row(row)
     return out
+
+
+def detector_attributable_stats(batch: Batch) -> dict[str, Stats]:
+    """Per-detector **in-thread CPU** percentiles — the NFR-P-002 series (ADR-036 Am. 1).
+
+    The instrument `run_with_budget` enforces on, and therefore the only series a budget
+    verdict may be rendered against. It exists because the gate previously read wall-clock,
+    which ADR-036 had already rejected: `tier2_injection` published a P99 of 25.569 ms against
+    a 25 ms budget with **zero faults**, which is arithmetically impossible if the gated series
+    were the enforced one — and was the proof it was not
+    (`[D3-nfr-p002-gate-reads-the-clock-adr-036-rejected]`).
+
+    Unlabelled by outcome on purpose: an in-thread figure exists only where a worker measured
+    one. A breaching call IS present (the figure is recorded before the raise), a hang is
+    absent. So absence here means "nothing measured", not "nothing breached".
+    """
+    snapshot = batch.metrics.snapshot()
+    series = snapshot.get("cp_detector_attributable_ms", {}).get("series", [])
+    return {
+        row["labels"]["detector"]: _stats_of_row(row)
+        for row in series
+        if row.get("count")
+    }
 
 
 def detector_faults(batch: Batch) -> dict[str, dict[str, float]]:
@@ -562,10 +605,17 @@ def check_nfr_p002(stats: dict[str, Stats]) -> list[Violation]:
     percentile NFR-P-001 states explicitly, since a budget is a tail guarantee — a detector
     inside budget at the median and over it at P99 is one that breaches under load.
 
-    Note the budgets are *also* enforced at runtime: `run_with_budget` cancels past the budget
-    and raises `DetectorTimeout`. So a P99 at the budget usually means timeouts fired rather
-    than that a call ran long, which is why the report prints the fault count beside these
-    rows — the two readings need different responses.
+    **Feed it `detector_attributable_stats`, never `detector_stats`** (ADR-036 Amendment 1).
+    The budget binds in-thread CPU; wall-clock includes pool queue wait and GIL contention with
+    whatever else shared the lane, so gating on it renders a verdict about lane scheduling and
+    calls it a detector's budget. That mismatch shipped two published VIOLATION rows before it
+    was caught, which is why this docstring names the series rather than leaving it to the
+    caller.
+
+    A P99 at the budget can still coincide with faults, since a breach raises `DetectorTimeout`
+    — but the two are now separable in the wall-clock series' `outcome` label (A2), so the
+    report can say whether a breach and a fault are the same event instead of leaving a reader
+    to guess from counts.
     """
     violations: list[Violation] = []
     for detector, stat in sorted(stats.items()):
@@ -766,6 +816,8 @@ def render(
             "were evaluated against"
         )
     dstats = detector_stats(batch)
+    wall_fault = detector_stats(batch, outcome="fault")
+    astats = detector_attributable_stats(batch)
     stream_stats = Stats.of(batch.overheads(streaming=True))
     projection = project_tier2(cases if cases is not None else load_corpus(dataset_dir))
     # Read once, used by both the NFR-verdict caveat and the projection header, so the two
@@ -775,8 +827,6 @@ def render(
     # (differing `cwd`/`timeout`), and the spike artifact recorded no commit at all
     # (AGENTS.md §7).
     code = git_stamp()
-    head = code["commit"] or "unavailable"
-    dirty = code["dirty"]
 
     lines: list[str] = [
         "# Gateway latency benchmark (06 §4)",
@@ -801,7 +851,7 @@ def render(
         + " |",
         f"| Samples recorded | {len(batch.samples)} |",
         f"| Stub cadence | {cadence_ms} ms/token |",
-        f"| Code commit | `{head[:12]}`{' + uncommitted changes' if dirty else ''} |",
+        f"| Code commit | {code_commit_cell(code)} |",
         f"| Python | {platform.python_version()} |",
         f"| Platform | {platform.system()} {platform.release()} · {platform.machine()} |",
         f"| CPU | {platform.processor() or 'unreported'} |",
@@ -899,32 +949,101 @@ def render(
         "|---|---|---|---|---|---|---|",
         _row("`added_time_to_last_byte_ms` (upper bound)", ref),
         "",
-        "## Per-detector latency vs NFR-P-002 budgets",
+        "## Per-detector budget verdict — NFR-P-002, on the ATTRIBUTABLE series",
         "",
-        "Budgets are also enforced at runtime: `run_with_budget` cancels past budget and raises "
-        "`DetectorTimeout`. A P99 sitting at the budget therefore usually means timeouts fired, "
-        "not that a call ran long — the two need different responses, so the fault count is "
-        "shown beside the percentiles.",
+        "**ADR-036 Amendment 1.** The budget binds detector-**attributable** time — in-thread "
+        "CPU, the same figure `run_with_budget` enforces on. This table is the NFR-P-002 "
+        "verdict and the only place one is rendered. Wall-clock follows below, untargeted.",
+        "",
+        "A breaching call IS in this series: the figure is recorded before the raise. Were it "
+        "otherwise the only samples able to fail the gate would be ones the gate never sees.",
         "",
         "| Detector | Budget | n | P50 | P95 | P99 | max | Faults | Within budget (P99) |",
         "|---|---|---|---|---|---|---|---|---|",
     ]
     faults = detector_faults(batch)
-    for detector, stat in sorted(dstats.items()):
-        budget = budget_ms(detector) if detector in BUDGETS_MS else None
-        verdict = "—" if budget is None else ("yes" if stat.p99 < budget else "**NO**")
+
+    def _fault_cell(detector: str) -> str:
         modes = faults.get(detector, {})
-        fault_cell = (
+        return (
             "0" if not modes
             else f"{int(sum(modes.values()))} ("
                  + ", ".join(f"{m} ×{int(v)}" for m, v in sorted(modes.items())) + ")"
         )
+
+    for detector, stat in sorted(astats.items()):
+        budget = budget_ms(detector) if detector in BUDGETS_MS else None
+        verdict = "—" if budget is None else ("yes" if stat.p99 < budget else "**NO**")
         lines.append(
             f"| `{detector}` | {f'{budget:.0f} ms' if budget else '—'} | {stat.n} "
             f"| {stat.p50:.3f} | {stat.p95:.3f} | {stat.p99:.3f} | {stat.maximum:.3f} "
-            f"| {fault_cell} | {verdict} |"
+            f"| {_fault_cell(detector)} | {verdict} |"
         )
-    absent = sorted(set(BUDGETS_MS) - set(dstats))
+
+    # Ran, but produced no in-thread figure. A distinct state from "never ran": a hang's worker
+    # never returns, so nothing measured it, and an untested budget must not read as a met one.
+    ran_no_attributable = sorted((set(dstats) | set(wall_fault)) - set(astats))
+    if ran_no_attributable:
+        lines += [
+            "",
+            "**Ran, but no in-thread figure:** "
+            + ", ".join(f"`{d}`" for d in ran_no_attributable)
+            + ". A hang's worker never returns, so no attributable time exists to judge — the "
+            "budget is **untested**, not met. Their wall-clock appears below.",
+        ]
+
+    lines += [
+        "",
+        "### Superseded verdict — preserved, not deleted",
+        "",
+        "> The run of **2026-08-30** published these two rows as NFR-P-002 violations, rendered "
+        "on **wall-clock** — the clock ADR-036 had already rejected "
+        "(`[D3-nfr-p002-gate-reads-the-clock-adr-036-rejected]`):",
+        ">",
+        "> | Requirement | Detector | Stat | Budget | Measured (wall-clock) |",
+        "> |---|---|---|---|---|",
+        "> | NFR-P-002 | `tier2_injection` | P99 | 25.0 ms | **25.569 ms**, 0 faults |",
+        "> | NFR-P-002 | `tier2_toxicity` | P99 | 25.0 ms | **25.114 ms**, 2 faults |",
+        ">",
+        "> **Superseded by the attributable verdict above.** Kept because both figures are real "
+        "measurements and deleting a published breach to replace it with a friendlier "
+        "instrument is exactly what an instrument change must not be allowed to do "
+        "(AGENTS.md §7). These are a HISTORICAL RECORD of a prior artifact, not this run's "
+        "data — no figure in them is recomputed here.",
+        "",
+        "## Per-detector wall-clock — UNTARGETED (the holds' constituent)",
+        "",
+        "**Not a budget series, and never was a fair one** (ADR-036 item 5): for a pool "
+        "detector this includes queue wait and GIL contention with whatever shared its lane. "
+        "It stays published because it is what the holds are made of, and what a user waits "
+        "for. Percentiles are over calls that **returned**; faulted calls are a separate row "
+        "set below rather than mixed in — the A2 partition, so a fault and a breach can never "
+        "read as one event counted twice.",
+        "",
+        "| Detector | n | P50 | P95 | P99 | max |",
+        "|---|---|---|---|---|---|",
+    ]
+    for detector, stat in sorted(dstats.items()):
+        lines.append(
+            f"| `{detector}` | {stat.n} | {stat.p50:.3f} | {stat.p95:.3f} "
+            f"| {stat.p99:.3f} | {stat.maximum:.3f} |"
+        )
+    if wall_fault:
+        lines += [
+            "",
+            "**Wall-clock of faulted calls** (`outcome=fault`) — published, separately. A "
+            "timeout consumed real time; hiding it would make the breach invisible.",
+            "",
+            "| Detector | n | P50 | P99 | max |",
+            "|---|---|---|---|---|",
+        ]
+        for detector, stat in sorted(wall_fault.items()):
+            lines.append(
+                f"| `{detector}` | {stat.n} | {stat.p50:.3f} | {stat.p99:.3f} "
+                f"| {stat.maximum:.3f} |"
+            )
+
+    absent = sorted(set(BUDGETS_MS) - (set(dstats) | set(wall_fault) | set(astats)))
     if absent:
         # Partitioned by the REASON a detector has no row, because the two are different
         # claims and the earlier single sentence ("unimplemented or policy-gated") went
@@ -1275,7 +1394,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"  {e}", file=sys.stderr)
         return 1
 
-    violations = [*check_nfr_p001(batch), *check_nfr_p002(detector_stats(batch))]
+    # The ATTRIBUTABLE series (ADR-036 Amendment 1) — the gate's whole subject was the
+    # open D3. Passing `detector_stats` here is the defect, not a stylistic choice.
+    violations = [*check_nfr_p001(batch), *check_nfr_p002(detector_attributable_stats(batch))]
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(render(
         batch, dataset_dir=args.dataset_dir, provenance_note=provenance_note,
