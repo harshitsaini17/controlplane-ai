@@ -6,12 +6,12 @@ FR-POL-006: a detector timeout or crash is resolved by the **policy's** `fail_mo
 
 | Field | Value |
 |---|---|
-| Generated (UTC) | 2026-08-29T23:16:09+00:00 |
+| Generated (UTC) | 2026-08-30T06:26:05+00:00 |
 | Dataset digest | `6a3ecbbe75fd020bf806bf647d572c85ee187198fb9828eaac5e1c6e00737fbd` |
 | Frozen at | `f162959f7d29` — MATCHES |
 | Probe case | `CLN-001` (frozen; prompt **and** stub response) |
 | Injected fault | `DetectorTimeout` (06 §5 "raise timeout") |
-| Code commit | `c838964ca3d9` + uncommitted changes |
+| Code commit | `af86fe6e1c74` |
 | Python | 3.14.6 |
 | Platform | Linux 7.1.2-arch3-1 · x86_64 |
 | Command | `python -m eval.fault_injection` |
@@ -64,21 +64,21 @@ Without these, "UC-3 escalates under fault" is unfalsifiable — a policy that e
 
 | Pipeline | Verdict | HTTP | Failures recorded |
 |---|---|---|---|
-| UC-1 `support_bot` | pass | 200 | ['rag_grounding'] |
-| UC-2 `hr_copilot` | pass | 200 | ['rag_grounding'] |
+| UC-1 `support_bot` | pass | 200 | none |
+| UC-2 `hr_copilot` | pass | 200 | none |
 | UC-3 `finance_advisor` | pass | 200 | none |
 
 ## Assertions
 
-36/39 passed.
+39/39 passed.
 
 | Result | Assertion | Evidence |
 |---|---|---|
-| **FAIL** | support_bot: control (no fault) passes | `verdict='pass' failures=['rag_grounding']` |
+| PASS | support_bot: control (no fault) passes | `verdict='pass' failures=[]` |
 | PASS | support_bot/tier1: verdict is escalate | `verdict='escalate' (HTTP 200)` |
-| PASS | support_bot/tier1: fault present in detector_failures_json | `failures=['tier1_pii', 'rag_grounding'] modes=['fail_closed', 'fail_open']` |
-| **FAIL** | support_bot/tier1: fail_mode_applied is fail_closed | `modes_applied=['fail_closed', 'fail_open']` |
-| PASS | support_bot/tier1: fault stamped in failure_record_ids | `failure_record_ids=['a7301183-a6ef-4eec-9dca-90b8287ea323']` |
+| PASS | support_bot/tier1: fault present in detector_failures_json | `failures=['tier1_pii'] modes=['fail_closed']` |
+| PASS | support_bot/tier1: fail_mode_applied is fail_closed | `modes_applied=['fail_closed']` |
+| PASS | support_bot/tier1: fault stamped in failure_record_ids | `failure_record_ids=['37cf4e4d-475f-41b9-9cd8-172bf3ccc3f5']` |
 | PASS | support_bot/tier2: verdict is pass | `verdict='pass' (HTTP 200)` |
 | PASS | support_bot/tier2: fault present in detector_failures_json | `failures=['tier2_toxicity'] modes=['fail_open']` |
 | PASS | support_bot/tier2: fail_mode_applied is fail_open | `modes_applied=['fail_open']` |
@@ -87,11 +87,11 @@ Without these, "UC-3 escalates under fault" is unfalsifiable — a policy that e
 | PASS | support_bot/performance: fault present in detector_failures_json | `failures=['rag_grounding'] modes=['fail_open']` |
 | PASS | support_bot/performance: fail_mode_applied is fail_open | `modes_applied=['fail_open']` |
 | PASS | support_bot/performance: fault did NOT contribute to the verdict | `failure_record_ids=[] (expected empty)` |
-| **FAIL** | hr_copilot: control (no fault) passes | `verdict='pass' failures=['rag_grounding']` |
+| PASS | hr_copilot: control (no fault) passes | `verdict='pass' failures=[]` |
 | PASS | hr_copilot/tier1: verdict is escalate | `verdict='escalate' (HTTP 200)` |
 | PASS | hr_copilot/tier1: fault present in detector_failures_json | `failures=['tier1_pii'] modes=['fail_closed']` |
 | PASS | hr_copilot/tier1: fail_mode_applied is fail_closed | `modes_applied=['fail_closed']` |
-| PASS | hr_copilot/tier1: fault stamped in failure_record_ids | `failure_record_ids=['21ae2e7f-855f-48b5-86c5-c74dccd1f95a']` |
+| PASS | hr_copilot/tier1: fault stamped in failure_record_ids | `failure_record_ids=['9a755a49-b187-498b-860c-78460c306aaa']` |
 | PASS | hr_copilot/tier2: verdict is pass | `verdict='pass' (HTTP 200)` |
 | PASS | hr_copilot/tier2: fault present in detector_failures_json | `failures=['tier2_toxicity'] modes=['fail_open']` |
 | PASS | hr_copilot/tier2: fail_mode_applied is fail_open | `modes_applied=['fail_open']` |
@@ -104,15 +104,15 @@ Without these, "UC-3 escalates under fault" is unfalsifiable — a policy that e
 | PASS | finance_advisor/tier1: verdict is escalate | `verdict='escalate' (HTTP 202)` |
 | PASS | finance_advisor/tier1: fault present in detector_failures_json | `failures=['tier1_pii'] modes=['fail_closed']` |
 | PASS | finance_advisor/tier1: fail_mode_applied is fail_closed | `modes_applied=['fail_closed']` |
-| PASS | finance_advisor/tier1: fault stamped in failure_record_ids | `failure_record_ids=['397d185a-f397-47ae-a3fd-3bd604281e3a']` |
+| PASS | finance_advisor/tier1: fault stamped in failure_record_ids | `failure_record_ids=['768733f8-8648-4caf-b834-38e5be3d5703']` |
 | PASS | finance_advisor/tier2: verdict is escalate | `verdict='escalate' (HTTP 202)` |
 | PASS | finance_advisor/tier2: fault present in detector_failures_json | `failures=['tier2_toxicity'] modes=['fail_closed']` |
 | PASS | finance_advisor/tier2: fail_mode_applied is fail_closed | `modes_applied=['fail_closed']` |
-| PASS | finance_advisor/tier2: fault stamped in failure_record_ids | `failure_record_ids=['4af23553-2929-4d34-abcb-969fcfc2b644']` |
+| PASS | finance_advisor/tier2: fault stamped in failure_record_ids | `failure_record_ids=['43eab4a3-e429-4b4d-8bc7-0637bbc98151']` |
 | PASS | finance_advisor/performance: verdict is escalate | `verdict='escalate' (HTTP 202)` |
 | PASS | finance_advisor/performance: fault present in detector_failures_json | `failures=['rag_grounding'] modes=['fail_closed']` |
 | PASS | finance_advisor/performance: fail_mode_applied is fail_closed | `modes_applied=['fail_closed']` |
-| PASS | finance_advisor/performance: fault stamped in failure_record_ids | `failure_record_ids=['fa90f639-4b87-4808-af40-2d7083267872']` |
+| PASS | finance_advisor/performance: fault stamped in failure_record_ids | `failure_record_ids=['f23899dc-10e5-40e5-b3df-a2a0591629cc']` |
 
 ## Scope and limitations
 
