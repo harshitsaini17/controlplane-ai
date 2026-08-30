@@ -24,6 +24,8 @@ from controlplane.gateway import pipeline
 from controlplane.gateway.app import Gateway, create_app
 from demo.run_script import FixtureDispatcher
 
+from tests.ml_stack import requires_ml
+
 ROOT = Path(__file__).resolve().parents[1]
 DATASET = ROOT / "eval" / "dataset"
 
@@ -91,6 +93,7 @@ def fire(tmp_path, *, use_case: str, text: str, stream: bool | None = None,
 # ---------------------------------------------------------------------------
 
 
+@requires_ml
 @pytest.mark.parametrize("use_case", ["support_bot", "hr_copilot", "finance_advisor"])
 def test_no_raw_pii_value_reaches_either_endpoint(tmp_path, use_case) -> None:
     """★ A known synthetic PII value must appear ZERO times in both endpoints' JSON.
@@ -121,6 +124,7 @@ def test_no_raw_pii_value_reaches_either_endpoint(tmp_path, use_case) -> None:
         assert row["text"][:40] not in blob, f"{name}: prompt text leaked"
 
 
+@requires_ml
 def test_the_trace_does_not_select_quarantined_text(tmp_path) -> None:
     """The review block is metadata only; released text has its own audited endpoint."""
     row = case("pii.jsonl", LEAK_CASE)
@@ -209,6 +213,7 @@ def test_an_unavailable_detector_is_never_reported_as_a_fault() -> None:
 # ---------------------------------------------------------------------------
 
 
+@requires_ml
 def test_a_dispatched_request_does_not_report_dispatch_as_skipped(tmp_path) -> None:
     """★ Regression: the dispatch node read `cp.upstream`, which is never written.
 
@@ -225,6 +230,7 @@ def test_a_dispatched_request_does_not_report_dispatch_as_skipped(tmp_path) -> N
     assert "upstream_ms" in dispatch["spans_present"]
 
 
+@requires_ml
 def test_a_pre_dispatch_block_does_report_dispatch_as_skipped_with_a_reason(tmp_path) -> None:
     """The other half: grey is a *fact* about this request, and it names itself."""
     _, _, _, _, trace = fire(
@@ -269,6 +275,7 @@ def test_a_per_invocation_measurement_does_produce_a_breach_verdict() -> None:
     assert row["breach"] is True, "a per-invocation figure over budget IS a breach"
 
 
+@requires_ml
 def test_the_audit_node_does_not_claim_it_was_skipped(tmp_path) -> None:
     """A record cannot time its own write, and must not report that as a missing stage."""
     _, _, _, _, trace = fire(
@@ -285,6 +292,7 @@ def test_the_audit_node_does_not_claim_it_was_skipped(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@requires_ml
 def test_the_signature_moment_is_derived_not_asserted(tmp_path) -> None:
     """★ One label map, three verdicts — the product thesis, shown as arithmetic.
 
@@ -307,6 +315,7 @@ def test_the_signature_moment_is_derived_not_asserted(tmp_path) -> None:
     assert len(set(seen.values())) == 3, f"the signature moment collapsed: {seen}"
 
 
+@requires_ml
 def test_the_cross_pipeline_note_is_labelled_a_projection(tmp_path) -> None:
     """Rule G: derived-from-config is offered as such, never as a simulated verdict."""
     _, _, _, _, trace = fire(
@@ -320,6 +329,7 @@ def test_the_cross_pipeline_note_is_labelled_a_projection(tmp_path) -> None:
     assert "not a re-run" in caveat and "thresholds" in caveat
 
 
+@requires_ml
 def test_a_clean_request_offers_no_cross_pipeline_projection(tmp_path) -> None:
     """No labels raised means nothing to project, so the key is absent rather than empty.
 
@@ -334,6 +344,7 @@ def test_a_clean_request_offers_no_cross_pipeline_projection(tmp_path) -> None:
     assert "cross_pipeline_projection" not in trace["policy_context"]
 
 
+@requires_ml
 def test_an_unknown_request_id_is_404_not_500(tmp_path) -> None:
     gateway = Gateway(dispatcher=FixtureDispatcher("hi"), db_path=str(tmp_path / "a.db"))
     with TestClient(create_app(gateway), raise_server_exceptions=False) as client:
@@ -342,6 +353,7 @@ def test_an_unknown_request_id_is_404_not_500(tmp_path) -> None:
     assert response.json()["error"]["code"] == "ERR-ADM-404"
 
 
+@requires_ml
 def test_a_dev_class_row_says_why_its_cost_is_null(tmp_path) -> None:
     """ADR-018 travels with the row: null cost is a provenance rule, not a missing number."""
     _, _, _, _, trace = fire(
@@ -353,6 +365,7 @@ def test_a_dev_class_row_says_why_its_cost_is_null(tmp_path) -> None:
     assert "ADR-018" in identity["cost_note"]
 
 
+@requires_ml
 def test_a_detector_fault_appears_in_the_trace_with_its_fail_mode(tmp_path, monkeypatch) -> None:
     """04 §5: the fault is visible in the forensic view, with the mode policy applied."""
     class Broken:

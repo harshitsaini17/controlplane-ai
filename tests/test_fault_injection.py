@@ -20,6 +20,8 @@ from controlplane.policy.store import PolicyStore
 from eval import fault_injection as fi
 from eval.validate_dataset import USE_CASES
 
+from tests.ml_stack import requires_ml
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -40,6 +42,7 @@ def text():
 # ---------------------------------------------------------------------------
 
 
+@requires_ml
 def test_tier2_carries_sc3_on_the_class_the_docs_name() -> None:
     """★ SC-3 runs on `tier2`, the class 06 §5 and 07 beat 7 both name. Substitution retired.
 
@@ -112,6 +115,7 @@ def test_class_carriers_are_derived_from_the_live_registry() -> None:
         assert DETECTOR_FAIL_CLASS[detector] == fail_class
 
 
+@requires_ml
 def test_a_new_live_detector_changes_coverage_without_a_source_edit(monkeypatch) -> None:
     """Proves derivation rather than asserting it: a detector appears, coverage follows.
 
@@ -344,6 +348,7 @@ def test_the_report_carries_no_response_text(tmp_path) -> None:
     assert fi.probe_text() not in out.read_text()
 
 
+@requires_ml
 def test_the_report_states_the_class_substitution(tmp_path) -> None:
     """The scope note must record that the `performance` substitution is retired, not silent.
 

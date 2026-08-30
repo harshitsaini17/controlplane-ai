@@ -36,7 +36,7 @@ import threading
 import time
 import uuid
 import warnings
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -430,6 +430,37 @@ def enforce_detector_availability(state: Gateway) -> None:
         warnings.warn(line, DetectorUnavailableWarning, stacklevel=2)
 
 
+async def _warm_one(
+    name: str, warm: Callable[[], Awaitable[float]], state: Gateway, log_fmt: str
+) -> None:
+    """Warm one non-ONNX detector, and make `warm_detector_models`'s no-raise promise true.
+
+    The manifest check comes first and is the documented mechanism (ADR-033 has already decided
+    whether an absence refuses the boot or warns), so on a correctly-probed host the `except` is
+    never reached. It is here because the manifest is only as complete as the scope it was probed
+    with, and a caller that narrows `_probe_scope` — as the availability tests legitimately do —
+    leaves a *real* host absence unrecorded. `warm()` then raised `ModuleNotFoundError` straight
+    out of the lifespan and the gateway failed to start, which is the opposite of the fail-open
+    behaviour the affected policies asked for.
+
+    Catching `ImportError` and not `Exception` is the point of the narrow clause: an absent
+    dependency is state (c) and boots without this detector, while a dependency that is *present
+    and broken* is a genuine fault that must not be silently swallowed at boot.
+    """
+    if name in state.detectors_unloadable:
+        return
+    try:
+        _LOG.info(log_fmt, await warm())
+    except ImportError as exc:
+        # Not `detectors_unloadable[name] = ...`: that dict is the boot manifest, and a probe
+        # that missed this is a defect to surface rather than to backfill silently.
+        _LOG.warning(
+            "%s could not be warmed: %s is absent (ADR-033 state (c)); "
+            "the boot manifest did not record it — continuing without it",
+            name, exc.name or "a dependency",
+        )
+
+
 async def warm_detector_models(state: Gateway) -> None:
     """Build every served ONNX graph at boot and log the cost (ADR-035 item 4).
 
@@ -463,18 +494,16 @@ async def warm_detector_models(state: Gateway) -> None:
     # warns or refuses. Its 10 ms budget is unreachable cold: `import spacy` plus
     # `spacy.load` measured ~1.8 s, and the first NER call a further 11.76 ms even warm,
     # which is why `warm()` also runs one throwaway inference.
-    if entity_enricher.NAME not in state.detectors_unloadable:
-        enrich_ms = await entity_enricher.warm()
-        _LOG.info("entity_enricher NER pipeline warmed in %.0f ms", enrich_ms)
+    await _warm_one(entity_enricher.NAME, entity_enricher.warm, state,
+                    "entity_enricher NER pipeline warmed in %.0f ms")
 
     # `rag_grounding` warms here for the same reason and by the same guard: it is a
     # sentence-transformers bi-encoder, not an ONNX-served graph, so `warm_models` — which
     # intersects with `SERVED` — reaches it not at all. Under ADR-036 the cold load is
     # *attributable in-thread CPU*, which makes an unwarmed first sentence a 30 ms budget
     # breach and a `performance` fail_mode firing rather than merely a slow response.
-    if rag_grounding.NAME not in state.detectors_unloadable:
-        grounding_ms = await rag_grounding.warm()
-        _LOG.info("rag_grounding encoder warmed in %.0f ms", grounding_ms)
+    await _warm_one(rag_grounding.NAME, rag_grounding.warm, state,
+                    "rag_grounding encoder warmed in %.0f ms")
 
 
 #: The static console (dashboard/static/), resolved from this file rather than the CWD —

@@ -52,6 +52,8 @@ from eval.run_all import (
 from eval.suggest_thresholds import Band, Calibration
 from eval.validate_dataset import DATASET_DIR, load_policies
 
+from tests.ml_stack import requires_ml
+
 #: The 06 §3.3 matrices are identical for every test in this module, and computing them runs
 #: three detectors over the corpus. Cached so the suite pays for that once.
 _MATRICES: dict[str, object] = {}
@@ -758,6 +760,7 @@ def test_the_partition_loses_no_detector_and_duplicates_none() -> None:
     assert not {d.name for d in SCORED} & {d.name for d in DEMOTED}
 
 
+@requires_ml
 def test_this_host_scores_everything_it_implements() -> None:
     """Documents the local truth and guards the inert case.
 
@@ -815,6 +818,7 @@ def test_the_demotion_reason_is_built_from_the_probe_not_typed(monkeypatch) -> N
     assert "a_renamed_package" in rows[0].reason
 
 
+@requires_ml
 def test_demoted_labels_are_not_claimed_as_covered() -> None:
     """`IMPLEMENTED_LABELS` gates the end-to-end matrix's covered slice.
 
@@ -824,4 +828,8 @@ def test_demoted_labels_are_not_claimed_as_covered() -> None:
     assert IMPLEMENTED_LABELS == frozenset(
         label for dut in SCORED for label in dut.scope
     )
-    assert not {label for dut in DEMOTED for label in dut.scope} & IMPLEMENTED_LABELS
+    # `DEMOTED` holds `SkippedDetector`, whose label field is `labels` — `scope` belongs to
+    # `DetectorUnderTest`. This read `dut.scope` and raised `AttributeError` on any host with
+    # a missing dependency; on a full-ml host `DEMOTED` is empty, so the loop never ran and
+    # the assertion passed VACUOUSLY. The bug and its invisibility had the same cause.
+    assert not {label for dut in DEMOTED for label in dut.labels} & IMPLEMENTED_LABELS

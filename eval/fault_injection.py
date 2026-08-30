@@ -68,6 +68,7 @@ from fastapi.testclient import TestClient
 
 from controlplane.audit.records import canonical_view
 from controlplane.detectors import rag_grounding as rag_grounding_mod
+from controlplane.detectors.availability import probe_availability
 from controlplane.detectors.base import DetectorTimeout, Stage
 from controlplane.gateway import pipeline
 from controlplane.detectors.onnx_models import warm_models
@@ -123,14 +124,43 @@ FAULT = DetectorTimeout
 FAULT_STAGES: tuple[Stage, ...] = (Stage.OUTPUT_SENTENCE, Stage.OUTPUT_FULL)
 
 
+#: `{detector: missing dependency}` for every detector in a `FAULT_STAGES` lane, from ADR-033's
+#: single declaration. Probed once per process: `find_spec` is deterministic, and `LANES` is
+#: static, so re-probing per call would ask the same question a dozen times per run. Derived
+#: rather than hand-typed for the reason `run_all.UNLOADABLE` is: a module name written beside a
+#: `REQUIREMENTS` entry naming the same module is two declarations free to disagree.
+UNLOADABLE: dict[str, str] = {
+    entry.detector: entry.missing
+    for entry in probe_availability(
+        sorted({d for st in FAULT_STAGES for d in pipeline.LANES[st]})
+    )
+}
+
+
 def faultable() -> frozenset[str]:
-    """Live detectors `_Faulty` can actually raise for: those in a `FAULT_STAGES` lane.
+    """Live detectors `_Faulty` can actually raise for: in a `FAULT_STAGES` lane, AND loadable.
 
     Membership only — ordering is left to `DETECTOR_FAIL_CLASS`, which preserves the 04 §2
     registry order the carrier tie-break depends on.
+
+    **Three terms, and the third one is ADR-033.** Live is not enough, and neither is live-and-
+    in-lane: `run_lane` consults the boot manifest and never calls `detect()` on a detector this
+    host cannot load, so `_Faulty` is never invoked and raises nothing. Selecting such a detector
+    as a carrier produced a probe stamped `injected=<name>` whose `failures` was empty — a control
+    run mislabelled as a faulted one, which is the same misreport the in-lane term prevents,
+    arriving by a third route. On an `.[dev]`-only host that silently picked `tier2_toxicity` and
+    `rag_grounding` as the `tier2` and `performance` carriers and failed 16 of 39 assertions.
+
+    Excluding them is honest degradation rather than a weakened check: `run_suite` skips a class
+    with no carrier (`carrier is None: continue`), and the report renders it `— none live —` /
+    Exercisable **no**, with SC-3 stating it is not demonstrable. The claim shrinks to what the
+    host can actually exercise instead of failing an assertion about a fault that never fired. On
+    a host with the `ml` extra `UNLOADABLE` is empty and this term changes nothing, which is what
+    keeps the committed evidence (06 §8, generated on real hardware) at full strength.
     """
     return frozenset(
-        d for st in FAULT_STAGES for d in pipeline.LANES[st] if d in pipeline.LIVE
+        d for st in FAULT_STAGES for d in pipeline.LANES[st]
+        if d in pipeline.LIVE and d not in UNLOADABLE
     )
 
 

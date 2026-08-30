@@ -12,6 +12,8 @@ import pytest
 
 from demo import run_script as rs
 
+from tests.ml_stack import requires_ml
+
 
 def test_expectations_come_from_the_frozen_dataset_not_from_observation() -> None:
     """The load must carry real per-use-case expectations, or nothing is being checked."""
@@ -32,6 +34,7 @@ def test_a_case_with_no_expectation_for_the_use_case_is_refused() -> None:
         rs.expected_action({"case_id": "X", "action_expected": {}}, "support_bot")
 
 
+@requires_ml
 def test_the_signature_beat_requires_all_three_verdicts(monkeypatch) -> None:
     """Beat 4 is the thesis: two of three is a failure, not a partial success.
 

@@ -129,6 +129,33 @@ jobs:
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
           python -m pip install -e ".[dev,ml]"
 
+      # The NER model is a SEPARATE artifact from the spacy wheel, and ADR-033 declares
+      # `en_core_web_sm` an import name in its own right (`availability.REQUIREMENTS`). A host
+      # with spaCy but no model is therefore still an ml-incomplete host: `MISSING_ML` would be
+      # non-empty, every `requires_ml` test would skip HERE too, and the job below would report
+      # green having proved nothing. This line is what makes this the host those tests run on.
+      - name: Download the NER model (ADR-011)
+        run: python -m spacy download en_core_web_sm
+
+      # The tests `verify` cannot run, run here at full strength. This is the other half of the
+      # marker in tests/ml_stack.py: skipping them on the light host is only defensible because
+      # this step exists. Several assert an EXACT boot manifest, which holds only where the
+      # injected absence is the only absence — so they are strong here and unrunnable there.
+      - name: ML-gated tests (skipped on the light host, must run here)
+        run: |
+          set -o pipefail
+          python -m pytest -m requires_ml -p no:randomly | tee "$RUNNER_TEMP/mlgated.txt"
+          if grep -qiE "[0-9]+ skipped" "$RUNNER_TEMP/mlgated.txt"; then
+            echo "::error::requires_ml tests SKIPPED on a host that installed [dev,ml]."
+            echo "::error::They are skipped on the light verify job BY DESIGN, so a skip here"
+            echo "::error::means they run in NO job at all — see tests/ml_stack.py."
+            exit 1
+          fi
+          if ! grep -qE "[0-9]+ passed" "$RUNNER_TEMP/mlgated.txt"; then
+            echo "::error::no requires_ml test ran — the marker or its selector is broken."
+            exit 1
+          fi
+
       # The guard itself. `-p no:randomly` is not needed; the file is self-contained and its
       # slow build is module-scoped. If this fails with `missing: onnx`, a build dependency
       # left the `ml` extra and the D2 trap is back — fix the extra, not the test.

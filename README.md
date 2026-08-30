@@ -135,7 +135,7 @@ Do not run measurement harnesses beside tests, builds, or another spike. Evidenc
 
 ## How it was built
 
-The repository was built spec-first: contracts preceded code, AI agents worked under the binding [AGENTS.md](AGENTS.md), an independent AI review challenged each checkpoint, and humans adjudicated contract changes. The current ledger records **36** ADRs ruled, 32 deviations all ruled and closed, 64 logged minor resolutions, and ten registered SL IDs—SL-4 is closed, leaving nine active limitations.
+The repository was built spec-first: contracts preceded code, AI agents worked under the binding [AGENTS.md](AGENTS.md), an independent AI review challenged each checkpoint, and humans adjudicated contract changes. The current ledger records **36** ADRs ruled, 32 deviations all ruled and closed, 65 logged minor resolutions, and ten registered SL IDs—SL-4 is closed, leaving nine active limitations.
 
 - Requirements and schemas are the contract; code does not silently redefine them.
 - AI implementation agents must stop or log conflicts under the deviation protocol.
