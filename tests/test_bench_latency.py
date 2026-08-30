@@ -701,12 +701,34 @@ def test_a_wall_clock_breach_alone_renders_no_budget_verdict(tmp_path, monkeypat
 
     monkeypatch.setattr(bl, "run_batch", slow)
     out = tmp_path / "latency.md"
-    assert bl.main(["--requests", "6", "--out", str(out), "--check"]) == 0, (
-        "a wall-clock overshoot tripped the NFR-P-002 gate — the gate is reading the series "
-        "ADR-036 rejected, which is the open deviation this amendment closes"
-    )
+    # Scoped to `tier1_pii`, NOT asserted through `main`'s exit code (M-58). The exit code
+    # aggregates every violation, so a *genuine* breach in an unrelated detector — and
+    # `tier2_injection` has one, 25.348 ms attributable, published 2026-08-30 — would fail this
+    # test while its message blamed the wall-clock gate. A negative control that misattributes
+    # its own failure is worse than no control: it would have sent a reader hunting a regression
+    # in the gate to explain a real measurement elsewhere.
+    rc = bl.main(["--requests", "6", "--out", str(out), "--check"])
     body = out.read_text()
-    assert "| NFR-P-002 | tier1_pii | P99 | 2.0 ms |" not in body
+    # The pin is PER-DETECTOR: no NFR-P-002 verdict may name `tier1_pii`, the detector whose
+    # wall-clock was inflated. This is a *tighter* assertion than the exact-row string it
+    # replaced, since it also catches the row being re-formatted, and unlike `rc` it cannot be
+    # satisfied or broken by any other detector's result.
+    charged = [
+        line for line in body.splitlines()
+        if "NFR-P-002" in line and "tier1_pii" in line
+    ]
+    assert not charged, (
+        "a wall-clock overshoot rendered an NFR-P-002 verdict for `tier1_pii` — the gate is "
+        f"reading the series ADR-036 rejected: {charged}"
+    )
+    # `rc` is deliberately NOT asserted to be 0 (M-58). It aggregates every violation, so a
+    # genuine breach in an unrelated detector — `tier2_injection` has one, 25.348 ms
+    # attributable, published 2026-08-30 — used to fail this test with a message blaming the
+    # wall-clock gate. A control that misattributes its own failure sends a reader hunting a
+    # regression in the gate to explain a real measurement somewhere else. What it MUST still
+    # pin is that the injected overshoot contributes no violation of its own, which the
+    # per-detector check above does directly rather than through a shared exit code.
+    assert rc in (0, 1)
     assert "5000.000" in body, (
         "the wall-clock overshoot must stay published (untargeted) — dropping it would "
         "delete a real measurement to make an instrument change look clean"
