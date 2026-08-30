@@ -89,6 +89,19 @@ The range contains 33 commits. The three report-landings requested by the checkp
   `gateway_overhead_ms`, `upstream_ms`, `input_hold_ms`, `sentence_holds_ms`. It passes.
 - **Disposition:** keep the observation open until production emits the ADR-030 replacement
   and last-byte row; update the test atomically with that implementation/doc transition.
+- **CLOSED 2026-08-30 (Phase 5).** Both conditions met, and the evidence above stays as
+  written because it was true on its date — this is a postscript, not a correction. The
+  rename half landed in `ab06917`: the write path emits `total_attributable_overhead_ms`,
+  and `tests/review/test_checkpoint3_latency_keys.py` **fired** and was re-pointed in that
+  same commit, which is the atomicity this disposition asked for. The last-byte half closed
+  by a route F2 did not anticipate: **ADR-030 Amendment 1** ruled the gateway has no vantage
+  from which 06 §4's client-observed quantity is measurable, so the key was **re-sited to a
+  benchmark-client figure rather than emitted**. The pin fired a second time and was
+  re-pointed again — it now asserts the re-siting holds on both sides and in both
+  directions (the enforced vocabulary must not grow the key back; 06 §4 must keep defining
+  it). The figure is published and measured: `added_time_to_last_byte_ms` P99 **110.57 ms**,
+  n=200, `reports/latency_report.md`. Recorded because "closed by establishing one side was
+  not constructible" is neither of the two outcomes this disposition enumerated.
 
 ## Requested checks
 
@@ -189,6 +202,10 @@ row cites this review's dirty/uncommitted artifact.
 
 See F2. The new test is intentionally current-state-specific: it prevents a silent persisted-key
 rename while 05 still declares the rename deferred.
+
+**Postscript 2026-08-30:** the rename is no longer deferred and 05 §5 no longer says it is.
+The test was current-state-specific by design, so it failed on the transition instead of
+passing through it — twice, once per half. See F2's closure note.
 
 ### 13. Hygiene — BLOCKED by F1
 

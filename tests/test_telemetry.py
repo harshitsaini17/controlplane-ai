@@ -73,14 +73,14 @@ def test_span_list_has_no_duplicates_and_is_doc_ordered() -> None:
 def test_latency_keys_admit_the_derived_figures_and_the_adr_030_series() -> None:
     """05 §3 lists the non-span `latency_json` keys beside the per-detector spans.
 
-    Four, and each for its own reason: `gateway_overhead_ms` is derived by the 06 §4
+    Four, and each for its own reason: `total_attributable_overhead_ms` is derived by the 06 §4
     formula, `upstream_ms` is the provider wait recorded so it can be subtracted, and
     `input_hold_ms` / `sentence_holds_ms` are the ADR-030 per-hold series NFR-P-001
     targets — composed of measured intervals rather than being spans themselves.
     Anything else is a typo.
     """
     assert spans.LATENCY_EXTRA_KEYS == {
-        "gateway_overhead_ms", "upstream_ms", "input_hold_ms", "sentence_holds_ms",
+        "total_attributable_overhead_ms", "upstream_ms", "input_hold_ms", "sentence_holds_ms",
     }
     assert spans.LATENCY_KEYS == set(spans.ALL) | spans.LATENCY_EXTRA_KEYS
     # The series key must be declared as a series, or `clamp_latency` rounds a list as a
@@ -113,7 +113,7 @@ def test_the_series_key_must_carry_a_list_and_every_other_key_a_number() -> None
 
 
 def test_unknown_latency_key_is_refused_with_an_actionable_message() -> None:
-    spans.check_latency_keys({spans.INGRESS: 1.0, "gateway_overhead_ms": 2.0})
+    spans.check_latency_keys({spans.INGRESS: 1.0, "total_attributable_overhead_ms": 2.0})
     with pytest.raises(ValueError, match="05 §5 span vocabulary"):
         spans.check_latency_keys({"cp.ingres": 1.0})  # transposed letter
     with pytest.raises(TypeError):
@@ -231,7 +231,7 @@ def test_truncation_is_disclosed_not_silent(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr("controlplane.telemetry.metrics.MAX_OBSERVATIONS", 2)
     r = MetricsRegistry()
     for value in (1.0, 2.0, 3.0, 4.0):
-        r.observe("cp_detector_latency_ms", value, detector="tier1_pii")
+        r.observe("cp_detector_latency_ms", value, detector="tier1_pii", outcome="ok")
     series = r.snapshot()["cp_detector_latency_ms"]["series"][0]
     assert series["truncated"] is True
     assert series["count"] == 4, "the true count is still reported"

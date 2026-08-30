@@ -20,6 +20,8 @@ from controlplane.policy.store import PolicyStore
 from eval import fault_injection as fi
 from eval.validate_dataset import USE_CASES
 
+from tests.ml_stack import requires_ml
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -40,35 +42,60 @@ def text():
 # ---------------------------------------------------------------------------
 
 
-def test_tier2_is_not_yet_injectable() -> None:
-    """★ Pins the substitution the report declares: SC-3 runs on `performance`, not `tier2`.
+@requires_ml
+def test_tier2_carries_sc3_on_the_class_the_docs_name() -> None:
+    """★ SC-3 runs on `tier2`, the class 06 §5 and 07 beat 7 both name. Substitution retired.
 
-    06 §5 and 07 beat 7 both name `tier2`. Neither tier2 detector is live, so no tier2 fault
-    can be injected — the report says so, and this is what keeps that statement true rather
-    than merely written down once.
+    **Re-pointed twice, and this is the third and final form.** It first read "no tier2 detector
+    is live" and fired when `tier2_injection` shipped; re-pointed to "no tier2 detector is
+    *faultable*" — true for a narrower reason, since `tier2_injection` runs at `Stage.INPUT` and
+    faults inject only at `FAULT_STAGES`. It fired again when `tier2_toxicity` landed in
+    `OUTPUT_SENTENCE`, exactly as its own instructions said it would, and those instructions are
+    now carried out: 07 beat 7 needed no edit (it always said `--inject-fault tier2` — the harness
+    was the side that deviated), and the report's scope section names `tier2`.
 
-    **This test is meant to fail when a tier2 detector lands.** That failure is the signal to
-    re-point 07 beat 7 and the report's scope section at `tier2`, which is the class the docs
-    actually specify. Do not delete it to get green — deleting it silently makes a
-    documented-as-temporary substitution permanent, and the report would go on citing a test
-    that no longer exists.
+    **The assertion is inverted, which is the point.** For two phases this test guarded against a
+    temporary substitution becoming permanent. That risk is gone; the opposite one replaces it —
+    tier2 silently *losing* its carrier and SC-3 sliding back onto `performance` without anyone
+    noticing. So it now fails if tier2 is not carried, and additionally requires the carrier to be
+    among the faultable tier2 detectors: a carrier that cannot actually be faulted would let the
+    report claim a fault it can never inject, which is the over-reporting failure
+    `test_a_live_tier2_detector_is_not_silently_counted_as_covering_tier2` exists for.
     """
     tier2 = [d for d, c in DETECTOR_FAIL_CLASS.items() if c == "tier2"]
     assert tier2, "the 04 §2 registry must still declare tier2 detectors"
-    live = [d for d in tier2 if d in pipeline.LIVE]
-    assert live == [], (
-        f"tier2 detector(s) {live} are now live — 06 §5's own class can carry SC-3. Re-point "
-        "07 beat 7 and eval/fault_injection.py's scope section at `tier2`, then update this "
-        "test to assert the real thing rather than the substitution."
+    faultable = [d for d in tier2 if d in fi.faultable()]
+    assert faultable, (
+        "no tier2 detector is faultable, so SC-3 has silently fallen back to the `performance` "
+        "substitution this test was re-pointed to retire. 06 §5 and 07 beat 7 both name `tier2`."
     )
+    assert fi.class_carriers().get("tier2") in faultable, (
+        f"tier2 is carried by {fi.class_carriers().get('tier2')!r}, which is not among the "
+        f"faultable tier2 detectors {faultable} — the report would claim a fault it cannot inject"
+    )
+
+
+def test_a_live_tier2_detector_is_not_silently_counted_as_covering_tier2() -> None:
+    """The failure mode the re-point above was found by: covered-on-paper, empty in practice.
+
+    `class_carriers()` selecting on liveness alone put `tier2_injection` under `tier2`, so the
+    report claimed the class was carried while every tier2 assertion failed with `failures=[]`.
+    Over-reporting coverage is the mirror of the hardcoded map's under-reporting, and it is the
+    worse half: under-reporting is visible in the report, over-reporting reads as success.
+    """
+    for fail_class, detector in fi.class_carriers().items():
+        assert detector in fi.faultable(), (
+            f"{detector} is claimed to carry `{fail_class}` but sits in no FAULT_STAGES lane, "
+            "so its fault would never fire"
+        )
 
 
 def test_the_report_only_cites_tests_that_exist() -> None:
     """A scope note naming a nonexistent test is worse than no scope note (AGENTS.md §7)."""
     source = (ROOT / "eval" / "fault_injection.py").read_text()
     mine = (ROOT / "tests" / "test_fault_injection.py").read_text()
-    assert "test_tier2_is_not_yet_injectable" in source
-    assert "def test_tier2_is_not_yet_injectable" in mine
+    assert "test_tier2_carries_sc3_on_the_class_the_docs_name" in source
+    assert "def test_tier2_carries_sc3_on_the_class_the_docs_name" in mine
 
 
 # ---------------------------------------------------------------------------
@@ -88,18 +115,32 @@ def test_class_carriers_are_derived_from_the_live_registry() -> None:
         assert DETECTOR_FAIL_CLASS[detector] == fail_class
 
 
+@requires_ml
 def test_a_new_live_detector_changes_coverage_without_a_source_edit(monkeypatch) -> None:
-    """Proves derivation rather than asserting it: inject a tier2 detector, see it appear."""
-    assert "tier2" not in fi.class_carriers()
+    """Proves derivation rather than asserting it: a detector appears, coverage follows.
+
+    **Re-pointed by ADR-036's sweep.** It used to assert `"tier2" not in class_carriers()` and
+    then monkeypatch a fake in — a precondition that stopped being true the moment
+    `tier2_toxicity` went live, so the test failed for a reason unrelated to what it asserts.
+    The absent-to-present structure is what has the evidentiary value, so it is preserved by
+    *removing* the real carrier first rather than by finding a class that happens to be empty:
+    `cost` is empty but its detectors sit in no `FAULT_STAGES` lane (04 §2), so faking one there
+    would fabricate lane membership the spec denies and prove nothing about derivation.
+    """
+    carrier = fi.class_carriers()["tier2"]
+    monkeypatch.delitem(pipeline.LIVE, carrier)
+    assert "tier2" not in fi.class_carriers(), (
+        "with the only tier2 carrier removed, coverage must report the class as absent"
+    )
 
     class Fake:
-        name = "tier2_toxicity"
+        name = carrier
 
         async def detect(self, ctx):
             return []
 
-    monkeypatch.setitem(pipeline.LIVE, "tier2_toxicity", Fake())
-    assert fi.class_carriers().get("tier2") == "tier2_toxicity"
+    monkeypatch.setitem(pipeline.LIVE, carrier, Fake())
+    assert fi.class_carriers().get("tier2") == carrier
 
 
 def test_every_class_with_no_carrier_is_absent_rather_than_empty() -> None:
@@ -140,9 +181,35 @@ def test_injection_restores_even_when_the_probe_raises(text, monkeypatch) -> Non
 
 
 def test_injecting_into_a_dead_detector_is_refused(text) -> None:
-    """Silently probing without a fault would report a control run as a faulted one."""
+    """Silently probing without a fault would report a control run as a faulted one.
+
+    **The stand-in is derived, not named.** This test used to hardcode `tier2_injection`, which
+    stopped being dead the moment that detector shipped — the test then failed for a reason
+    having nothing to do with what it asserts. Any declared-but-not-live detector proves the
+    same point, so it picks one; a synthetic name covers the case where none is left.
+    """
+    dead = next(
+        (d for d in DETECTOR_FAIL_CLASS if d not in pipeline.LIVE),
+        "no_such_detector_in_the_04_registry",
+    )
     with pytest.raises(SystemExit):
-        fi.run_probe("support_bot", text, inject="tier2_injection")
+        fi.run_probe("support_bot", text, inject=dead)
+
+
+def test_injecting_into_a_live_but_unfaultable_detector_is_refused(text) -> None:
+    """Live is necessary but not sufficient — the second half of `run_probe`'s guard.
+
+    A detector outside every `FAULT_STAGES` lane can be wrapped without error, and the probe
+    would come back stamped `injected=<name>` with an empty `failures` tuple: a control run
+    labelled as a faulted one, the precise misreport the dead-detector guard prevents. Skips
+    rather than passes vacuously when no such detector exists, so it never reports as coverage
+    it did not provide.
+    """
+    unfaultable = [d for d in pipeline.LIVE if d not in fi.faultable()]
+    if not unfaultable:
+        pytest.skip("no live-but-unfaultable detector to exercise the guard with")
+    with pytest.raises(SystemExit, match="live but not faultable"):
+        fi.run_probe("support_bot", text, inject=unfaultable[0])
 
 
 def test_the_input_lane_still_works_under_an_output_fault(text) -> None:
@@ -281,20 +348,24 @@ def test_the_report_carries_no_response_text(tmp_path) -> None:
     assert fi.probe_text() not in out.read_text()
 
 
+@requires_ml
 def test_the_report_states_the_class_substitution(tmp_path) -> None:
-    """The scope note is the honest half of using `performance` where docs say `tier2`.
+    """The scope note must record that the `performance` substitution is retired, not silent.
 
     Asserted structurally rather than by quoting prose: a phrase match would break on any
-    rewording while saying nothing about whether the report is actually honest. What must hold
-    is that `tier2` is named, that it is shown as having no live carrier, and that the tripwire
-    is cited — the three things a reader needs to know the substitution was deliberate.
+    rewording while saying nothing about whether the report is actually honest. What must hold is
+    that `tier2` is named, that its live carrier is named, that the retirement is stated, and
+    that the guard is cited — a reader who saw the old note needs to see the change, since a
+    report that quietly stops mentioning a two-phase caveat is indistinguishable from one whose
+    caveat still applies.
     """
     out = tmp_path / "f.md"
     fi.main(["--out", str(out)])
     body = out.read_text()
     assert "tier2" in body
-    assert "none live" in body, "the coverage table must show tier2 has no carrier"
-    assert "test_tier2_is_not_yet_injectable" in body
+    assert "`tier2_toxicity`" in body, "the coverage table must name the live tier2 carrier"
+    assert "substitution is retired" in body
+    assert "test_tier2_carries_sc3_on_the_class_the_docs_name" in body
 
 
 def test_the_report_shows_configured_modes_for_unexercisable_classes(tmp_path, store) -> None:
@@ -304,3 +375,92 @@ def test_the_report_shows_configured_modes_for_unexercisable_classes(tmp_path, s
     body = out.read_text()
     for fail_class in fi.FAIL_CLASSES:
         assert f"`{fail_class}`" in body
+
+
+# --- M-60 / Branch-B remedy: the reproducibility section ------------------------------------
+#
+# These pin a *claim shape*, not a measurement. The first published version of this section
+# hardcoded "Every repetition ran on a quiet host" and printed it directly beside an end-of-run
+# stamp reading NOT CITABLE — a claim contradicted by a premise on the same page, which is the
+# defect class this repo keeps finding. Every assertion below exists so that one specific
+# sentence cannot come back.
+
+
+def _reps(*specs) -> tuple[fi.RepOutcome, ...]:
+    """(passed, load1, load1_end, *failures) → RepOutcomes, total fixed at 39."""
+    return tuple(
+        fi.RepOutcome(passed=p, total=39, failures=tuple(f), load1=lo, load1_end=hi)
+        for p, lo, hi, *f in specs
+    )
+
+
+def test_m60_the_quiet_host_claim_is_derived_from_the_stamps_not_asserted() -> None:
+    """A rep above the 06 §8 threshold must disqualify itself, whatever the pass count says."""
+    body = "\n".join(fi._reproducibility_section(_reps((39, 0.5, 0.6), (39, 0.9, 1.9))))
+    assert "Not every repetition was measured on a quiet host" in body
+    assert "**NO**" in body, "the loud repetition must be marked in the table"
+    assert "not citable" in body.lower()
+    assert "stayed within the 06 §8 quiet threshold" not in body, (
+        "a run containing a loud repetition must never claim all of them were quiet"
+    )
+
+
+def test_m60_an_all_quiet_run_says_so_and_attributes_the_spread_to_the_system() -> None:
+    body = "\n".join(fi._reproducibility_section(_reps((39, 0.5, 0.6), (39, 0.8, 0.9))))
+    assert "stayed within the 06 §8 quiet threshold" in body
+    assert "**NO**" not in body
+
+
+def test_m60_an_unrecorded_load_is_not_reported_as_quiet() -> None:
+    """Three-valued, like `host_load.is_quiet`: never-measured is not measured-and-passed."""
+    body = "\n".join(fi._reproducibility_section(_reps((39, None, None), (39, 0.8, 0.9))))
+    assert "not recorded" in body
+    assert "stayed within the 06 §8 quiet threshold" not in body
+
+
+def test_m60_a_clean_run_does_not_report_the_mechanism_as_gone() -> None:
+    """The whole point of the row: 5/5 clean in one process is not a fixed invariant."""
+    body = "\n".join(fi._reproducibility_section(_reps((39, 0.5, 0.6), (39, 0.8, 0.9))))
+    assert "not the same as absent" in body
+    assert "Mechanism, not noise" not in body, "no failure occurred; do not narrate one"
+
+
+def test_m60_a_failing_repetition_names_the_mechanism_instead_of_calling_it_flake() -> None:
+    body = "\n".join(fi._reproducibility_section(_reps((39, 0.5, 0.6), (38, 0.8, 0.9, "ctl"))))
+    assert "Mechanism, not noise" in body
+    assert "`ctl` — failed **1/2**" in body
+    assert "not relaxed" in body, "§5.4: the assertion absorbs nothing"
+
+
+def test_m60_the_in_process_warm_pool_limit_is_stated_not_omitted() -> None:
+    """Reps 2..N reuse warmed models, so the rate understates the cold-path flake."""
+    body = "\n".join(fi._reproducibility_section(_reps((39, 0.5, 0.6), (39, 0.8, 0.9))))
+    assert "warmed steady state" in body
+    assert "does **not** retire that mechanism" in body
+
+
+def test_m60_the_superseded_claim_renders_as_a_real_blockquote() -> None:
+    """It rendered as one line with inline `>` characters, which reads as a live claim."""
+    lines = fi._reproducibility_section(_reps((39, 0.5, 0.6), (39, 0.8, 0.9)))
+    i = lines.index("### Superseded single-run claim — preserved, not deleted")
+    quoted = [ln for ln in lines[i:] if ln.strip()][1:]
+    assert quoted, "the superseded claim must still be present"
+    assert all(ln.startswith(">") for ln in quoted), (
+        "every line of the preserved claim must carry its own `>` prefix"
+    )
+
+
+def test_m60_a_single_repetition_publishes_no_rate() -> None:
+    """One run cannot state a rate — that was the original defect, not the fix."""
+    assert fi._reproducibility_section(_reps((39, 0.5, 0.6))) == []
+
+
+def test_m60_the_rate_does_not_soften_the_exit_contract(tmp_path, monkeypatch) -> None:
+    """A failure in ANY repetition must still break the build (widened, not weakened)."""
+    real = fi.check
+
+    def sabotage(probe, expect_mode):
+        return [*real(probe, expect_mode), fi.Assertion("injected failure", False, "n/a")]
+
+    monkeypatch.setattr(fi, "check", sabotage)
+    assert fi.main(["--out", str(tmp_path / "f.md"), "--reps", "2"]) == 1

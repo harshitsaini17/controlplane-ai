@@ -30,20 +30,24 @@ verdict the gateway will subsequently make.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 import time
 import uuid
 import warnings
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
-from controlplane.audit import review
-from controlplane.audit.db import init_db
+from controlplane.audit import forensics, review
+from controlplane.audit.db import init_db, resolve_db_path
+from controlplane.cost.ledger import LEDGER
 from controlplane.audit.records import (
     RECORD_STATUS_COMPLETE,
     RECORD_STATUS_PARTIAL,
@@ -51,10 +55,18 @@ from controlplane.audit.records import (
     serialize_actions,
     write_record,
 )
-from controlplane.detectors.base import Signal, Stage
+from controlplane.detectors.availability import (
+    Unavailable,
+    enforce_at_boot,
+    probe_availability,
+)
+from controlplane.detectors import entity_enricher
+from controlplane.detectors import rag_grounding
+from controlplane.detectors.base import Signal, Stage, registered_names
+from controlplane.detectors.onnx_models import warm_models
 from controlplane.gateway import pipeline
 from controlplane.gateway.canary import CanaryResult, canary_on_startup
-from controlplane.gateway.config import GatewayConfig, load_gateway_config
+from controlplane.gateway.config import GatewayConfig, UpstreamClass, load_gateway_config
 from controlplane.gateway.ingress import (
     HEADER_ACTIONS,
     HEADER_REQUEST_ID,
@@ -89,6 +101,9 @@ STAGE_INPUT, STAGE_STREAMED, STAGE_COMPLETED = "input", "streamed", "completed"
 TIER = "small"
 
 
+_LOG = logging.getLogger(__name__)
+
+
 class CanaryUnavailableWarning(UserWarning):
     """The FR-GW-006 canary could not be evaluated this boot.
 
@@ -96,6 +111,32 @@ class CanaryUnavailableWarning(UserWarning):
     dev-class provider. This one means it never ran, so the boot carries no verdict
     either way — a state the operator must be able to tell from a pass.
     """
+
+
+class DetectorUnavailableWarning(UserWarning):
+    """A registered detector could not be loaded this boot (ADR-033 state (c)).
+
+    Non-fatal by ruling, not by preference: it is emitted only once
+    `policies_requiring_fail_closed` has confirmed every policy that could use the
+    detector resolves it `fail_open`. The fail_closed case raises instead. Loud because
+    the boot succeeded with **less coverage than the policies describe** — a state that
+    looks identical to a healthy one in every place except the audit column.
+    """
+
+
+def _probe_scope() -> tuple[str, ...]:
+    """Which detectors ADR-033's "each registered detector" means here.
+
+    The union of both binding mechanisms, because the gateway has two and they disagree:
+    `pipeline.LIVE` is what the production path actually calls, while `_REGISTRY` exists
+    for the eval harness (`pipeline.LIVE`'s own docstring says so). Probing only the
+    registry would leave the mechanism permanently inert on the served path — it returns
+    `()` in this process — and probing only `LIVE` would miss a detector the harness
+    registered. Neither omission fails loudly, which is why the scope is the union.
+    """
+    return tuple(
+        sorted(set(pipeline.LIVE) | set(registered_names()) | {entity_enricher.NAME})
+    )
 
 
 def _sse(payload: dict[str, Any]) -> str:
@@ -175,6 +216,20 @@ class Gateway:
         # the first audited request. The connection is then discarded: `conn` hands out a
         # per-thread one, and holding this would be the very object that cannot be shared.
         init_db(db_path).close()
+        # The cost plane reads history through the same file. It binds to the PATH, not to
+        # this connection: `CostLedger` opens one connection per calling thread for the
+        # reason `conn` documents below, and handing it a connection built on the startup
+        # thread would make every read from the event-loop thread raise — which `_query`
+        # treats as absence of evidence, so `cost_budget` would go quietly silent instead of
+        # failing loudly. Resolved here rather than passed as `None` so the ledger and the
+        # audit writer are pinned to one file for this gateway's lifetime.
+        #
+        # `LEDGER` is a process global, so the most recently constructed gateway owns it.
+        # That is correct for serving (one gateway per process) and is what keeps one test's
+        # conversation turns from becoming the next test's loop; a process that runs two
+        # gateways concurrently against different databases would need a per-gateway ledger,
+        # which nothing in this build does. PROVISIONAL — batch review at phase end.
+        LEDGER.bind(db_path=db_path or resolve_db_path())
         # An empty key map is valid (header-only use-case resolution), so a `None` from the
         # loader is normalized once here rather than retried per request.
         self.key_map = key_map if key_map is not None else (load_key_map() or {})
@@ -185,6 +240,14 @@ class Gateway:
         # and "never checked" the same value — the M-10 mistake in a different column.
         self.canary: CanaryResult | None = None
         self.canary_error: str | None = None
+        # ADR-033 state (c), probed HERE rather than in the lifespan hook: importability
+        # is a property of the process, every request needs the answer, and a `Gateway`
+        # built without lifespan (`TestClient(app)` bare, the eval harness) must still
+        # record coverage honestly. Enforcement is the part that belongs at boot.
+        self.detector_manifest: tuple[Unavailable, ...] = probe_availability(_probe_scope())
+        self.detectors_unloadable: dict[str, str] = {
+            entry.detector: entry.missing for entry in self.detector_manifest
+        }
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -229,6 +292,7 @@ class Gateway:
         tier_requested: str | None = None,
         tokens_in: int | None = None,
         tokens_out: int | None = None,
+        no_dispatch: bool = False,
         record_status: str = RECORD_STATUS_COMPLETE,
     ) -> None:
         """Write the one record for this request (FR-AUD-001).
@@ -239,9 +303,25 @@ class Gateway:
         `est_cost_usd` stays `None` unless the active provider can price the model that
         actually answered — ADR-022's null-not-zero rule. A zero would read as "this was
         free" rather than "we cannot price this", and the cost plane would average it in.
+
+        `no_dispatch` marks the 04 §4.5 short-circuit, where that rule inverts (owner
+        ruling, 2026-08-28). Nothing was sent upstream, so 0 tokens is a **count** rather
+        than a missing value, and on a `measured`-class provider the cost is a *counted*
+        zero — the request demonstrably cost nothing, which is the whole point of blocking
+        before dispatch. Leaving it null would delete the saving from the cost plane:
+        null is excluded from an average, so a pipeline that blocked half its traffic
+        pre-dispatch would report the same mean cost as one that blocked none.
+
+        Dev class stays null even here, and not for want of arithmetic — ADR-018 makes
+        `dev` accounting *not a measurement*, so a 0.0 from it would be a figure barred
+        from every judge-facing artifact sitting in the column those artifacts read.
         """
         est = None
-        if model_used and tokens_in is not None and tokens_out is not None:
+        if no_dispatch:
+            tokens_in, tokens_out = 0, 0
+            if self.config.active.upstream_class is UpstreamClass.MEASURED:
+                est = 0.0
+        elif model_used and tokens_in is not None and tokens_out is not None:
             est = self.config.active.est_cost_usd(model_used, tokens_in, tokens_out)
 
         record = AuditRecord.from_verdict(
@@ -265,7 +345,13 @@ class Gateway:
         self.metrics.increment(
             "cp_requests_total", use_case=request.use_case, verdict=verdict.action.value
         )
-        overhead = latency.get("gateway_overhead_ms")
+        # Per affected request, not once per boot (ADR-033): the manifest is process-wide,
+        # but what this counter answers is how much coverage requests actually lost. Scoped
+        # to `coverage.unavailable`, so a detector no request on this policy would have
+        # called does not inflate the figure.
+        for detector in sorted(coverage.unavailable):
+            self.metrics.increment("cp_detector_unavailable_total", detector=detector)
+        overhead = latency.get("total_attributable_overhead_ms")
         if overhead is not None:
             self.metrics.observe(
                 "cp_gateway_overhead_ms", overhead, use_case=request.use_case
@@ -327,6 +413,124 @@ async def run_startup_canary(state: Gateway) -> None:
         )
 
 
+def enforce_detector_availability(state: Gateway) -> None:
+    """Apply ADR-033 rule 2 to the manifest `Gateway.__init__` probed.
+
+    Raises `DetectorUnavailableError` when an unloadable detector is `fail_closed` in any
+    active policy, and otherwise warns per surviving entry. Both outcomes are decided by
+    `enforce_at_boot`; this adds only the policy set to read and the warning channel.
+
+    Runs BEFORE the canary. A boot that is going to refuse for a locally-knowable reason
+    should not first spend an upstream round trip proving the provider counts tokens
+    correctly — and on the fail_open path the operator wants the reduced-coverage warning
+    above the canary's output, not buried under it.
+    """
+    policies = [state.store.get(use_case) for use_case in state.store.use_cases]
+    for line in enforce_at_boot(state.detector_manifest, policies):
+        warnings.warn(line, DetectorUnavailableWarning, stacklevel=2)
+
+
+async def _warm_one(
+    name: str, warm: Callable[[], Awaitable[float]], state: Gateway, log_fmt: str
+) -> None:
+    """Warm one non-ONNX detector, and make `warm_detector_models`'s no-raise promise true.
+
+    The manifest check comes first and is the documented mechanism (ADR-033 has already decided
+    whether an absence refuses the boot or warns), so on a correctly-probed host the `except` is
+    never reached. It is here because the manifest is only as complete as the scope it was probed
+    with, and a caller that narrows `_probe_scope` — as the availability tests legitimately do —
+    leaves a *real* host absence unrecorded. `warm()` then raised `ModuleNotFoundError` straight
+    out of the lifespan and the gateway failed to start, which is the opposite of the fail-open
+    behaviour the affected policies asked for.
+
+    Catching `ImportError` and not `Exception` is the point of the narrow clause: an absent
+    dependency is state (c) and boots without this detector, while a dependency that is *present
+    and broken* is a genuine fault that must not be silently swallowed at boot.
+    """
+    if name in state.detectors_unloadable:
+        return
+    try:
+        _LOG.info(log_fmt, await warm())
+    except ImportError as exc:
+        # Not `detectors_unloadable[name] = ...`: that dict is the boot manifest, and a probe
+        # that missed this is a defect to surface rather than to backfill silently.
+        _LOG.warning(
+            "%s could not be warmed: %s is absent (ADR-033 state (c)); "
+            "the boot manifest did not record it — continuing without it",
+            name, exc.name or "a dependency",
+        )
+
+
+async def warm_detector_models(state: Gateway) -> None:
+    """Build every served ONNX graph at boot and log the cost (ADR-035 item 4).
+
+    **The build cannot happen inside a request.** It measures ~7.8 s for `tier2_injection` on
+    this host, against a 25 ms per-window budget and a 5611 ms bound-case ceiling — and it would
+    run inline on the event loop, where `wait_for` cannot fire until control returns (04 §2.1(a),
+    the trap ADR-034 was filed about). ADR-035 item 4 rules build-at-boot with the duration
+    "logged at startup as one line beside the FR-GW-006 canary result", which is this.
+
+    **Runs AFTER the canary**, for the mirror of the reason `enforce_detector_availability` runs
+    before it: that check can *refuse* the boot, so it should not first spend an upstream round
+    trip. This one cannot refuse anything, so it should not spend ~8 s of graph export on a boot
+    the canary is about to reject.
+
+    Never raises for an absent dependency — `warm_models` skips what this host cannot load, and
+    ADR-033's manifest has already decided whether that absence refuses the boot or warns.
+    """
+    # Scoped to what this process actually serves, via the SAME helper ADR-033's probe uses:
+    # a checkpoint in `SERVED` but wired into no lane would otherwise cost ~8 s of graph export
+    # at every boot for a graph no request can reach. `warm_models` intersects with `SERVED`, so
+    # passing the wider scope is safe and keeps one definition of "detectors this process calls".
+    built = warm_models(_probe_scope())
+    if built:
+        detail = ", ".join(f"{name} {ms:.0f} ms" for name, ms in sorted(built.items()))
+        _LOG.info("model graphs built at boot: %s", detail)
+
+    # `entity_enricher` warms separately because it is not an ONNX detector: `warm_models`
+    # intersects with `SERVED`, so the wider scope above reaches it not at all. Skipped via
+    # the boot manifest rather than a caught ImportError — the manifest already answered
+    # "can this host load spaCy", and ADR-033 has already decided whether that absence
+    # warns or refuses. Its 10 ms budget is unreachable cold: `import spacy` plus
+    # `spacy.load` measured ~1.8 s, and the first NER call a further 11.76 ms even warm,
+    # which is why `warm()` also runs one throwaway inference.
+    await _warm_one(entity_enricher.NAME, entity_enricher.warm, state,
+                    "entity_enricher NER pipeline warmed in %.0f ms")
+
+    # `rag_grounding` warms here for the same reason and by the same guard: it is a
+    # sentence-transformers bi-encoder, not an ONNX-served graph, so `warm_models` — which
+    # intersects with `SERVED` — reaches it not at all. Under ADR-036 the cold load is
+    # *attributable in-thread CPU*, which makes an unwarmed first sentence a 30 ms budget
+    # breach and a `performance` fail_mode firing rather than merely a slow response.
+    await _warm_one(rag_grounding.NAME, rag_grounding.warm, state,
+                    "rag_grounding encoder warmed in %.0f ms")
+
+
+#: The static console (dashboard/static/), resolved from this file rather than the CWD —
+#: uvicorn is not guaranteed to run from the repo root. Absent directory means the mount is
+#: skipped, so the gateway still boots for anyone who has not built the console.
+CONSOLE_DIR = Path(__file__).resolve().parents[2] / "dashboard" / "static"
+
+
+LIVE_PROVIDER = "groq"
+"""Provider `create_live_app` activates: measured class, verified live 2026-08-30."""
+
+
+def create_live_app() -> FastAPI:
+    """Serving entry point — the shipped config with a measured-class live upstream.
+
+    `create_app` is the injectable/offline factory and inherits the shipped dev-class
+    default, which is what tests and `--replay` need. This one is what serves real
+    traffic:
+
+        uvicorn --factory controlplane.gateway.app:create_live_app --port 8080
+
+    Not port 8000 — `kiro-local`'s base_url is http://localhost:8000, so a gateway there
+    would proxy to itself.
+    """
+    return create_app(Gateway(config=load_gateway_config(active=LIVE_PROVIDER)))
+
+
 def create_app(gateway: Gateway | None = None) -> FastAPI:
     """Build the ASGI app. `gateway` is injectable so tests need no real upstream.
 
@@ -339,7 +543,9 @@ def create_app(gateway: Gateway | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        enforce_detector_availability(state)
         await run_startup_canary(state)
+        await warm_detector_models(state)
         yield
 
     app = FastAPI(title="ControlPlane.ai", version="1", lifespan=lifespan)
@@ -378,6 +584,40 @@ def create_app(gateway: Gateway | None = None) -> FastAPI:
     async def released(review_id: str) -> Any:
         return {"review_id": review_id, "text": review.released_text(state.conn, review_id)}
 
+    # -- per-request forensic trace (read-only projection of audit_records) --
+    # Registered before the console mount and after /admin/review so the literal
+    # "/admin/requests" cannot be shadowed. No new table and no new write path: every
+    # field is the stored row or a named derivation of it (see audit/forensics.py).
+    @app.get("/admin/requests")
+    async def list_requests(limit: int = 50) -> Any:
+        return {"requests": forensics.list_requests(state.conn, limit=limit),
+                "source": forensics.SOURCE_LIVE}
+
+    @app.get("/admin/requests/{request_id}")
+    async def request_trace(request_id: str) -> Any:
+        # The use case is read first because the policy is keyed by it, and the 404 has to
+        # come from the row's absence rather than from a KeyError raised deeper in.
+        row = state.conn.execute(
+            "SELECT use_case FROM audit_records WHERE request_id = ?", (request_id,)
+        ).fetchone()
+        if row is None:
+            return JSONResponse(
+                status_code=404,
+                content={"error": {"code": "ERR-ADM-404",
+                                   "message": f"no audit record {request_id}",
+                                   "request_id": request_id}},
+            )
+        use_case = row["use_case"]
+        # Read live, and possibly a NEWER version than the one that decided this verdict —
+        # `policy_context.policy_matches_record` is what states whether they agree.
+        policy = state.store.get(use_case) if state.store.has(use_case) else None
+        others = {name: state.store.get(name) for name in state.store.use_cases}
+        return forensics.trace(
+            state.conn, request_id,
+            lanes=pipeline.LANES, span_of=pipeline.SPAN_OF,
+            policy=policy, all_policies=others,
+        )
+
     @app.post("/admin/policies/reload")
     async def reload_policies() -> Any:
         return {"loaded": state.store.reload()}
@@ -389,6 +629,19 @@ def create_app(gateway: Gateway | None = None) -> FastAPI:
     @app.get("/metrics")
     async def metrics() -> Any:
         return state.metrics.snapshot()
+
+    # -- operator console (static; same-origin with /metrics and /admin/*) --
+    # Mounted LAST so it cannot shadow an API route: Starlette matches in order, and a
+    # mount at "/console" would otherwise swallow nothing here anyway — but the ordering
+    # is the property that keeps it true if the prefix ever changes.
+    #
+    # The console is plain HTML/CSS/JS served from this same origin deliberately: it calls
+    # `/metrics` and `/admin/review` with relative URLs, so there is no CORS surface and no
+    # second server to run for the demo. It inherits the admin surface's documented lack of
+    # authentication (module docstring, 05 §2) — it does not add one, and it does not widen
+    # it either, since it can reach nothing a curl to the same port cannot.
+    if CONSOLE_DIR.is_dir():
+        app.mount("/console", StaticFiles(directory=CONSOLE_DIR, html=True), name="console")
 
     return app
 
@@ -403,20 +656,28 @@ async def handle_completion(state: Gateway, http_request: Request) -> Response:
     """
     started = time.perf_counter()
     body = await http_request.json()
+    # Minted HERE, before use-case resolution, and published to request.state immediately
+    # (owner live-test finding, 2026-08-28). `ingest` used to mint it on its own last line,
+    # which is *after* both rejections it can raise — so an ERR-CFG-001/002 body reached the
+    # caller with `"request_id": ""` and no `X-ControlPlane-Request-Id` header, against
+    # 05 §1.1's "All responses carry" promise. An id is a correlation handle for the one
+    # exchange, not a property of a successfully resolved policy: the request the operator
+    # most needs to look up is the one that was refused.
+    request_id = str(uuid.uuid4())
+    http_request.state.request_id = request_id
     # `cp.ingress` (02 §4 step t0) is resolve-use-case + load-policy — NOT the body read
     # above, which is client transport the gateway does not control and which 06 §4 keeps
     # out of the headline for the same reason it keeps the reference row separate.
     ingress_started = time.perf_counter()
-    request = ingest(dict(http_request.headers), body, state.store, key_map=state.key_map)
+    request = ingest(dict(http_request.headers), body, state.store,
+                     key_map=state.key_map, request_id=request_id)
     ingress_ms = (time.perf_counter() - ingress_started) * 1000.0
-    http_request.state.request_id = request.request_id
 
-    coverage = pipeline.Coverage()
+    coverage = pipeline.Coverage(unloadable=state.detectors_unloadable)
     latency: dict[str, Any] = {spans.INGRESS: ingress_ms}
 
     input_started = time.perf_counter()
     verdict, outcome, lane = await pipeline.input_lane(request, coverage, metrics=state.metrics)
-    pipeline.note_enrichment(lane.signals, coverage)
     # ADR-030 `input_hold_ms`: 06 §4 defines it as **ingress + input-lane time, before
     # dispatch**, so ingress is inside it. `held_ms` starts from the same point for the same
     # reason — the 06 §4 streaming formula also opens with "ingress + input-lane time", and
@@ -444,7 +705,7 @@ async def handle_completion(state: Gateway, http_request: Request) -> Response:
     common = dict(
         state=state, request=request, messages=messages, coverage=coverage,
         latency=latency, input_signals=lane.signals, input_redactions=input_redactions,
-        started=started, held_ms=held_ms,
+        input_verdict=verdict, started=started, held_ms=held_ms,
     )
     if request.policy.streaming:
         return await _stream_response(**common)
@@ -457,16 +718,17 @@ async def _input_terminal(
 ) -> Response:
     """An input-stage BLOCK or ESCALATE: answered without ever calling a provider.
 
-    `model_used`, `tokens_*` and `est_cost_usd` are all left null, which is the honest
-    record of 04 §4.5: there was no dispatch, so there is no model and no cost. A zero
-    would claim a free upstream call happened.
+    `model_used` is null — no model answered, and naming one would invent a dispatch.
+    The token counts are `0/0` and the cost is a counted zero on a measured-class
+    provider (`no_dispatch=True`; see `Gateway.audit`), because "we sent nothing" is a
+    quantity we know exactly rather than one we failed to observe.
     """
     # Minted before either write, because the audit record's `actions_json` names it while
     # the review row REFERENCES the audit record — see `Gateway.quarantine`.
     review_id = str(uuid.uuid4()) if outcome.action is Action.ESCALATE else None
 
     total_ms = (time.perf_counter() - started) * 1000.0
-    latency["gateway_overhead_ms"] = pipeline.gateway_overhead_ms(
+    latency["total_attributable_overhead_ms"] = pipeline.total_attributable_overhead_ms(
         total_ms=total_ms, upstream_ms=0.0, held_ms=held_ms,
         streaming=request.policy.streaming,
     )
@@ -483,6 +745,7 @@ async def _input_terminal(
             rescan_findings=outcome.rescan_findings,
             notes=outcome.notes,
         ),
+        no_dispatch=True,
     )
     if review_id is not None:
         await state.quarantine(request, outcome.quarantined_text or "", review_id)
@@ -507,7 +770,7 @@ async def _input_terminal(
 
 async def _buffered_response(
     *, state: Gateway, request, messages, coverage, latency, input_signals,
-    input_redactions, started: float, held_ms: float,
+    input_redactions, input_verdict: Verdict, started: float, held_ms: float,
 ) -> Response:
     """The ADR-014 non-streaming path: buffer fully, check once, deliver atomically.
 
@@ -524,7 +787,9 @@ async def _buffered_response(
     stage = pipeline.unit_stage(request.policy)
     lane = await pipeline.run_lane(stage, response.text, request, coverage,
                                   metrics=state.metrics)
-    pipeline.note_enrichment(lane.signals, coverage)
+    await pipeline.enrich_lane(
+        lane, response.text, request, coverage, metrics=state.metrics
+    )
     engine_started = time.perf_counter()
     verdict = pipeline.converge(lane, request.policy, metrics=state.metrics)
     policy_ms = (time.perf_counter() - engine_started) * 1000.0
@@ -547,12 +812,16 @@ async def _buffered_response(
 
     review_id = str(uuid.uuid4()) if outcome.action is Action.ESCALATE else None
 
+    # The stamped verdict spans both units this path evaluates (04 §4.3 step 5). `verdict`
+    # above is the OUTPUT unit's; an input-stage EDIT is invisible in it.
+    stamped = _request_verdict([input_verdict, verdict], request)
+
     total_ms = (time.perf_counter() - started) * 1000.0
-    latency["gateway_overhead_ms"] = pipeline.gateway_overhead_ms(
+    latency["total_attributable_overhead_ms"] = pipeline.total_attributable_overhead_ms(
         total_ms=total_ms, upstream_ms=upstream_ms, held_ms=held_ms, streaming=False,
     )
     state.audit(
-        request=request, verdict=verdict, stage_summary=STAGE_COMPLETED,
+        request=request, verdict=stamped, stage_summary=STAGE_COMPLETED,
         signals=tuple(input_signals) + tuple(lane.signals),
         coverage=coverage, latency=latency,
         actions_json=serialize_actions(
@@ -589,10 +858,14 @@ async def _buffered_response(
             headers=headers,
         )
 
-    controlplane: dict[str, Any] = {"verdict": outcome.action.value}
-    if outcome.applied:
+    # 05 §1.1's `edit` rendering follows the STAMPED verdict, not the output unit's: a
+    # prompt-only redaction is still an edited request, and the header is how a client
+    # learns that without parsing the body.
+    controlplane: dict[str, Any] = {"verdict": stamped.action.value}
+    if outcome.applied or input_redactions:
         headers[HEADER_ACTIONS] = "edit"
-        controlplane["actions"] = json.loads(serialize_actions(applied=outcome.applied))
+        controlplane["actions"] = json.loads(serialize_actions(
+            applied=outcome.applied, input_redactions=input_redactions))
     return JSONResponse(
         status_code=200,
         content=_completion_body(
@@ -605,7 +878,7 @@ async def _buffered_response(
 
 async def _stream_response(
     *, state: Gateway, request, messages, coverage, latency, input_signals,
-    input_redactions, started: float, held_ms: float,
+    input_redactions, input_verdict: Verdict, started: float, held_ms: float,
 ) -> Response:
     """The 02 §4 streaming path: check each sentence, release as we go (FR-GW-002).
 
@@ -689,7 +962,7 @@ async def _stream_response(
             total_ms = (time.perf_counter() - started) * 1000.0
             stream_ms = (time.perf_counter() - stream_started) * 1000.0
             latency["upstream_ms"] = round(max(0.0, stream_ms - stream_hold_ms), 3)
-            latency["gateway_overhead_ms"] = pipeline.gateway_overhead_ms(
+            latency["total_attributable_overhead_ms"] = pipeline.total_attributable_overhead_ms(
                 total_ms=total_ms, upstream_ms=latency["upstream_ms"],
                 held_ms=held_ms, streaming=True,
             )
@@ -735,7 +1008,9 @@ async def _stream_response(
                 Stage.OUTPUT_SENTENCE, segment_text, request, coverage,
                 metrics=state.metrics,
             )
-            pipeline.note_enrichment(lane.signals, coverage)
+            await pipeline.enrich_lane(
+                lane, segment_text, request, coverage, metrics=state.metrics
+            )
             engine_started = time.perf_counter()
             verdict = pipeline.converge(lane, request.policy, metrics=state.metrics)
             policy_ms = (time.perf_counter() - engine_started) * 1000.0
@@ -815,16 +1090,26 @@ async def _stream_response(
                     yield _final_frame(request.request_id, model, "stop",
                                        {"verdict": "escalate", "review_id": review_id})
             else:
-                controlplane: dict[str, Any] = {"verdict": "pass"}
-                if actions:
-                    controlplane["verdict"] = "edit"
-                    controlplane["actions"] = json.loads(serialize_actions(applied=actions))
+                # Same aggregation as the buffered path: the final frame reports the
+                # request, and an input-stage redaction happened even if no sentence was
+                # touched. Computed here so the frame and the audit record below cannot
+                # disagree about what this request's verdict was.
+                streamed = _request_verdict([input_verdict, *verdicts], request)
+                # One source for the verdict. Reaching this branch means nothing terminated,
+                # so the aggregate is `pass` or `edit` by construction — but deriving it from
+                # the same helper the audit record uses is what keeps the frame and the record
+                # from ever disagreeing, which a literal `"edit"` here would not.
+                controlplane: dict[str, Any] = {"verdict": streamed.action.value}
+                if actions or input_redactions:
+                    controlplane["actions"] = json.loads(serialize_actions(
+                        applied=actions, input_redactions=input_redactions))
                 yield _final_frame(request.request_id, model, "stop", controlplane)
 
             yield f"data: {DONE}\n\n"
 
             # -- audit (one record per request, FR-AUD-001) -------------------
-            final = _final_verdict(terminal, verdicts, request)
+            final = _request_verdict(
+                [input_verdict, _final_verdict(terminal, verdicts, request)], request)
             finalize_latency()
             state.audit(
                 request=request, verdict=final, stage_summary=STAGE_STREAMED,
@@ -850,9 +1135,61 @@ async def _stream_response(
                     # see the rescue's failure instead of the defect that caused it.
                     pass
 
+    # M-12 reads 05 §1.1's `X-ControlPlane-Actions` header as non-streaming-only, because a
+    # header is committed to the wire before the first sentence is ever checked. That holds
+    # for *output* edits — but an input-stage redaction (ADR-020) is decided BEFORE dispatch,
+    # so it is known here, before this response's status line exists. Withholding it would
+    # make the header unreachable in practice rather than mode-specific: `support_bot` is the
+    # only shipped policy mapping `pii.*` to `edit`, and it is `streaming: true`.
+    stream_headers = {HEADER_REQUEST_ID: request.request_id}
+    if input_redactions:
+        stream_headers[HEADER_ACTIONS] = "edit"
+
     return StreamingResponse(
-        body(), media_type="text/event-stream",
-        headers={HEADER_REQUEST_ID: request.request_id},
+        body(), media_type="text/event-stream", headers=stream_headers,
+    )
+
+
+def _request_verdict(candidates: list[Verdict], request) -> Verdict:
+    """The one request-level verdict: most severe across **every** evaluated unit.
+
+    04 §4.3 step 5 stamps one verdict per request, and 05 §3 has one `verdict` column, but a
+    request is evaluated in several units — the input, then every output unit, plus the
+    conversation stage once `conv_tracker` is wired. The stamp is the most severe of them
+    (04 §4.2's total order), for the same reason `_final_verdict` takes the most severe
+    sentence rather than the last: a request whose *prompt* was redacted did not "pass"
+    because its response happened to be clean.
+
+    Owner live-test finding, 2026-08-28: an input-stage EDIT (ADR-020 pre-dispatch
+    redaction) with a clean output stamped `pass`, so the redaction was invisible to
+    `cp_requests_total{verdict}` and to the caller — the gateway's most demonstrable
+    privacy behaviour, unreported.
+
+    The action is the severest across units, but the *evidence* is the union of all of
+    them — not the winning unit's row. Picking one unit's Verdict would drop the other's
+    `failure_outcomes`, and `from_verdict` reads `detector_failures_json` straight off the
+    stamped verdict: a detector that failed `fail_open` during output scoring would vanish
+    from the record whenever the input unit tied it on severity. 04 §5 requires the fault
+    to be recorded whether or not it contributed, so the union is what makes
+    "recorded but not contributing" representable at all.
+
+    `contributing_signal_ids` and `failure_record_ids` then filter that union against the
+    stamped action by themselves, which is why merging is safe: an input PASS's signals do
+    not become contributors to an output BLOCK just by sharing a record.
+    """
+    present = [v for v in candidates if v is not None]
+    if not present:
+        return Verdict(action=Action.PASS, use_case=request.use_case,
+                       policy_version=request.policy_version)
+    if len(present) == 1:
+        return present[0]
+    return Verdict(
+        action=most_severe(v.action for v in present),
+        use_case=present[0].use_case,
+        policy_version=present[0].policy_version,
+        signal_outcomes=tuple(o for v in present for o in v.signal_outcomes),
+        failure_outcomes=tuple(o for v in present for o in v.failure_outcomes),
+        edits=tuple(e for v in present for e in v.edits),
     )
 
 

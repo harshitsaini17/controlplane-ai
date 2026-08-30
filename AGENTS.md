@@ -199,19 +199,74 @@ Freeze gate:  .venv/bin/python -m eval.validate_dataset            # consistency
               approved state and is what eval/run_all.py calls before computing anything.
               A frozen case is not editable as a fix — that is a new freeze cycle.
 
-Run gateway:  .venv/bin/uvicorn --factory controlplane.gateway.app:create_app --reload
-              `app.py` exposes the `create_app()` factory and NO module-level `app`, by
-              design (the Gateway docstring: a module global would leave a stale copy
-              behind a hot reload) — so `--factory` is required, not stylistic.
+Run gateway:  set -a; . ./.env; set +a          # NOTHING in the repo loads .env (M-63)
+              .venv/bin/uvicorn --factory controlplane.gateway.app:create_live_app --port 8080
+              TWO factories, and the difference is provenance, not style (M-62):
+                create_live_app()  serving. Activates `groq` (measured class), so its token
+                                   counts and cost figures are citable (ADR-018).
+                create_app()       offline/injectable. Inherits the shipped dev-class
+                                   `active_provider`, which is what tests,
+                                   `demo.run_script --replay` and `eval.fault_injection`
+                                   need — a fixture reports no prompt tokens, and for a
+                                   MEASURED provider FR-GW-006 makes that boot-fatal.
+              Do NOT promote `active_provider` to a measured provider to "fix" serving: it
+              also re-classes every offline path and every regenerated report (M-62).
+              `app.py` exposes factories and NO module-level `app`, by design (a module
+              global would leave a stale copy behind a hot reload) — `--factory` is required.
               Do NOT serve on port 8000: `kiro-local`'s base_url is http://localhost:8000,
               so the gateway would proxy to itself. Default 8000 → pick another port.
-Eval suite:   [Phase 2+] .venv/bin/python -m eval.run_all         → reports/eval_report.md
-              [Phase 2+] .venv/bin/python -m eval.bench_latency   → reports/latency_report.md
+              The env line is not optional: without it every keyed provider sees an unset
+              variable, the canary reports UNVERIFIED (not satisfied), and the console chat
+              renders a verdict with no model text — the pipeline runs, nothing answers.
+Eval suite:   .venv/bin/python -m eval.run_all                       → reports/eval_report.md
+                         (per-detector P/R/F1 + both policy matrices; runs the freeze
+                         gate first. Prints `NFR-EVAL-001: MISSED` — that is SL-1, a real
+                         unmet target, logged and deliberately not tuned away.)
+              .venv/bin/python -m eval.bench_latency                 → reports/latency_report.md
+                         (add --check for the NFR-P-001/002 tripwire: nonzero on breach)
               .venv/bin/python -m eval.fault_injection            → reports/fault_injection_report.md
                          (06 §5; nonzero exit on any failed 04 §5 invariant)
+              .venv/bin/python -m eval.check_derivations           → stdout only, nonzero on defect
+                         (ADR-032 Correction 1 item 3) Re-derives every derivation-claiming
+                         figure in ADR-032/034 from `reports/spike_window_latency.json`.
+                         Three verdicts: OK / MISMATCH / NO SOURCE — and NO SOURCE is the
+                         point, meaning a doc claims a figure the artifact cannot produce.
+                         Such a figure gains a derivation or loses the claim; there is no
+                         third state. Run it after touching any of those figures. It is also
+                         a pytest gate (`tests/test_derivation_check.py`), so CI runs it.
+              .venv/bin/python -m eval.spike_enrichment_latency  → reports/spike_enrichment_latency.json
+                         The 04 §2.2 enrichment cap, measured. `entity_enricher` has an
+                         NFR-P-002 budget and **no row in any lane**, so `bench_latency`
+                         cannot reach it (that harness enumerates `LANES`); this is the only
+                         harness that can. The quantity is a **curve over span count**, not a
+                         per-call latency: M-18 ruled the 10 ms an *aggregate per sentence*,
+                         so the question is whether the hold stays bounded in k or tracks 10k.
+                         Exit codes are three-valued — 0 cap holds, 1 measured and failed,
+                         **2 could not measure on a quiet host so nothing was written**. It
+                         self-gates on load1 and refuses to publish an uncitable artifact
+                         rather than overwriting evidence. Pinned by
+                         `tests/test_spike_enrichment_latency.py`, which also fails if the
+                         percentile guards are weakened (M-46: `_percentiles_are_distinct` is
+                         True at n=40 while the p99 it certifies has no sample above it, so
+                         reps default to 200 against a guard minimum of 101).
+              Measurement runs need a QUIET HOST (06 §8). Every harness stamps
+                         `os.getloadavg()` + CPU count at start/end via `eval/host_load.py`;
+                         an artifact whose start stamp exceeds `QUIET_LOAD1_MAX` is NOT
+                         citable. Do not run tests, builds or another spike while a
+                         measurement is in flight — that is how a published artifact got
+                         contaminated once, and the stamp exists because the evidence was
+                         otherwise only inferential.
               [Phase 2+] .venv/bin/python -m eval.cost_simulation | .pii_leak_scan
+              Both harnesses take --out: CI redirects there and asserts reports/ is
+              untouched, because a report is evidence and not build output (06 §8).
 Demo:         [Phase 2+] .venv/bin/python -m demo.run_script      (07; nonzero exit on beat failure)
 Dashboard:    [Phase 2+] .venv/bin/streamlit run dashboard/app.py (ADR-007)
+
+CI:           .github/workflows/ci.yml — matrix py3.12 + py3.14; pytest, freeze gate,
+              fault injection, bench --check. Verified locally on both interpreters.
+Onboarding:   docs/TESTING.md — the four verification tiers (unit → eval → latency →
+              live gateway) with the reasoning attached. This section in brief; that
+              file at length.
 
 Secrets:      via .env (gitignored). NEVER commit keys. NEVER print env values.
               Names are normative in 05 §6: UPSTREAM_API_KEY, REVIEW_WEBHOOK_URL, CP_DB_PATH.
@@ -259,6 +314,50 @@ enumeration rule still applies in full — every MINOR resolution is *logged*, s
 count stays honest rather than merely low. A gap resolved in place and never written down is
 indistinguishable from a gap that was missed.
 
+#### Endgame mode — in effect from 2026-08-29 through submission
+
+Phase 5 runs to submission against a real deadline, and the lightened protocol above still stops
+more often than that leaves room for. So the **stop frequency** narrows once more. For the
+duration, the following replaces §5.1's stop conditions; the rest of §5 stands unchanged.
+
+1. **Halt only for:** (a) a contradiction that no documented precedent, decision rule or
+   conservative default can resolve; (b) anything touching the measurement integrity of an
+   **already-published** number; (c) a security regression. **Everything else** is resolved with
+   the recommendation you would have filed *plus the most conservative reading*, marked
+   **`PROVISIONAL — batch review at phase end`** on the ADR or M-row, and then you keep moving.
+2. **Provisional resolutions get their own section in the phase-end report**, so they are
+   adjudicated retroactively in one pass instead of one interruption at a time. A provisional
+   resolution missing from that section has silently become permanent — which is the whole failure
+   this item exists to prevent, and the reason the marker is written into the doc rather than
+   remembered.
+3. **First-contact discipline on blind numbers is UNCHANGED.** Report whatever the five detectors
+   measure on first contact, tune nothing toward a target, and let a miss become an SL. §5.4 and §7
+   are untouched: no weakened tests, no skipped failures, no mocked measurements, no self-approved
+   deviations, no adjusted harness. **Only stop-frequency lightens. The honesty rules never do** —
+   they are what makes a faster protocol safe rather than merely faster.
+4. **Doc updates may batch at phase end, except ledger rows and anything a published number
+   cites.** Those stay in the same commit as the change they describe: a count that is briefly
+   wrong, and a figure whose source is briefly absent, are each indistinguishable from the defect
+   class this repo keeps finding — *a figure described by a derivation it does not come from*.
+
+**Credit-conservation mode — in effect 2026-08-30 (deadline + credits).** Terse output. What
+lightens is the *spend*, not the honesty rules: §5.4 and the §11 enumeration rule are as
+binding here as they are above.
+
+- **No speculative sweeps.** Stale prose **outside** judge-facing reports is LISTED in one
+  file (`docs/STALE-PROSE.md`) for a single final pass, not fixed inline. Prose inside a
+  judge-facing report is still fixed where it is found — that is a published claim.
+- **M-rows batch per commit** rather than one commit each.
+- **Verify via existing gates only** — `pytest`, `eval.check_derivations`, the freeze gate,
+  `bench_latency --check`. No new hand-rolled parsers or instruments unless a **published
+  number** requires one.
+
 ---
 
-*Last updated: 2026-08-26 (§11.1 lightened protocol added at the start of Phase 3). When this file changes, note it in the session summary so the human knows the agent contract shifted.*
+*Last updated: 2026-08-30 (§10: `eval.spike_enrichment_latency` added — the only harness
+that reaches the 04 §2.2 enrichment stage; three-valued exit codes; refuses to publish an
+uncitable artifact. 2026-08-29, §11.1: **endgame mode** added — stop conditions narrowed to three,
+provisional resolutions batch-reviewed at phase end, honesty rules explicitly unchanged. Earlier
+the same day, §10: `eval.check_derivations` added, plus the quiet-host rule for measurement runs —
+ADR-032 Correction 1). When this file changes, note it in the session summary so the human knows
+the agent contract shifted.*

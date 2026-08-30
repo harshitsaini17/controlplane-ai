@@ -94,17 +94,28 @@ def test_groq_tiers_bind_the_verified_production_model_ids() -> None:
     assert groq.tiers.frontier == GROQ_FRONTIER == "openai/gpt-oss-120b"
 
 
-def test_q10_ollama_provider_is_declared_but_binds_no_model() -> None:
-    """Characterization test for the open Q-10 gap — update it when a model lands.
+def test_sl4_ollama_binds_the_owner_verified_local_model() -> None:
+    """SL-4/Q-10 closed 2026-08-28: a genuinely local model now serves the small tier.
 
-    `ollama-local` is a declared shape, not a working provider: no genuinely local model
-    is installed (the one present carries `remote_host`, so it is a cloud model reached
-    through a local CLI). Both tiers are null, which is legal for a non-active provider
-    and is what stops it being mistaken for a working fallback.
+    The predecessor of this test characterized the *gap* and said in its own docstring to
+    update it when a model landed. `llama3.2:3b` passes the no-`remote_host` assertion, so
+    it is local in the sense ADR-018 requires and the `unmetered` claim holds — its tokens
+    are billed to no one.
+
+    `frontier` stays null deliberately. Exactly one local model is evidenced, and binding
+    both tiers to one id would make the cascade a no-op while looking configured — the
+    ADR-009 substitution reached from the other direction.
+
+    This asserts the *config*, not the daemon. The binding was verified on the owner's
+    machine (Ollama v0.33.0); the development host serves only a `remote_host`-carrying
+    cloud model, so a live dispatch there fails and no test may depend on one.
     """
     ollama = load_gateway_config().provider("ollama-local")
-    assert ollama.tiers.small is None and ollama.tiers.frontier is None
-    assert ollama.tiers.resolve("small") is None
+    assert ollama.tiers.small == "llama3.2:3b"
+    assert ollama.tiers.frontier is None
+    assert ollama.tiers.resolve("frontier") is None
+    # `unmetered` is an affirmative measurement claim (ADR-022), not a missing price.
+    assert ollama.est_cost_usd("llama3.2:3b", 1000, 1000) == 0.0
 
 
 @pytest.mark.parametrize("attribute", ["model_config", "dict", "json", "copy"])
@@ -317,10 +328,14 @@ def test_measured_provider_with_null_pricing_warns_by_name(
 ) -> None:
     """The warning row of 05 §6.1: legal, but never silent.
 
-    Uses `ollama-local`, whose tiers are null — so it trips the warning without also
-    tripping the fatal routed-model rule, which is what separates the two rows.
+    The shape under test is measured-class + unpriced + **no tier on a routing path**: that
+    combination warns, while binding a tier to an unpriceable model is the *fatal* row. The
+    two must stay distinguishable, so this test constructs the shape rather than borrowing
+    it — since SL-4 closed, `ollama-local` binds `small`, and merely nulling its pricing
+    now trips the fatal rule instead of this one (which is itself the correct behaviour).
     """
     valid_config_dict["providers"][2]["pricing"] = None
+    valid_config_dict["providers"][2]["tiers"] = {"small": None, "frontier": None}
     with pytest.warns(PricingWarning, match="ollama-local"):
         GatewayConfig(**valid_config_dict)
 
@@ -328,17 +343,24 @@ def test_measured_provider_with_null_pricing_warns_by_name(
 def test_dev_class_provider_may_boot_unpriced_on_a_routing_path() -> None:
     """The scope decision behind `_check_price_coverage`, pinned as a test.
 
-    The shipped config's active provider is dev-class `kiro-local`: `pricing: null` with
-    BOTH tiers bound. Read class-agnostically, the fatal rule above would brick it — yet
-    ADR-018 exists so a dev-class provider can be used *while* unpriceable, since its
-    numbers are barred from judge-facing artifacts anyway. So the ladder is measured-only,
-    and the documented development path keeps working.
+    `kiro-local` is dev-class with `pricing: null` and BOTH tiers bound. Read
+    class-agnostically, the fatal rule above would brick it — yet ADR-018 exists so a
+    dev-class provider can be used *while* unpriceable, since its numbers are barred from
+    judge-facing artifacts anyway. So the ladder is measured-only, and the documented
+    development path keeps working.
+
+    Addressed by NAME rather than through `cfg.active`, which is what it read until
+    `active_provider` was switched to `groq` (2026-08-30, for a working upstream). The
+    subject here is the dev-class **allowance**, and that holds whether or not the
+    dev-class provider is the one currently serving traffic — so reading it off the active
+    slot made this test fail on a change it has no opinion about, while also quietly
+    scoping it to one deployment choice. Naming the provider pins the rule itself.
     """
     cfg = load_gateway_config()
-    assert cfg.active.name == "kiro-local"
-    assert cfg.active.upstream_class is UpstreamClass.DEV
-    assert cfg.active.pricing is None
-    assert set(cfg.active.priced_tier_models) == {"small", "frontier"}
+    dev = cfg.provider("kiro-local")
+    assert dev.upstream_class is UpstreamClass.DEV
+    assert dev.pricing is None
+    assert set(dev.priced_tier_models) == {"small", "frontier"}
 
 
 def test_shipped_config_emits_no_pricing_warning() -> None:
@@ -371,15 +393,29 @@ def test_duplicate_provider_names_rejected(valid_config_dict: dict[str, Any]) ->
 def test_active_provider_must_bind_at_least_one_tier(
     valid_config_dict: dict[str, Any],
 ) -> None:
-    """A tier-less active provider can serve no request at all."""
+    """A tier-less active provider can serve no request at all.
+
+    The tier-less provider is constructed here: every provider in the shipped config now
+    binds at least one tier, so this rule has no ready-made subject left. Nulling the tiers
+    first is what keeps the assertion about the rule rather than about the config.
+    """
+    valid_config_dict["providers"][2]["tiers"] = {"small": None, "frontier": None}
     valid_config_dict["active_provider"] = "ollama-local"
     with pytest.raises(ValidationError, match="binds no tier"):
         GatewayConfig(**valid_config_dict)
 
 
 def test_non_active_provider_may_bind_no_tier(valid_config_dict: dict[str, Any]) -> None:
-    """The converse of the rule above — this is the shipped `ollama-local` case."""
-    assert GatewayConfig(**valid_config_dict).provider("ollama-local").tiers.small is None
+    """The converse of the rule above: only the *active* provider must bind a tier.
+
+    No longer the shipped `ollama-local` case — SL-4 closed and it binds `small` — so the
+    permission is asserted on a constructed provider. It is still worth pinning: it is what
+    lets a declared-but-unused provider sit in the config without blocking boot.
+    """
+    valid_config_dict["providers"][2]["tiers"] = {"small": None, "frontier": None}
+    config = GatewayConfig(**valid_config_dict)
+    assert config.provider("ollama-local").tiers.small is None
+    assert config.active_provider != "ollama-local"
 
 
 def test_unknown_key_rejected(valid_config_dict: dict[str, Any]) -> None:
@@ -574,3 +610,62 @@ def test_taint_output_path_noop_when_not_tainted() -> None:
     assert taint_output_path("reports/eval_report.md", tainted=False) == Path(
         "reports/eval_report.md"
     )
+
+
+# ---------------------------------------------------------------------------
+# The `active_provider` override (2026-08-30) — see [[M-62]].
+#
+# One YAML key had three consumers: which upstream serves, the ADR-018 provenance class
+# `require_measured_upstream()` gates reports on, and the class OFFLINE paths inherit when
+# they build a `Gateway` with no config. A fixture upstream reports no prompt tokens, which
+# is boot-fatal for a measured provider (FR-GW-006) — so promoting the shipped default to
+# measured made tests and `--replay` refuse to boot while claiming a provenance a fixture
+# cannot have. The serving path names its provider instead.
+# ---------------------------------------------------------------------------
+
+
+def test_the_shipped_default_is_dev_class_so_offline_paths_inherit_dev() -> None:
+    """★ The invariant the split exists to protect.
+
+    Not a style preference: `make_client`, `demo.run_script --replay` and
+    `eval.fault_injection` all construct a `Gateway` with no config and inherit this key. A
+    fixture reports no prompt-token usage, and for a measured-class provider the FR-GW-006
+    canary makes that boot-fatal — so a measured default breaks every offline path at once.
+    """
+    assert load_gateway_config().active.upstream_class.value == "dev"
+
+
+def test_the_override_yields_a_measured_provider_for_the_serving_path() -> None:
+    """The other half: live traffic runs measured, so its cost figures are citable."""
+    assert load_gateway_config(active="groq").active.upstream_class.value == "measured"
+
+
+def test_the_override_is_validated_not_merely_assigned() -> None:
+    """★ Why the override goes through the constructor rather than attribute assignment.
+
+    `model_copy(deep=True)` + `cfg.active_provider = name` is the shorter route and skips
+    the provider-graph and pricing validators — precisely the checks that must run on a
+    provider about to serve real traffic. An unknown name must be refused, not stored.
+    """
+    with pytest.raises(ValidationError, match="not a declared provider"):
+        load_gateway_config(active="no-such-provider")
+
+
+def test_the_override_does_not_leak_into_the_next_load() -> None:
+    """The override is per-call. A sticky one would silently re-class judge-facing output."""
+    load_gateway_config(active="groq")
+    assert load_gateway_config().active.name == "kiro-local"
+
+
+def test_the_live_factory_serves_measured_while_create_app_stays_dev() -> None:
+    """★ The two factories differ in provenance class, which is the whole point.
+
+    `create_app` is the injectable/offline factory; `create_live_app` is what serves. Built
+    without `with TestClient(...)`, so no lifespan and no canary fires here — this asserts
+    the wiring, not the upstream.
+    """
+    from controlplane.gateway.app import LIVE_PROVIDER, Gateway, create_live_app
+
+    create_live_app()  # must construct without a key present
+    assert load_gateway_config(active=LIVE_PROVIDER).is_measured
+    assert Gateway().config.active.upstream_class.value == "dev"

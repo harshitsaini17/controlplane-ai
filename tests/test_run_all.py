@@ -28,10 +28,17 @@ from eval.policy_matrix import (
     reconcile,
 )
 from eval.run_all import (
+    DEMOTED,
     IMPLEMENTED,
     IMPLEMENTED_LABELS,
+    SCORED,
+    SCORED_V1,
     SKIPPED,
+    UNLOADABLE,
     V1_BASELINE,
+    _alpha_sweep_block,
+    _calibration_section,
+    _demote_unloadable,
     DetectorResult,
     LabelScore,
     _revision_section,
@@ -42,7 +49,10 @@ from eval.run_all import (
     load_cases,
     main,
 )
+from eval.suggest_thresholds import Band, Calibration
 from eval.validate_dataset import DATASET_DIR, load_policies
+
+from tests.ml_stack import requires_ml
 
 #: The 06 §3.3 matrices are identical for every test in this module, and computing them runs
 #: three detectors over the corpus. Cached so the suite pays for that once.
@@ -346,8 +356,160 @@ def test_report_computes_both_policy_matrices_and_keeps_them_separate() -> None:
     assert "Reconciliation" in report
     assert "masked" in report
 
-    # Calibration remains genuinely absent — the rule still binds where it applies.
-    assert "## Threshold calibration (06 §3) — NOT COMPUTED" in report
+    # Calibration is not supplied to THIS builder call, and the seeded-τ rule must bind
+    # anyway. Asserted on the rule text rather than on the heading: the heading is now
+    # four-valued, and "— NOT COMPUTED" is a prefix of "— NOT COMPUTED IN THIS RUN", so a
+    # heading assertion would pass by substring accident and stop testing anything.
+    assert "## Threshold calibration (06 §3) — NOT COMPUTED IN THIS RUN" in report
+    assert "no figure in this report derives from a seeded τ" in report
+
+
+def test_the_calibration_section_reports_an_inverted_band_without_clamping_it() -> None:
+    """**Supersedes** this module's former "calibration is absent" premise (06 §3).
+
+    That premise was correct while both confidence-kind detectors were stubs. `rag_grounding`
+    now ships, so `main()` computes a real band — and the band INVERTS (SL-7). The assertion
+    is transitioned rather than dropped, and to something strictly stronger: the section must
+    publish the failed band, name it invalid, and still state the seeded-τ rule. A section
+    that quietly clamped τ_low below τ_high would manufacture a shippable-looking number out
+    of a failed calibration (AGENTS.md §5.4, §7), and nothing else in the suite would notice.
+
+    Synthetic `Calibration` on purpose — this pins the *reporting* contract, not the
+    measurement. The measurement is `eval.suggest_thresholds` on a quiet host (06 §8).
+    """
+    cal = Calibration(
+        alpha=0.10,
+        band=Band(
+            tau_low=0.8365,
+            tau_high=0.7157,
+            n_calibration=55,
+            n_eval=23,
+            achieved={"no": (11, 12), "yes": (5, 6), "borderline": (0, 5)},
+            inverted=True,
+        ),
+        spread={"tau_low": (0.8039, 0.8808), "tau_high": (0.6546, 0.7980)},
+        score_summary={
+            "no": {"n": 41, "min": 0.0801, "median": 0.6380, "max": 0.9583},
+            "borderline": {"n": 16, "min": 0.6609, "median": 0.8188, "max": 0.9309},
+            "yes": {"n": 21, "min": 0.1302, "median": 0.8766, "max": 1.0},
+        },
+        auc=0.8751,
+        oracle=(56, 78),
+        alpha_sweep=[
+            (0.10, 0.8365, 0.7157, True, 56, 78),
+            (0.20, 0.7886, 0.8101, False, 51, 78),
+        ],
+        overlap={
+            "yes_min": 0.1302,
+            "yes_n": 21,
+            "no_max": 0.9583,
+            "no_n": 41,
+            "no_at_or_above_tau_high": 11,
+            "yes_below_tau_low": 7,
+        },
+        inverted_seeds=(5, 5),
+    )
+    section = "\n".join(_calibration_section(cal))
+
+    # The failure is in the heading, not buried in a footnote.
+    assert "MEASURED, AND THE BAND INVERTS (SL-7)" in section
+    # Both edges published as measured, in the inverted order, unclamped.
+    assert "0.8365" in section and "0.7157" in section
+    assert "not clamped" in section
+    # The mechanism is the tails, and it is quantified rather than asserted.
+    assert "tails overlap" in section
+    assert "11 of 41" in section and "7 of 21" in section
+    # Not one unlucky split, counted over seeds.
+    assert "all 5" in section
+    # The ceiling is what makes it unfixable by any α.
+    assert "56/78" in section
+    assert "no calibration at any α can beat" in section
+    # α is swept and explicitly NOT re-selected (AGENTS.md §7, §11.1 item 3).
+    assert "swept, not selected" in section
+    assert "α stays at 0.1" in section
+    # And the consequence for every other figure in the report.
+    assert "SEED(pre-calibration)" in section
+    assert "no figure in this report derives from a seeded τ" in section
+
+
+def test_the_sweep_scopes_its_best_row_claim_to_schema_valid_bands() -> None:
+    """★ M-56: the shipped report contradicted its own arithmetic.
+
+    It read "no α clears the 56/78 = 0.718 oracle ceiling — the best row here reaches
+    59/78 = 0.756", because `best` was taken over ALL sweep rows while the ceiling is fitted
+    over valid bands only, and an inverted row's count is inflated by the inversion itself.
+
+    The fixture reproduces that exact shape: the highest-scoring row is INVERTED and beats the
+    ceiling, while the best valid row does not. A correct section must quote the valid row.
+    """
+    cal = Calibration(
+        alpha=0.10,
+        band=Band(
+            tau_low=0.8365, tau_high=0.7157, n_calibration=55, n_eval=23,
+            achieved={"no": (11, 12), "yes": (5, 6), "borderline": (0, 5)}, inverted=True,
+        ),
+        oracle=(56, 78),
+        alpha_sweep=[
+            (0.05, 0.8975, 0.6546, True, 59, 78),   # inverted AND above the ceiling
+            (0.10, 0.8365, 0.7157, True, 56, 78),
+            (0.20, 0.7886, 0.8101, False, 51, 78),  # the best VALID row
+            (0.25, 0.7356, 0.8295, False, 55, 78),  # ...and a better valid one
+        ],
+        inverted_seeds=(5, 5),
+    )
+    report = "\n".join(_alpha_sweep_block(cal))
+
+    assert "0.705" in report, "the best VALID row (55/78) is the one the claim may quote"
+    assert "59/78 = 0.756 at α" not in report, (
+        "an inverted row was quoted as the best — the comparison M-56 exists to prevent"
+    )
+    assert "schema-valid" in report
+    assert "†" in report, "inverted rows must be marked as non-comparable"
+    assert "unsatisfiable" in report, "the section must say why they are not comparable"
+
+    # The inflated figure is still PUBLISHED — suppressing a real computation is the other
+    # failure mode. It appears in the table; it just may not be called best.
+    assert "59/78" in report
+
+
+def test_the_calibration_section_does_not_assert_a_finding_the_numbers_contradict() -> None:
+    """A well-ordered corpus must NOT print the inversion prose.
+
+    This is the negative control for the whole section. An earlier draft hardcoded its
+    diagnosis, so it kept printing a finding after the finding stopped being true — the exact
+    defect class this repo keeps catching in its own prose. Derived verdicts are testable;
+    hardcoded ones are not, which is why this test can exist at all.
+    """
+    cal = Calibration(
+        alpha=0.10,
+        band=Band(0.30, 0.70, 50, 20, achieved={"yes": (6, 6)}, inverted=False),
+        spread={"tau_low": (0.29, 0.31), "tau_high": (0.69, 0.71)},
+        score_summary={
+            "no": {"n": 20, "min": 0.01, "median": 0.15, "max": 0.28},
+            "borderline": {"n": 10, "min": 0.35, "median": 0.50, "max": 0.65},
+            "yes": {"n": 20, "min": 0.75, "median": 0.90, "max": 0.99},
+        },
+        auc=1.0,
+        oracle=(50, 50),
+        alpha_sweep=[(0.10, 0.30, 0.70, False, 50, 50)],
+        overlap={
+            "yes_min": 0.75,
+            "yes_n": 20,
+            "no_max": 0.28,
+            "no_n": 20,
+            "no_at_or_above_tau_high": 0,
+            "yes_below_tau_low": 0,
+        },
+        inverted_seeds=(0, 5),
+    )
+    section = "\n".join(_calibration_section(cal))
+    assert "INVERTS" not in section
+    assert "INVERTED" not in section
+    assert "Band order valid" in section
+    assert "no seed inverted" in section
+    assert "They do, in this run" in section
+    # The seeded-τ consequence still holds: this band is a proposal, not applied (04 §7 step 4).
+    assert "no figure in this report derives from a seeded τ" in section
 
 
 def test_report_names_every_unscored_detector_and_its_lost_positives() -> None:
@@ -579,3 +741,95 @@ def test_frozen_v1_modules_are_byte_identical_to_their_source_commit() -> None:
             f"{frozen}.py no longer contains {original}.py from {source[:7]} verbatim — "
             "the v1 baseline has drifted and every v1 figure is now unreproducible"
         )
+
+
+# ---------------------------------------------------------------------------
+# ADR-033 state (c) — implemented but unloadable, reported not scored
+# ---------------------------------------------------------------------------
+
+
+def test_the_partition_loses_no_detector_and_duplicates_none() -> None:
+    """`SCORED` ⊎ `DEMOTED` must reconstruct `IMPLEMENTED` exactly.
+
+    Rule 1 is "measured or absent", and a detector that fell out of both lists would be
+    neither: silently dropped from the report while every stated total still balanced.
+    """
+    assert [d.name for d in SCORED] + [d.name for d in DEMOTED] == [
+        d.name for d in IMPLEMENTED
+    ]
+    assert not {d.name for d in SCORED} & {d.name for d in DEMOTED}
+
+
+@requires_ml
+def test_this_host_scores_everything_it_implements() -> None:
+    """Documents the local truth and guards the inert case.
+
+    The three shipped detectors are regex passes that import nothing, so a non-empty
+    `DEMOTED` here would mean the probe is inventing absences and suppressing real
+    measurements — a silent loss of coverage in the eval report.
+    """
+    assert UNLOADABLE == {}
+    assert DEMOTED == ()
+    assert [d.name for d in SCORED_V1] == [d.name for d in V1_BASELINE]
+
+
+def test_an_unloadable_detector_is_demoted_out_of_scoring(monkeypatch) -> None:
+    """★ The branch, exercised in the only direction a healthy host can exercise it.
+
+    `UNLOADABLE` is patched — the probe's *result*, not the import system. That is the
+    opposite direction from what ADR-033 rule 4 forbids: rule 4 bars faking a load to make
+    an absent detector look present, which would launder a coverage claim. Declaring a
+    present detector absent cannot launder anything, and the probe itself is tested against
+    a genuinely missing module in `tests/test_detector_availability.py`.
+    """
+    monkeypatch.setattr("eval.run_all.UNLOADABLE", {"tier1_pii": "some_dependency"})
+    scored, baselines, rows = _demote_unloadable()
+
+    assert "tier1_pii" not in {d.name for d in scored}
+    assert "tier1_pii" not in {d.name for d in baselines}, "the v1 baseline goes too"
+    assert [r.name for r in rows] == ["tier1_pii"]
+
+
+def test_the_demotion_reason_names_the_dependency_and_not_a_missing_implementation(
+    monkeypatch,
+) -> None:
+    """The two states must not collapse into one sentence in the report.
+
+    "not implemented" would be false — the detector exists and was scored on the last host
+    — and a reader comparing two reports would conclude the code regressed rather than that
+    the environment differs.
+    """
+    monkeypatch.setattr("eval.run_all.UNLOADABLE", {"numeric_claims": "sentence_transformers"})
+    _, _, rows = _demote_unloadable()
+
+    assert "sentence_transformers" in rows[0].reason
+    assert "unloadable" in rows[0].reason.lower()
+    assert "not implemented" not in rows[0].reason.lower()
+
+
+def test_the_demotion_reason_is_built_from_the_probe_not_typed(monkeypatch) -> None:
+    """"Consumes the same state" (Ruling 2 semantics 3), pinned.
+
+    A hand-written dependency name beside `REQUIREMENTS` is two declarations that can
+    disagree, and the prose one is the one nobody updates.
+    """
+    monkeypatch.setattr("eval.run_all.UNLOADABLE", {"tier1_blocklist": "a_renamed_package"})
+    _, _, rows = _demote_unloadable()
+    assert "a_renamed_package" in rows[0].reason
+
+
+@requires_ml
+def test_demoted_labels_are_not_claimed_as_covered() -> None:
+    """`IMPLEMENTED_LABELS` gates the end-to-end matrix's covered slice.
+
+    Derived from `SCORED`, so a host missing a dependency cannot report a matrix over labels
+    no detector could emit that run — which would score every one of them as a miss.
+    """
+    assert IMPLEMENTED_LABELS == frozenset(
+        label for dut in SCORED for label in dut.scope
+    )
+    # `DEMOTED` holds `SkippedDetector`, whose label field is `labels` — `scope` belongs to
+    # `DetectorUnderTest`. This read `dut.scope` and raised `AttributeError` on any host with
+    # a missing dependency; on a full-ml host `DEMOTED` is empty, so the loop never ran and
+    # the assertion passed VACUOUSLY. The bug and its invisibility had the same cause.
+    assert not {label for dut in DEMOTED for label in dut.labels} & IMPLEMENTED_LABELS

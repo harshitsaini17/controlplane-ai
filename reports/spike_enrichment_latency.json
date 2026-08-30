@@ -1,0 +1,141 @@
+{
+  "spike": "04 \u00a72.2 \u2014 the 10 ms aggregate enrichment cap, measured",
+  "code": {
+    "commit": "af57dd5ca099555b8c40aa7833ed58192a3cb4cd",
+    "dirty": false
+  },
+  "budget_ms": 10.0,
+  "span_counts": [
+    1,
+    2,
+    3,
+    4,
+    8
+  ],
+  "quiet_gate_polls": [
+    {
+      "load1": 1.13,
+      "waited_s": 0.0
+    },
+    {
+      "load1": 1.03,
+      "waited_s": 15.0
+    }
+  ],
+  "quiet_gate_waited_s": 30.0,
+  "quiet_gate_timed_out": false,
+  "load_at_process_start": {
+    "load1": 0.88,
+    "load5": 1.21,
+    "load15": 1.19,
+    "cpus": 12
+  },
+  "citability": {
+    "gate_reads": "load1",
+    "quiet_max": 1.0,
+    "margin": 0.12,
+    "longer_averages_also_inside": false
+  },
+  "cold": {
+    "first_call_ms": 1900.6,
+    "n": 1,
+    "note": "import spacy + spacy.load + deferred first inference; paid by warm() at boot"
+  },
+  "window": {
+    "chars": 114,
+    "n": 200,
+    "p50": 4.23,
+    "p99": 6.304,
+    "max": 8.319,
+    "percentiles_resolved": true,
+    "p99_resolves_off_the_max": true
+  },
+  "curve": [
+    {
+      "spans": 1,
+      "chars": 114,
+      "n": 200,
+      "total_p50": 4.583,
+      "total_p99": 6.033,
+      "total_max": 7.843,
+      "per_span_p50": 4.583,
+      "enriched_p50": 1.0,
+      "skipped_per_call": 0.0,
+      "percentiles_resolved": true,
+      "p99_resolves_off_the_max": true
+    },
+    {
+      "spans": 2,
+      "chars": 129,
+      "n": 200,
+      "total_p50": 8.79,
+      "total_p99": 10.513,
+      "total_max": 10.583,
+      "per_span_p50": 4.395,
+      "enriched_p50": 2.0,
+      "skipped_per_call": 0.0,
+      "percentiles_resolved": true,
+      "p99_resolves_off_the_max": true
+    },
+    {
+      "spans": 3,
+      "chars": 144,
+      "n": 200,
+      "total_p50": 13.786,
+      "total_p99": 15.239,
+      "total_max": 16.245,
+      "per_span_p50": 4.595,
+      "enriched_p50": 3.0,
+      "skipped_per_call": 0.035,
+      "percentiles_resolved": true,
+      "p99_resolves_off_the_max": true
+    },
+    {
+      "spans": 4,
+      "chars": 159,
+      "n": 200,
+      "total_p50": 14.518,
+      "total_p99": 16.244,
+      "total_max": 18.36,
+      "per_span_p50": 3.63,
+      "enriched_p50": 3.0,
+      "skipped_per_call": 1.415,
+      "percentiles_resolved": true,
+      "p99_resolves_off_the_max": true
+    },
+    {
+      "spans": 8,
+      "chars": 221,
+      "n": 200,
+      "total_p50": 11.767,
+      "total_p99": 13.295,
+      "total_max": 13.879,
+      "per_span_p50": 1.471,
+      "enriched_p50": 2.0,
+      "skipped_per_call": 6.0,
+      "percentiles_resolved": true,
+      "p99_resolves_off_the_max": true
+    }
+  ],
+  "load_at_end": {
+    "load1": 1.14,
+    "load5": 1.25,
+    "load15": 1.21,
+    "cpus": 12
+  },
+  "verdict": {
+    "status": "CAP HOLDS",
+    "spans_bounded": true,
+    "span_ceiling": 3,
+    "worst_enriched": 3.0,
+    "time_sublinear": true,
+    "sublinear_basis": "Comparison value is k x the k=1 window P50. The window IS the sentence, and the sentence grows with k, so a k=8 window costs more than the k=1 window this figure uses \u2014 the unbounded cost is therefore UNDERSTATED and the check is conservative (it is harder to pass than a same-k comparison would be). Stated because the same growth is why `enriched` can fall as k rises: at larger k, fewer of the more-expensive windows fit inside the budget.",
+    "top_k": 8,
+    "top_k_total_p99_ms": 13.295,
+    "unbounded_cost_ms": 33.84,
+    "worst_total_p99_ms": 16.244,
+    "overshoot_ms": 6.244,
+    "overshoot_is_by_design": "The budget is checked after each window, so one window may start while the call is still inside budget and finish outside it. Checking first would let a slow pipeline enrich nothing, making the stage unreachable rather than degraded. The overshoot is therefore reported, not gated.",
+    "detail": "enriched at most 3 spans (ceiling 3 = 2 fitting + 1 overshoot); at k=8 held 13.295 ms against 33.840 ms unbounded; worst total P99 16.244 ms = budget + 6.244 ms of by-design overshoot"
+  }
+}

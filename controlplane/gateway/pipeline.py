@@ -27,22 +27,31 @@ Two things this module deliberately does not do:
 from __future__ import annotations
 
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from controlplane.audit.records import serialize_detectors
+from controlplane.cost import ledger as cost_ledger
+from controlplane.detectors import conversation as conversation_mod
+from controlplane.detectors import cost as cost_mod
+from controlplane.detectors import entity_enricher
 from controlplane.detectors import numeric_claims as numeric_claims_mod
+from controlplane.detectors import rag_grounding as rag_grounding_mod
 from controlplane.detectors import tier1_patterns
+from controlplane.detectors import tier2_injection as tier2_injection_mod
+from controlplane.detectors import tier2_toxicity as tier2_toxicity_mod
 from controlplane.detectors.base import (
-    BUDGETS_MS,
+    CostView,
     Detector,
     DetectorContext,
     DetectorFailure,
     Signal,
     Stage,
+    ceiling_ms,
     run_with_budget,
 )
+from controlplane.detectors.windowing import windows_for_tokens
 from controlplane.gateway.ingress import ResolvedRequest
 from controlplane.policy.actions import Outcome, apply_input_verdict, apply_verdict, category_of
 from controlplane.policy.engine import (
@@ -50,7 +59,7 @@ from controlplane.policy.engine import (
     Verdict,
     evaluate,
 )
-from controlplane.policy.schema import Policy
+from controlplane.policy.schema import Consistency, Policy
 from controlplane.telemetry import spans
 from controlplane.telemetry.metrics import REGISTRY_DEFAULT, MetricsRegistry
 
@@ -62,6 +71,11 @@ LIVE: dict[str, Detector] = {
     "tier1_pii": tier1_patterns.tier1_pii,
     "tier1_blocklist": tier1_patterns.tier1_blocklist,
     "numeric_claims": numeric_claims_mod.numeric_claims,
+    "tier2_injection": tier2_injection_mod.tier2_injection,
+    "tier2_toxicity": tier2_toxicity_mod.tier2_toxicity,
+    "rag_grounding": rag_grounding_mod.rag_grounding,
+    "cost_budget": cost_mod.cost_budget,
+    "loop_guard": conversation_mod.loop_guard,
 }
 
 #: 04 §2 Stage column, transcribed. Order within a stage is the table's order, so a
@@ -130,6 +144,29 @@ def lane_members(stage: Stage) -> tuple[str, ...]:
     return LANES.get(stage, ())
 
 
+def backstop_units(request: ResolvedRequest) -> int:
+    """Window count the runner sizes its ceiling for — ADR-034 Part C's coarse backstop.
+
+    Derived from the policy's `budget.per_request_max_tokens`, deliberately, and that choice is
+    the whole of Part C's correction. Two rejected alternatives:
+
+    * **The exact count.** Requires tokenizing, and the runner tokenizing would mean the input is
+      tokenized twice per request. Part C rules the *detector* owns the exact envelope, computed
+      from its single tokenization pass, and raises `DetectorTimeout` itself.
+    * **A character upper bound.** Sound for WordPiece (`n_tokens <= n_chars`) and the clause's
+      first draft, withdrawn on measurement: chars/token runs 1.00 to 800 against a corpus median
+      of 4.29, so at the bound a ~5.5 s envelope becomes a ~24 s ceiling on typical text (M-31).
+      It also fails outright under byte-level BPE, so it would break silently on a checkpoint swap.
+
+    So this is the *policy bound*, not the request's length: a hard number the gateway already
+    holds and can read for free. It over-provisions on short inputs by design — the tier that
+    fires on a merely-slow detector is inside the detector, and this one only catches a hung one.
+    Reading the request's own length here would look tighter and be unsound, since the runner
+    cannot know the token count without paying for it.
+    """
+    return windows_for_tokens(request.policy.budget.per_request_max_tokens)
+
+
 def expected_for(stage: Stage, request: ResolvedRequest) -> tuple[str, ...]:
     """Detectors this request's configuration asks for at `stage` (04 §2 conditions).
 
@@ -142,17 +179,26 @@ def expected_for(stage: Stage, request: ResolvedRequest) -> tuple[str, ...]:
     * `rag_grounding` — 04 §2, "only when request carries `context` docs".
     * `fast_consistency` — ADR-014 via `policy.consistency`; `off` means the check is not
       part of this pipeline at all, and 04 §2.3 says `rag_grounding` covers the plane
-      instead.
+      instead. Compared with `is not Consistency.OFF`, **not** `str(policy.consistency)
+      != "off"` (M-48): `Consistency` is a `(str, Enum)` mixin, so `str(member)` is
+      `'Consistency.OFF'` and that comparison is never true. It was written the broken way
+      here and the narrowing silently never fired, while `availability._uses` — which
+      carries a comment warning about exactly this — had it right. The two now agree.
     * `conv_tracker` — 04 §2 is per-conversation, so no conversation id means no lane.
+    * `loop_guard` — same rule, same clause: 04 §2 calls it a "sliding window per
+      conversation", and a request with no conversation id has no window to slide. It is an
+      *inapplicable* detector rather than one policy switched off, which is the
+      `conv_tracker` precedent — 05 §4 keeps `not_run` answering one question, and listing a
+      detector that could not have applied would report a coverage gap that does not exist.
     """
     policy = request.policy
     out: list[str] = []
     for name in lane_members(stage):
         if name == "rag_grounding" and not request.context_docs:
             continue
-        if name == "fast_consistency" and str(policy.consistency) == "off":
+        if name == "fast_consistency" and policy.consistency is Consistency.OFF:
             continue
-        if name == "conv_tracker" and not request.conversation_id:
+        if name in ("conv_tracker", "loop_guard") and not request.conversation_id:
             continue
         out.append(name)
     return tuple(out)
@@ -166,10 +212,24 @@ class Coverage:
     (FR-AUD-001) but a streaming response is many sentences, so a per-unit list would be
     a list of lists answering a question nobody asks. The question coverage answers is
     "was this check ever applied to this response".
+
+    Three lists, not two (ADR-033), and a detector lands in **at most one**: `ran`,
+    `not_run` (expected, absent in this phase), `unavailable` (implemented, unloadable on
+    this host). The audit write path refuses an overlap outright.
     """
 
     ran: set[str] = field(default_factory=set)
     missing: dict[str, str] = field(default_factory=dict)
+    #: The ADR-033 boot manifest, `{detector: missing dependency}`, injected by the caller
+    #: that owns it (`Gateway`). READ-ONLY here: it is a fact about the process, identical
+    #: for every request of this boot, so accumulating it per request would be recording
+    #: the same finding many times over. What varies is which of these a given request
+    #: *expected* — and that is `unavailable` below.
+    unloadable: Mapping[str, str] = field(default_factory=dict)
+    #: The subset of `unloadable` this request would actually have exercised, `{detector:
+    #: missing}`. Scoped to expectation for the same reason `not_run` is (05 §4): a
+    #: detector no policy on this request would have called is not a coverage gap for it.
+    unavailable: dict[str, str] = field(default_factory=dict)
 
     def note_ran(self, detector: str) -> None:
         self.ran.add(detector)
@@ -178,14 +238,38 @@ class Coverage:
         self.missing.pop(detector, None)
 
     def note_missing(self, detector: str, reason: str = NOT_IMPLEMENTED) -> None:
-        if detector not in self.ran:
-            self.missing[detector] = reason
+        """File an expected-but-absent detector into `not_run` — or `unavailable`.
+
+        The branch is ADR-033's whole point. Both states reach this call site identically,
+        but they are different claims: `not_implemented`
+        says this phase never wrote the detector, while `unavailable` says it exists and
+        this host could not load it. Recording state (c) as `not_implemented` would be a
+        false statement in an append-only table, and recording it as nothing at all would
+        drop a coverage promise silently — the two failures the third state exists to
+        separate. `reason` is ignored on that branch: the manifest names the dependency,
+        which is strictly more than a reason code can say.
+
+        **The two states no longer share one arrival path.** This docstring used to add "(`LIVE`
+        has no entry either way)", which was true while state (c) existed only as absence. A live
+        detector whose dependencies are missing is in `LIVE` *and* unloadable, so `run_lane` now
+        checks the manifest as well as membership — see the two-reasons comment there. The branch
+        below is unchanged by that: it keys on `unloadable`, which is what decides the claim,
+        never on how the caller noticed.
+        """
+        if detector in self.ran:
+            return
+        missing = self.unloadable.get(detector)
+        if missing is not None:
+            self.unavailable[detector] = missing
+            return
+        self.missing[detector] = reason
 
     def serialize(self) -> str:
         """The `detectors_json` value. Sorted, so two identical requests audit identically."""
         return serialize_detectors(
             ran=sorted(self.ran),
             not_run=sorted((d, r) for d, r in self.missing.items()),
+            unavailable=sorted(self.unavailable.items()),
         )
 
 
@@ -197,6 +281,82 @@ class LaneResult:
     failures: tuple[DetectorFailureRecord, ...] = ()
     #: `latency_json` span key -> ms, summed across the detectors sharing that span.
     latency: dict[str, float] = field(default_factory=dict)
+
+
+#: Characters per token for `est_request_tokens`. An ESTIMATE, and the divisor is the
+#: repo's own measurement rather than folklore: M-31 measured chars/token over this
+#: corpus at a **median of 4.29** (range 1.00–800). Rounded DOWN to 4, which biases the
+#: estimate slightly high — for a size cap, over-counting is the direction that fails
+#: visibly (an audit-only flag) instead of silently admitting an oversized request.
+#:
+#: 04 §2's row text says "tokenizer count". This is not that, and the gap is deliberate:
+#: tokenizing every request on the input lane would put a model-backed pass inside a
+#: <1 ms budget, and the only tokenizer in the tree belongs to the Tier-2 ONNX
+#: checkpoints (a *different* vocabulary from any upstream model's, so its count would
+#: be no more authoritative than this one). Every figure derived from it is labelled
+#: `est_` and its evidence carries `source=char_estimate`, so nothing downstream can
+#: mistake it for a measurement. PROVISIONAL — batch review at phase end.
+CHARS_PER_TOKEN = 4
+
+
+def estimate_tokens(messages: Sequence[Mapping[str, Any]]) -> int:
+    """Character-derived token estimate for a whole request body (see `CHARS_PER_TOKEN`).
+
+    Every message, not just the last user turn: `per_request_max_tokens` bounds what this
+    request would cost, and the gateway forwards the whole transcript, so the prior turns
+    are billed too. That is the opposite of `input_lane`'s scanning rule — which reads only
+    the last user turn because earlier turns were already *scored* on their own request —
+    and the two differ because one is measuring spend while the other is judging content.
+    """
+    chars = 0
+    for message in messages:
+        content = message.get("content") if isinstance(message, Mapping) else None
+        if isinstance(content, str):
+            chars += len(content)
+        elif isinstance(content, list):
+            chars += sum(
+                len(part.get("text", ""))
+                for part in content
+                if isinstance(part, Mapping) and isinstance(part.get("text"), str)
+            )
+    return -(-chars // CHARS_PER_TOKEN)  # ceil: a partial token still costs one
+
+
+def cost_view(stage: Stage, request: ResolvedRequest) -> CostView:
+    """Project the cost-plane scalars for `stage` (04 §2 puts both cost rows at `input`).
+
+    **The keyed ledger read happens here, not in the detector**, and `detectors/cost.py`
+    records what that costs a reader of the latency report. The short version: a ledger is
+    keyed by use case, and `DetectorContext` guarantees a detector cannot know its use case
+    (AGENTS.md §9.1).
+
+    Empty for every other stage, so no output-lane sentence pays for a SELECT it has no
+    detector to feed. `CostLedger` caches, so the once-per-request read is amortized further
+    (`ledger.CACHE_TTL_S`).
+    """
+    if stage is not Stage.INPUT:
+        return CostView()
+
+    budget = request.policy.budget
+    ledger = cost_ledger.LEDGER
+    # Recorded before the view is built so `loop_guard` sees the CURRENT turn — a repetition
+    # check that excluded the turn under judgement could never fire on the second of a pair.
+    repeated = ledger.observe_turn(request.conversation_id, last_user_text(request.messages))
+    turns = (ledger.conversation_turns(request.conversation_id)
+             if request.conversation_id else None)
+    spend = ledger.spend_in_window(request.use_case, cost_ledger.LOOP_WINDOW_S)
+    return CostView(
+        ceiling_usd=budget.monthly_usd,
+        spend_usd=ledger.month_spend_usd(request.use_case),
+        # From the rolling window, not the month: it answers "is this figure evidenced or
+        # unknown", and a month of dev-class history would drown the answer for today.
+        priced_requests=spend.priced_requests,
+        per_request_max_tokens=budget.per_request_max_tokens,
+        est_request_tokens=estimate_tokens(request.messages),
+        loop_max_requests_per_min=budget.loop_max_requests_per_min,
+        requests_in_window=turns.requests_in_window if turns else 0,
+        repeated_turn=repeated or bool(turns and turns.repeated_turn),
+    )
 
 
 async def run_lane(
@@ -232,25 +392,51 @@ async def run_lane(
         conversation_id=request.conversation_id,
         blocklist_extra=list(request.policy.blocklist_extra),
         detector_params=dict(request.policy.detector_params),
+        cost=cost_view(stage, request),
     )
 
     signals: list[Signal] = []
     failures: list[DetectorFailureRecord] = []
     latency: dict[str, float] = {}
 
+    # Once per lane, not per detector: it depends on the policy, which is fixed for the request.
+    units = backstop_units(request)
+
     for name in expected_for(stage, request):
         detector = LIVE.get(name)
-        if detector is None:
+        # **Two independent reasons not to run**, and `LIVE` only answers the first.
+        # Membership was a sufficient loadability test for exactly as long as ADR-033 state (c)
+        # could only be expressed by absence — true while every live detector was a regex pass
+        # importing nothing. A live detector with real dependencies makes state (c) reachable
+        # *with* membership: on an `.[dev]`-only host the boot manifest correctly reports
+        # `tier2_injection` unloadable, yet this loop would still call `detect()`, and the
+        # ImportError would be filed as a per-request `DetectorFailureRecord` — a transient
+        # fault — when it is a host-level absence the process already knows about, re-discovered
+        # once per request. `note_missing` routes it to `unavailable` instead (ADR-033).
+        if detector is None or name in coverage.unloadable:
             coverage.note_missing(name)
             continue
 
         started = time.perf_counter()
+        outcome = "ok"
+        attributable: list[float] = []
         try:
-            produced = await run_with_budget(detector, ctx, BUDGETS_MS[name])
+            # `ceiling_ms`, never `BUDGETS_MS[name]`: a parametric entry is an object, and
+            # indexing the mapping here handed it straight to `wait_for` — which surfaced as
+            # `DetectorError: raised TypeError` on the first multi-window detector to go live,
+            # a budget breach wearing a detector fault's clothes. Flat entries are unaffected by
+            # `units`, so one call site serves both kinds (ADR-034 Part C).
+            produced = await run_with_budget(
+                detector, ctx, ceiling_ms(name, units), attributable_out=attributable
+            )
         except DetectorFailure as exc:
+            outcome = "fault"
             failures.append(
                 DetectorFailureRecord(
-                    detector=name, error_class=exc.error_class, stage=stage
+                    detector=name,
+                    error_class=exc.error_class,
+                    attributable_ms=exc.attributable_ms,
+                    stage=stage,
                 )
             )
         else:
@@ -259,7 +445,19 @@ async def run_lane(
             elapsed = (time.perf_counter() - started) * 1000.0
             # Recorded even when the detector faulted: a timeout consumed real wall-clock,
             # and hiding it would make the budget it breached invisible in the histogram.
-            registry.observe("cp_detector_latency_ms", elapsed, detector=name)
+            # ADR-036 Amendment 1 (A2): now LABELLED by outcome rather than merged, so a fault
+            # and a budget breach can never read as the same event counted twice. That collapse
+            # was live — `tier2_toxicity` published a P99 over budget *and* 2 faults, where the
+            # top 1% of n=283 is ~3 samples and nothing in the series could separate them.
+            registry.observe("cp_detector_latency_ms", elapsed, detector=name, outcome=outcome)
+            # The NFR-P-002 instrument (ADR-036 Amendment 1). Present whenever a worker
+            # measured in-thread time — INCLUDING a call that breached, because
+            # `run_with_budget` records before it raises. Were it otherwise, the only samples
+            # able to fail the gate would be the ones the gate never sees, and NFR-P-002 would
+            # be structurally unfailable. Absent for a hang and a crash, where no in-thread
+            # figure exists and a zero would be a measurement nobody made.
+            for value in attributable:
+                registry.observe("cp_detector_attributable_ms", value, detector=name)
             key = SPAN_OF.get((stage, name))
             if key is not None:
                 latency[key] = latency.get(key, 0.0) + elapsed
@@ -426,10 +624,15 @@ def unit_stage(policy: Policy) -> Stage:
     return Stage.OUTPUT_SENTENCE if policy.streaming else Stage.OUTPUT_FULL
 
 
-def gateway_overhead_ms(
+def total_attributable_overhead_ms(
     *, total_ms: float, upstream_ms: float, held_ms: float, streaming: bool
 ) -> float:
-    """`gateway_overhead_ms` per the **normative** 06 §4 definition. Two formulas, two paths.
+    """`total_attributable_overhead_ms` per the **normative** 06 §4 definition. Two formulas, two paths.
+
+    Renamed from `gateway_overhead_ms` by ADR-030 — **the formula is unchanged**; it lost
+    its target, not its visibility, and the old name read as the headline. The function is
+    renamed with the key deliberately: a helper still called `gateway_overhead_ms` while
+    writing the new key is the exact drift M-20 was filed for.
 
     * **non-streaming** — "total wall-clock − upstream call duration". A subtraction, and
       it is exact: the request is either our work or the one blocking call.
@@ -451,10 +654,15 @@ def gateway_overhead_ms(
     return max(0.0, held_ms)
 
 
-def note_enrichment(
-    signals: Iterable[Signal], coverage: Coverage
+async def enrich_lane(
+    lane: LaneResult,
+    text: str,
+    request: ResolvedRequest,
+    coverage: Coverage,
+    *,
+    metrics: MetricsRegistry | None = None,
 ) -> None:
-    """Record `entity_enricher` coverage (04 §2.2, ADR-011).
+    """Run the 04 §2.2 enrichment stage over `lane` and record its coverage. Mutates `lane`.
 
     Not a lane member — 04 §2.2 makes enrichment its own stage between detection and the
     policy engine — so `LANES` rightly omits it and `expected_for` never yields it. But it
@@ -467,13 +675,34 @@ def note_enrichment(
     When no span-bearing `hallucination.*` signal exists, enrichment was not expected and
     is therefore neither `ran` nor `not_run` — the same rule that keeps a policy-disabled
     detector out of the list (05 §4).
+
+    **Running the stage and claiming its coverage are one call, deliberately.** These were
+    two: a `note_enrichment` that recorded the gap, with no enricher to run. Left split,
+    the first request to enrich would have recorded `not_run` for a stage that had just
+    run — a false statement in an append-only table, which is the defect ADR-033's third
+    state exists to prevent, one column over. Fusing them removes the ordering a caller
+    could get wrong rather than documenting it.
+
+    The `unloadable` branch is checked **before** calling the enricher, not after catching
+    its failure: on an `.[dev]`-only host the answer is already in the boot manifest, and
+    `note_missing` routes it to `unavailable` — "exists, this host could not load it" —
+    where an attempt-then-fail would report the vaguer `enrichment_failure` for a
+    condition the process knew at boot. A failure *after* that check is a runtime fault,
+    and 04 §2.2 gives it its own counter rather than a coverage entry.
     """
-    if any(
-        signal.span is not None
-        and any(label.startswith("hallucination.") for label in signal.labels)
-        for signal in signals
-    ):
-        coverage.note_missing("entity_enricher")
+    if not any(entity_enricher.is_enrichment_target(signal) for signal in lane.signals):
+        return
+
+    if entity_enricher.NAME in coverage.unloadable:
+        coverage.note_missing(entity_enricher.NAME)
+        return
+
+    lane.signals = tuple(
+        await entity_enricher.enrich(
+            list(lane.signals), text, use_case=request.use_case, metrics=metrics
+        )
+    )
+    coverage.note_ran(entity_enricher.NAME)
 
 
 def clamp_latency(latency: dict[str, Any]) -> dict[str, Any]:

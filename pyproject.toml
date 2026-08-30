@@ -23,6 +23,26 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest==8.3.4",
+    # ADR-035 CORRECTION of the comment that stood here. It read:
+    #
+    #   "ADR-031: graph export tooling for `eval/spike_tier2_models.py`. Deliberately dev-only
+    #    and NOT in `ml` — it BUILDS the ONNX graph, it does not serve it, and `onnxruntime`
+    #    (which does) carries no dependency on it."
+    #
+    # Right in isolation, wrong in composition. `onnxruntime` genuinely does not depend on
+    # `onnx` — but ADR-031's no-checked-in-artifact stance means **serving builds**: the graph
+    # is exported at first use, so the build toolchain is on the serve path by construction.
+    # An `.[ml]` host therefore passed ADR-033's probe and then failed per-request
+    # (`[D2-tier2-served-graph-is-unbuildable-on-the-ml-extra]`). `onnx` has moved to `ml`.
+    #
+    # `onnxscript` stays here, and is NOT in the measured import set: `torch.onnx.export(...,
+    # dynamo=False)` uses the legacy TorchScript exporter, which does not import it (verified by
+    # masking it — the build succeeds for both checkpoints). It is retained as the escape hatch
+    # if that path ever moves to the dynamo exporter. Logged as M-32.
+    #
+    # `optimum` is deliberately absent: its onnxruntime extra fails on torch 2.13 and
+    # downgrades transformers as a side effect.
+    "onnxscript==0.7.1",
 ]
 # The 02 §8 model stack. Split into an extra, not dropped: Phase 1 (schema, policies,
 # audit DB, tests) needs none of it, and `sentence-transformers` pulls torch — install
@@ -32,6 +52,23 @@ ml = [
     "sentence-transformers==3.3.1",  # 02 §8: MiniLM embeddings (consistency, router)
     "spacy==3.8.16",           # 02 §8 + ADR-011: en_core_web_sm person-entity enrichment
                                # 3.8.7+ required for Python 3.14 (earlier caps at <3.13).
+    # ADR-031 (02 §8 "New deps require an ADR note"): the Tier-2 checkpoints are served on
+    # ONNX Runtime, which is what puts them inside the 04 §2 <25 ms budget — eager PyTorch
+    # misses it for every candidate measured. `transformers` is pinned EXPLICITLY even
+    # though `sentence-transformers` already pulls it: the tier2 detectors import it
+    # directly, and leaving a direct dependency unpinned is how 4.57.6 silently became
+    # 4.53.3 once already this phase (an `optimum` install resolved it downward).
+    "onnxruntime==1.29.0",     # ADR-031: int8 inference for both tier2 detectors
+    "transformers==4.57.6",    # ADR-031: direct import; pinned against silent downgrade
+    # ADR-035: on the SERVE path, not merely the build path. ADR-031 keeps no checked-in
+    # graph, so a serving host exports and quantizes at first use, and both halves of that
+    # (`torch.onnx.export`, `onnxruntime.quantization.quantize_dynamic`) import `onnx`.
+    # Empirically the ONLY addition `.[ml]` needs: `ml_dtypes` arrives as onnx's own
+    # requirement, and `onnxscript` is not imported by the legacy exporter path. Resolution
+    # verified on py3.12 and py3.14 with no version changes to any other pin — the downgrade
+    # failure mode that `optimum` caused does not occur here.
+    # `tests/test_ml_extra_closure.py` is the permanent guard; do not move this line back.
+    "onnx==1.22.0",
 ]
 # ADR-007 (Accepted 2026-08-24, Q-03): Streamlit dashboard reading SQLite.
 dashboard = [

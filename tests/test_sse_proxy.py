@@ -403,14 +403,18 @@ def test_a_mid_stream_failure_is_not_retried(config, monkeypatch) -> None:
 def test_an_unbound_tier_is_refused_not_substituted(config) -> None:
     """★ ADR-009's premise is that the frontier tier costs strictly more (ADR-029).
 
-    Quietly serving `frontier` for an unbound `small` would corrupt the exact comparison
+    Quietly serving `small` for an unbound `frontier` would corrupt the exact comparison
     the cost plane exists to make — and it would do so in the *flattering* direction, by
-    pricing an escalation as if it had been routed cheap. `ollama-local` ships with both
-    tiers null (SL-4). The ratio is deployment-specific (2.0x on the shipped gpt-oss pair,
-    not the retired llama pair's ~12x); the substitution is wrong at any ratio.
+    pricing an escalation as if it had been routed cheap. `ollama-local` binds `small` since
+    SL-4 closed and leaves `frontier` null, so the unbound tier under test moved; the
+    direction above is the one the substitution would actually take. The ratio is
+    deployment-specific (2.0x on the shipped gpt-oss pair, not the retired llama pair's
+    ~12x); the substitution is wrong at any ratio.
     """
     with pytest.raises(UpstreamError, match="binds no model to tier"):
-        UpstreamDispatcher(config).resolve_model("small", provider(config, "ollama-local"))
+        UpstreamDispatcher(config).resolve_model(
+            "frontier", provider(config, "ollama-local")
+        )
 
 
 @pytest.mark.parametrize("tier,expected", [

@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ControlPlane.ai — real-time AI oversight gateway</title>
+<link rel="stylesheet" href="cp.css"></head>
+<body>
+<div class="bar">Accenture Innovation Challenge 2026 — every figure traces to a committed report.</div>
+<nav class="nav">
+  <a class="brand" href="index.html">ControlPlane<b>.ai</b></a>
+  <ul>
+    <li><a class="lnk" href="index.html" aria-current="page">Overview</a></li>
+    <li><a class="lnk" href="dashboard.html">Console</a></li>
+    <li><a class="lnk" href="chat.html">Test chat</a></li>
+  </ul>
+  <a class="btn" href="chat.html">Run a request</a>
+</nav>
+
+<header class="wrap sec">
+  <p class="ml">Performance · Cost · Responsibility</p>
+  <h1 class="hero" style="margin-top:var(--s-xl)">Every model response, judged before it reaches the user.</h1>
+  <p class="lead" style="margin-top:var(--s-xl)">ControlPlane.ai is a reverse proxy between an application and its
+  LLM provider. It intercepts responses at sentence granularity, scores them across three planes, and routes each one
+  through a policy decision — pass, edit, block, or escalate. The policy is configuration, not code.</p>
+  <div style="display:flex;gap:var(--s-md);flex-wrap:wrap;margin-top:var(--s-xl)">
+    <a class="btn" href="chat.html">Send a live request</a>
+    <a class="btn-t" href="dashboard.html">Open the verdict console</a>
+  </div>
+</header>
+
+<section class="wrap sec-sm">
+  <div class="band band-navy">
+    <p class="ml">The thesis</p>
+    <h2 class="h-prod" style="margin-top:var(--s-lg);max-width:24ch">One response. Three policies. Three different verdicts.</h2>
+    <p style="max-width:62ch;margin-top:var(--s-lg);color:rgba(255,255,255,.82)">The same assistant sentence containing
+    a customer's SSN is <strong>edited</strong> under the support-bot policy, <strong>blocked</strong> under the
+    HR-copilot policy, and <strong>escalated</strong> to a human under the finance-advisor policy. Nothing about the
+    detectors changes between those three runs — only the YAML.</p>
+    <div class="grid g3" style="margin-top:var(--s-xl)">
+      <div><span class="v v-edit"><span class="dot"></span>EDIT</span>
+        <p class="cap" style="margin-top:var(--s-md)"><code class="mono">support_bot</code> — redact the span, deliver the rest.</p></div>
+      <div><span class="v v-block"><span class="dot"></span>BLOCK</span>
+        <p class="cap" style="margin-top:var(--s-md)"><code class="mono">hr_copilot</code> — withhold and substitute the fallback.</p></div>
+      <div><span class="v v-escalate"><span class="dot"></span>ESCALATE</span>
+        <p class="cap" style="margin-top:var(--s-md)"><code class="mono">finance_advisor</code> — quarantine for human review.</p></div>
+    </div>
+    <p class="src">Reproduce: <code class="mono">python -m pytest tests/test_gateway_app.py -k beat4</code> · dataset case <code class="mono">PII-001</code> (frozen)</p>
+  </div>
+</section>
+
+<section class="wrap sec">
+  <h2 class="h-sec">What ships today</h2>
+  <p class="lead" style="margin-top:var(--s-md)">Six of eleven specified detectors are live and measured. The list below
+  is what runs — not what is planned.</p>
+  <div class="grid g3" style="margin-top:var(--s-xl)">
+    <div class="card"><h3 class="h-feat">Sentence-granular interception</h3>
+      <p class="cap" style="margin-top:var(--s-md)">Streaming responses are checked at each sentence boundary, so a
+      breach is caught mid-stream rather than after delivery. Non-streaming pipelines buffer fully and take one verdict.</p></div>
+    <div class="card"><h3 class="h-feat">Tier-1 pattern detectors</h3>
+      <p class="cap" style="margin-top:var(--s-md)">PII and blocklist matching at P99 <strong>0.133 ms</strong> and
+      <strong>0.020 ms</strong> against 2 ms budgets. Precision 1.000 on PII — it does not over-fire.</p></div>
+    <div class="card"><h3 class="h-feat">Model-backed detectors</h3>
+      <p class="cap" style="margin-top:var(--s-md)">Prompt-injection and toxicity classifiers plus RAG grounding and
+      NER enrichment, quantised to int8 and run on CPU on a dedicated single-worker pool.</p></div>
+    <div class="card"><h3 class="h-feat">Policy engine, four actions</h3>
+      <p class="cap" style="margin-top:var(--s-md)">Multi-label signals converge by documented severity order into
+      pass / edit / block / escalate. Agreement with the specification: <strong>1.000</strong> over 280 cases × 3 policies.</p></div>
+    <div class="card"><h3 class="h-feat">Fail-open / fail-closed per policy</h3>
+      <p class="cap" style="margin-top:var(--s-md)">When a detector times out, the configured failure mode decides —
+      not the runner. The identical fault passes under two policies and escalates under the third.</p></div>
+    <div class="card"><h3 class="h-feat">Append-only audit + human review</h3>
+      <p class="cap" style="margin-top:var(--s-md)">Every request writes one record with signals, verdict, coverage and
+      latency. Escalations land in a review queue. The <em>category</em> of a PII hit is logged, never the value.</p></div>
+  </div>
+</section>
+
+<section class="wrap sec-sm">
+  <div class="card-stone">
+    <h2 class="h-card">Measured, including where it misses</h2>
+    <p class="cap" style="margin-top:var(--s-md);max-width:64ch">Four figures a demo would normally hide. Each one is
+    regenerated by a command in this repository and committed as a report.</p>
+    <div class="grid g3" style="margin-top:var(--s-xl)">
+      <div class="kpi"><span class="ml">User-perceived hold, P99</span><span class="n">27.49<span style="font-size:.4em"> ms</span></span>
+        <span class="cap">Input lane, target &lt; 50 ms — met. n=200.</span></div>
+      <div class="kpi"><span class="ml">Tier-1 PII recall</span><span class="n">0.8852</span>
+        <span class="cap">Target 0.95 — <strong>missed</strong>, and not moved. SL-1.</span></div>
+      <div class="kpi"><span class="ml">Injection recall</span><span class="n">0.150</span>
+        <span class="cap">Precision 1.000. No target was set; nothing tuned. Layered defence, not a solved plane.</span></div>
+    </div>
+    <p class="src">Source: <code class="mono">reports/latency_report.md</code>, <code class="mono">reports/eval_report.md</code>
+    — regenerate with <code class="mono">python -m eval.bench_latency</code> and <code class="mono">python -m eval.run_all</code></p>
+  </div>
+</section>
+
+<section class="wrap sec">
+  <h2 class="h-sec">Not shipped — on the roadmap</h2>
+  <p class="lead" style="margin-top:var(--s-md)">Recorded as standing limitations in
+  <code class="mono">docs/08-open-questions.md</code> rather than left implied.</p>
+  <div class="roadmap" style="margin-top:var(--s-xl)">
+    <ul class="ticks">
+      <li><span class="chip">SL-6</span><span><strong>Self-consistency scorer</strong> — specified, unimplemented. The
+        UC-3 performance plane is covered by RAG grounding instead.</span></li>
+      <li><span class="chip">SL-7</span><span><strong>Calibrated thresholds</strong> — the conformal band inverts on the
+        frozen corpus at every α tried, so no calibrated τ ships. Thresholds remain pre-calibration seeds.</span></li>
+      <li><span class="chip">SL-8</span><span><strong>Injection detector tail latency</strong> — P99 25.348 ms against a
+        25 ms budget. Published as a breach; the budget was not moved.</span></li>
+      <li><span class="chip">roadmap</span><span><strong>Cost plane, conversation tracker, deep audit lane</strong> —
+        semantic entropy and fairness auditing are specified as an async lane and are not built.</span></li>
+    </ul>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap sec-sm">
+    <p class="h-card" style="color:var(--on-dark)">Built spec-first: the documentation preceded the code, deliberately.</p>
+    <p class="micro" style="margin-top:var(--s-lg);max-width:70ch">Round 2 prototype for the Accenture Innovation
+    Challenge 2026. Prototype-grade engineering, production-grade honesty about measurement: no figure appears on this
+    site unless a committed report in <code class="mono">reports/</code> produces it.</p>
+    <p style="margin-top:var(--s-lg)"><a href="dashboard.html">Console</a> · <a href="chat.html">Test chat</a></p>
+  </div>
+</footer>
+</body></html>

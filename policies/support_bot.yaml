@@ -6,14 +6,17 @@
 # distinguishing highlights only.
 schema_version: 1
 use_case: support_bot
-policy_version: 2                # bumped by ADR-024 (pii.api_key -> block)
+policy_version: 3                # bumped by the fast_consistency cut (SL-6); was 2 (ADR-024 pii.api_key -> block)
 geography: EU                    # 01 §3 "EU geography"
 risk_appetite: medium            # 01 §3 "moderate strictness"
 
-streaming: true                  # 01 §3 low latency; consistency is on_sampled (ADR-014)
+streaming: true                  # 01 §3 low latency. Unconstrained by ADR-014 now that
+                                 # consistency is off; it was already legal at on_sampled.
 sampling:
   deep_audit_rate: 0.10          # 01 §3 "deep-audit sampling 10%"
-consistency: "on_sampled"          # 04 §2.3: streaming mode, compared at deep-audit rate
+consistency: "off"                 # SL-6: fast_consistency is CUT to roadmap, so the mode
+                                   # cannot be honoured. Was "on_sampled" (04 §2.3). Quoted
+                                   # per Q-09 — YAML 1.1 reads bare off as false.
 cascade_probe: "on"                # ADR-013 "cascade_probe: on for support_bot"
 
 thresholds:
@@ -44,7 +47,11 @@ actions:
   # explicitly to its real consequence instead of relying on 04 §4.3 step-4 promotion.
   hallucination.ungrounded_claim: edit    # rag_grounding: output_sentence + span -> soften (07 beat 4a)
   hallucination.unsourced_numeric: edit   # numeric_claims: output_sentence + span -> soften
-  hallucination.low_confidence: escalate  # fast_consistency: output_full, span-less by design
+  hallucination.low_confidence: escalate  # fast_consistency: output_full, span-less by design.
+                                 # INERT while SL-6 stands: the only emitter is cut, so no
+                                 # signal carries this label. Mapping retained because the
+                                 # schema requires it and the cut is a roadmap item, not a
+                                 # deletion of the label.
   privacy.person: pass           # ADR-015: not edit-eligible (no 04 §6 transform). Informational
                                  # here; label stays visible in the beat-5 audit JSON.
   cost.budget_exceeded: block

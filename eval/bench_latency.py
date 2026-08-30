@@ -1,15 +1,15 @@
 """Latency benchmark -> reports/latency_report.md.
 
-Implements 06 §4, incl. the NORMATIVE `gateway_overhead_ms` definition and `--check`
+Implements 06 §4, incl. the NORMATIVE `total_attributable_overhead_ms` definition and `--check`
 assertion mode (the NFR-P-001/002 D3 tripwire).
 
 **Every overhead figure is read back out of the audit record, never recomputed here.**
-`controlplane.gateway.pipeline.gateway_overhead_ms` is the single implementation of the 06 §4
+`controlplane.gateway.pipeline.total_attributable_overhead_ms` is the single implementation of the 06 §4
 formula, and 06 §4 says that definition is used by "05 §5, the audit record, and every report
 — no ad-hoc variants". A benchmark that re-derived the number from its own stopwatch would be
 measuring a second, unspecified quantity that happened to look similar, and the two could
 drift without either being wrong on its own terms. So this module fires requests and reads
-`latency_json.gateway_overhead_ms` back out of `audit_records`.
+`latency_json.total_attributable_overhead_ms` back out of `audit_records`.
 
 **Streaming and non-streaming are tabulated separately because they are different
 quantities**, not merely different configurations (06 §4): streaming sums measured hold
@@ -20,7 +20,7 @@ non-streaming table is reported in full and gated by NFR-P-002 alone. Applying a
 threshold to a subtraction-derived figure would be inventing a requirement.
 
 **The headline number is cadence-independent by construction, and that is verified rather
-than asserted.** 06 §4 excludes upstream token wait from `gateway_overhead_ms`, so changing
+than asserted.** 06 §4 excludes upstream token wait from `total_attributable_overhead_ms`, so changing
 the stub's inter-token delay must not move the figure. `--cadence-ms` exists so that property
 is testable (`test_overhead_is_independent_of_token_cadence`), which is also what makes a
 fast default defensible: a slow "realistic" cadence would buy realism only in the one
@@ -39,7 +39,6 @@ import argparse
 import asyncio
 import json
 import platform
-import subprocess
 import sys
 import tempfile
 import time
@@ -52,7 +51,8 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from controlplane.audit.records import canonical_view
-from controlplane.detectors.base import BUDGETS_MS, Stage
+from controlplane.detectors.base import BUDGETS_MS, Stage, budget_ms
+from controlplane.detectors.onnx_models import warm_models
 from controlplane.gateway.app import Gateway, create_app
 from controlplane.gateway.config import (
     TaintedDataError,
@@ -65,6 +65,7 @@ from controlplane.gateway.sentence_buffer import Segmentation
 from controlplane.gateway.sse_proxy import UpstreamResponse
 from controlplane.policy.store import PolicyStore
 from controlplane.telemetry.metrics import MetricsRegistry, percentile
+from eval.host_load import code_commit_cell, git_stamp, load_stamp, quiet_verdict
 from eval.validate_dataset import (
     DATASET_DIR,
     FROZEN_COMMIT,
@@ -234,13 +235,26 @@ class Sample:
     input_hold_ms: float | None = None
 
     @property
-    def reference_delta_ms(self) -> float:
-        """`wall − upstream`: the 06 §4 reference row, explicitly NOT the headline number.
+    def added_time_to_last_byte_ms(self) -> float:
+        """06 §4's `added_time_to_last_byte_ms`: `wall − upstream`, from the client vantage.
 
-        For a streaming pipeline this exceeds `overhead_ms` by the relay and transport time
-        that is neither a per-sentence hold nor a token wait. `pipeline.gateway_overhead_ms`
-        declines to clamp that gap away and says it belongs here as a reported row, so here it
-        is — as an upper bound a reader can see, rather than a discrepancy they have to infer.
+        **This property IS that figure, not an approximation of it** (ADR-030 Amendment 1).
+        The name previously used here was `reference_delta_ms`, and the amendment absorbed the
+        two into one: the quantity 06 §4 defines is client-observed last-byte time minus the
+        same request's upstream duration, and this benchmark — holding a stopwatch around the
+        call — is the only process in this repo that can measure it. The gateway cannot, which
+        is why the key was withdrawn from `latency_json`. Two names for one subtraction invited
+        the reading that one of them was the uncontaminated version.
+
+        Both caveats are permanent and travel with the name:
+
+        * **An upper bound.** It carries `TestClient`'s ASGI transport cost, which is harness
+          overhead a real client would not pay. For a streaming pipeline it therefore exceeds
+          `overhead_ms` by relay and transport time that is neither a per-sentence hold nor a
+          token wait — `pipeline.total_attributable_overhead_ms` declines to clamp that gap
+          away and says it belongs here, so here it is, visible rather than inferred.
+        * **Never the headline number** (06 §4). It contains upstream token cadence, which the
+          gateway does not control, and it is untargeted for that reason.
         """
         return max(0.0, self.wall_ms - self.upstream_ms)
 
@@ -258,6 +272,14 @@ class Batch:
     #: otherwise let the tables be split streaming/non-streaming by a `streaming` flag no
     #: request ever saw. Same defect class as the one fixed in `eval/fault_injection.py`.
     store: PolicyStore | None = None
+    #: Host load at the first and last measured request (ADR-032 Correction 1 item 2). Carried
+    #: on the batch rather than sampled inside `render()`: by report time the load says
+    #: something about rendering, not about the run whose numbers are being published.
+    # Same field name as the spike harness's artifact, deliberately: `eval/host_load.py` exists
+    # so 06 §8's citability rule reads ONE key in either artifact. Corpus loading precedes it;
+    # no measurement does.
+    load_at_process_start: dict[str, Any] | None = None
+    load_at_end: dict[str, Any] | None = None
 
     def by_stream_mode(self, streaming: bool) -> list[Sample]:
         return [s for s in self.samples if s.streaming is streaming]
@@ -315,7 +337,7 @@ def run_batch(
     """
     store = PolicyStore()
     store.load()
-    batch = Batch(store=store)
+    batch = Batch(store=store, load_at_process_start=load_stamp())
 
     with tempfile.TemporaryDirectory() as tmp:
         gateway = Gateway(
@@ -325,6 +347,13 @@ def run_batch(
             db_path=str(Path(tmp) / "bench.db"),
             key_map={},
         )
+        # Build the served graphs BEFORE the first timed request. `TestClient` is not
+        # context-managed (see the docstring), so the lifespan warm-up never fires — and an
+        # ~8 s graph export inside request #1 would be TIMED, silently corrupting every
+        # percentile this harness publishes. Warming here is not a tuning choice: it puts the
+        # one-time provisioning cost outside the measured span, where ADR-035 item 4 already
+        # says it belongs. The build cost is reported at boot, not folded into a latency figure.
+        warm_models(LIVE)
         client = TestClient(create_app(gateway), raise_server_exceptions=False)
 
         for use_case, case in mix:
@@ -352,12 +381,12 @@ def run_batch(
                 continue
 
             latency = view["latency"]
-            overhead = latency.get("gateway_overhead_ms")
+            overhead = latency.get("total_attributable_overhead_ms")
             if overhead is None:
                 # Recorded as an error rather than skipped silently: a missing overhead value
                 # means the audit write path changed, and a percentile computed over the
                 # survivors would hide that behind a plausible number.
-                batch.errors.append(f"{case['case_id']}/{use_case}: no gateway_overhead_ms")
+                batch.errors.append(f"{case['case_id']}/{use_case}: no total_attributable_overhead_ms")
                 continue
             upstream = float(latency.get("upstream_ms", 0.0))
             batch.samples.append(
@@ -383,6 +412,7 @@ def run_batch(
                     ),
                 )
             )
+    batch.load_at_end = load_stamp()
     return batch
 
 
@@ -490,20 +520,63 @@ def nfr_p001_measurable(batch: Batch) -> bool:
     return any(s.hold_series for s in batch.samples)
 
 
-def detector_stats(batch: Batch) -> dict[str, Stats]:
-    """Per-detector latency percentiles, read from the registry the gateway reported into."""
+def _stats_of_row(row: dict[str, Any]) -> Stats:
+    return Stats(
+        n=int(row["count"]),
+        p50=float(row["p50"]), p95=float(row["p95"]), p99=float(row["p99"]),
+        minimum=float(row["min"]), maximum=float(row["max"]),
+    )
+
+
+def detector_stats(batch: Batch, *, outcome: str = "ok") -> dict[str, Stats]:
+    """Per-detector **WALL-CLOCK** percentiles for one `outcome` — never a budget verdict.
+
+    ADR-036 Amendment 1 partitions this series by `outcome` (A2), which means a detector now
+    has up to TWO rows here. `outcome` selects one rather than combining them, because
+    combining is not available: the snapshot carries precomputed percentiles, and the P99 of a
+    union is not recoverable from two P99s. Selecting is honest; averaging them would publish a
+    figure no sample supports.
+
+    Defaults to `"ok"` so the published wall-clock table describes calls that *returned* —
+    a fault's wall-clock is real and stays published under `outcome="fault"`, but mixing an
+    abandoned timeout into the same percentile as completed work is what made the old series
+    unreadable.
+
+    **Not the NFR-P-002 series.** Use `detector_attributable_stats` for that; this one is the
+    holds' constituent and is published untargeted (ADR-036 item 5).
+    """
     snapshot = batch.metrics.snapshot()
     series = snapshot.get("cp_detector_latency_ms", {}).get("series", [])
     out: dict[str, Stats] = {}
     for row in series:
-        detector = row["labels"]["detector"]
-        if row.get("count"):
-            out[detector] = Stats(
-                n=int(row["count"]),
-                p50=float(row["p50"]), p95=float(row["p95"]), p99=float(row["p99"]),
-                minimum=float(row["min"]), maximum=float(row["max"]),
-            )
+        labels = row["labels"]
+        if labels.get("outcome") != outcome or not row.get("count"):
+            continue
+        out[labels["detector"]] = _stats_of_row(row)
     return out
+
+
+def detector_attributable_stats(batch: Batch) -> dict[str, Stats]:
+    """Per-detector **in-thread CPU** percentiles — the NFR-P-002 series (ADR-036 Am. 1).
+
+    The instrument `run_with_budget` enforces on, and therefore the only series a budget
+    verdict may be rendered against. It exists because the gate previously read wall-clock,
+    which ADR-036 had already rejected: `tier2_injection` published a P99 of 25.569 ms against
+    a 25 ms budget with **zero faults**, which is arithmetically impossible if the gated series
+    were the enforced one — and was the proof it was not
+    (`[D3-nfr-p002-gate-reads-the-clock-adr-036-rejected]`).
+
+    Unlabelled by outcome on purpose: an in-thread figure exists only where a worker measured
+    one. A breaching call IS present (the figure is recorded before the raise), a hang is
+    absent. So absence here means "nothing measured", not "nothing breached".
+    """
+    snapshot = batch.metrics.snapshot()
+    series = snapshot.get("cp_detector_attributable_ms", {}).get("series", [])
+    return {
+        row["labels"]["detector"]: _stats_of_row(row)
+        for row in series
+        if row.get("count")
+    }
 
 
 def detector_faults(batch: Batch) -> dict[str, dict[str, float]]:
@@ -532,16 +605,27 @@ def check_nfr_p002(stats: dict[str, Stats]) -> list[Violation]:
     percentile NFR-P-001 states explicitly, since a budget is a tail guarantee — a detector
     inside budget at the median and over it at P99 is one that breaches under load.
 
-    Note the budgets are *also* enforced at runtime: `run_with_budget` cancels past the budget
-    and raises `DetectorTimeout`. So a P99 at the budget usually means timeouts fired rather
-    than that a call ran long, which is why the report prints the fault count beside these
-    rows — the two readings need different responses.
+    **Feed it `detector_attributable_stats`, never `detector_stats`** (ADR-036 Amendment 1).
+    The budget binds in-thread CPU; wall-clock includes pool queue wait and GIL contention with
+    whatever else shared the lane, so gating on it renders a verdict about lane scheduling and
+    calls it a detector's budget. That mismatch shipped two published VIOLATION rows before it
+    was caught, which is why this docstring names the series rather than leaving it to the
+    caller.
+
+    A P99 at the budget can still coincide with faults, since a breach raises `DetectorTimeout`
+    — but the two are now separable in the wall-clock series' `outcome` label (A2), so the
+    report can say whether a breach and a fault are the same event instead of leaving a reader
+    to guess from counts.
     """
     violations: list[Violation] = []
     for detector, stat in sorted(stats.items()):
-        budget = BUDGETS_MS.get(detector)
-        if budget is None:
+        if detector not in BUDGETS_MS:
             continue
+        # `budget_ms`, never a resolved ceiling (ADR-034 Part C). NFR-P-002 is scoped to the
+        # per-unit figure 04 §2 tabulates; comparing a measured latency against a length-scaled
+        # runner backstop would compare a detector's cost to a liveness guard and call the
+        # result a budget verdict.
+        budget = budget_ms(detector)
         if stat.p99 >= budget:
             violations.append(Violation("NFR-P-002", detector, "P99", budget, stat.p99))
     return violations
@@ -570,8 +654,24 @@ def sentence_counts(cases: Sequence[dict[str, Any]]) -> list[int]:
     return counts
 
 
+def projected_not_yet_live() -> tuple[str, ...]:
+    """Hot-path detectors this projection composes that are **not** live yet.
+
+    Derived, because the prose around the projection kept saying "these detectors do not exist
+    yet" while naming them in a string literal — and that went false the moment `tier2_injection`
+    shipped, in a paragraph the published report renders. A sentence that names a fact must read
+    the fact (the M-36/M-40 lesson applied to report prose rather than to code anchors).
+    """
+    lanes = (*LANES[Stage.INPUT], *LANES[Stage.OUTPUT_SENTENCE])
+    return tuple(sorted({d for d in lanes if d in BUDGETS_MS and d not in LIVE}))
+
+
 def project_tier2(cases: Sequence[dict[str, Any]]) -> dict[str, Any]:
-    """Budget-based forward projection for the two unimplemented tier2 detectors.
+    """Budget-based forward projection for the hot-path detectors that are not live yet.
+
+    **Said "the two unimplemented tier2 detectors" until `tier2_injection` shipped.** It is live
+    and measured now, so the projection's subject is whatever `projected_not_yet_live()` reports
+    rather than a pair named in prose; the arithmetic never depended on the count.
 
     **A projection, not a measurement**, and derived rather than written down: lane
     membership comes from `LANES` and every figure from `BUDGETS_MS`, so a budget or lane
@@ -596,7 +696,14 @@ def project_tier2(cases: Sequence[dict[str, Any]]) -> dict[str, Any]:
     live_inp = [d for d in inp_lane if d in LIVE]
 
     def cost(names: Sequence[str], mode: str) -> float:
-        budgets = [BUDGETS_MS[n] for n in names]
+        # Per-unit budgets (ADR-034 Part C `budget_ms`), which makes this a **single-window**
+        # projection for the input lane — disclosed in the rendered section rather than left
+        # for a reader to infer. `tier2_injection` costs one window's budget here; ADR-032
+        # measures the multi-window series and ADR-030 Amendment 2 publishes it untargeted,
+        # so a projection that silently used 25 ms for a 53-window input would understate the
+        # hold by ~26x. Stating the scope is what keeps this comparable to NFR-P-001, which
+        # Amendment 2 scoped the same way.
+        budgets = [budget_ms(n) for n in names]
         if not budgets:
             return 0.0
         return sum(budgets) if mode == "sum" else max(budgets)
@@ -640,14 +747,20 @@ def project_tier2(cases: Sequence[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _git(*args: str) -> str:
-    try:
-        return subprocess.run(
-            ["git", *args], capture_output=True, text=True, check=True,
-            cwd=Path(__file__).resolve().parents[1],
-        ).stdout.strip()
-    except Exception:  # noqa: BLE001
-        return "unavailable"
+def _load_cell(stamp: dict[str, Any] | None, *, verdict: bool = False) -> str:
+    """One provenance cell for a load stamp; `verdict=True` attaches 06 §8's citability call.
+
+    The verdict is rendered beside the numbers rather than left to the reader: a latency figure
+    measured on a loaded host is not a slightly worse figure, it is a figure of something else,
+    and 06 §8 makes such an artifact non-citable. It is attached to the **start** stamp only —
+    the end stamp is high by construction, because by then the benchmark itself is the load, so
+    a verdict there would fail every honest run.
+    """
+    if not stamp or stamp.get("load1") is None:
+        return f"not recorded — **{quiet_verdict(stamp)}**"
+    cell = (f"{stamp['load1']} / {stamp['load5']} / {stamp['load15']} "
+            f"· {stamp.get('cpus', '?')} CPUs")
+    return f"{cell} — **{quiet_verdict(stamp)}**" if verdict else cell
 
 
 def _row(label: str, stats: Stats | None) -> str:
@@ -703,10 +816,17 @@ def render(
             "were evaluated against"
         )
     dstats = detector_stats(batch)
+    wall_fault = detector_stats(batch, outcome="fault")
+    astats = detector_attributable_stats(batch)
     stream_stats = Stats.of(batch.overheads(streaming=True))
     projection = project_tier2(cases if cases is not None else load_corpus(dataset_dir))
-    head = _git("rev-parse", "HEAD")
-    dirty = _git("status", "--porcelain")
+    # Read once, used by both the NFR-verdict caveat and the projection header, so the two
+    # cannot disagree about which detectors are still hypothetical.
+    pending = projected_not_yet_live()
+    # `eval/host_load.py` owns this now. It was duplicated in FOUR harnesses and had drifted
+    # (differing `cwd`/`timeout`), and the spike artifact recorded no commit at all
+    # (AGENTS.md §7).
+    code = git_stamp()
 
     lines: list[str] = [
         "# Gateway latency benchmark (06 §4)",
@@ -731,11 +851,14 @@ def render(
         + " |",
         f"| Samples recorded | {len(batch.samples)} |",
         f"| Stub cadence | {cadence_ms} ms/token |",
-        f"| Code commit | `{head[:12]}`{' + uncommitted changes' if dirty else ''} |",
+        f"| Code commit | {code_commit_cell(code)} |",
         f"| Python | {platform.python_version()} |",
         f"| Platform | {platform.system()} {platform.release()} · {platform.machine()} |",
         f"| CPU | {platform.processor() or 'unreported'} |",
         f"| Percentile method | linear-interpolated (`telemetry.metrics.percentile`) |",
+        f"| Host load at process start (1/5/15) | "
+        f"{_load_cell(batch.load_at_process_start, verdict=True)} |",
+        f"| Host load at end (1/5/15) | {_load_cell(batch.load_at_end)} |",
         f"| Command | `{command}` |",
         "",
         provenance_note,
@@ -749,7 +872,7 @@ def render(
         "gateway overhead is isolated from provider variance (06 §4). Word-by-word matters: a "
         "single-chunk response would collapse every per-sentence hold into one and report the "
         "overhead of a pipeline nobody runs.",
-        "3. `gateway_overhead_ms` is read from each request's audit record. **Streaming and "
+        "3. `total_attributable_overhead_ms` is read from each request's audit record. **Streaming and "
         "non-streaming are tabulated separately because they are different quantities** — "
         "streaming sums measured hold intervals, non-streaming subtracts the upstream call "
         "from wall-clock (06 §4).",
@@ -805,54 +928,152 @@ def render(
         lines.append(_row(f"{UC_LABEL[uc]} `{uc}`", Stats.of(batch.overheads(uc, streaming=False))))
     lines.append(_row("**all non-streaming**", Stats.of(batch.overheads(streaming=False))))
 
-    ref = Stats.of([s.reference_delta_ms for s in batch.by_stream_mode(True)])
+    ref = Stats.of([s.added_time_to_last_byte_ms for s in batch.by_stream_mode(True)])
     lines += [
         "",
-        "### Reference row — client wall-clock − upstream (streaming)",
+        "### `added_time_to_last_byte_ms` — client wall-clock − upstream (streaming)",
         "",
         "06 §4 requires this be reported **separately and never as the headline number**, so it "
-        "sits here rather than above. It exceeds `gateway_overhead_ms` by relay and "
+        "sits here rather than above. It exceeds `total_attributable_overhead_ms` by relay and "
         "`TestClient` ASGI transport time — neither a per-sentence hold nor a token wait, and "
         "the harness's own cost rather than the gateway's. Treat it as an upper bound.",
         "",
+        "**Measured here, by the client, and not read back from `latency_json`** (ADR-030 "
+        "Amendment 1). The figure is defined as *client-observed* last-byte time minus the "
+        "request's upstream duration, and the gateway has no client vantage: a completed ASGI "
+        "`send()` means handed to the transport, not received. So this row is the quantity "
+        "itself rather than a stand-in for a column the gateway writes — it was previously "
+        "reported under the name `reference_delta_ms`, and the two were one subtraction.",
+        "",
         "| Series | n | P50 | P95 | P99 | min | max |",
         "|---|---|---|---|---|---|---|",
-        _row("wall − upstream (upper bound)", ref),
+        _row("`added_time_to_last_byte_ms` (upper bound)", ref),
         "",
-        "## Per-detector latency vs NFR-P-002 budgets",
+        "## Per-detector budget verdict — NFR-P-002, on the ATTRIBUTABLE series",
         "",
-        "Budgets are also enforced at runtime: `run_with_budget` cancels past budget and raises "
-        "`DetectorTimeout`. A P99 sitting at the budget therefore usually means timeouts fired, "
-        "not that a call ran long — the two need different responses, so the fault count is "
-        "shown beside the percentiles.",
+        "**ADR-036 Amendment 1.** The budget binds detector-**attributable** time — in-thread "
+        "CPU, the same figure `run_with_budget` enforces on. This table is the NFR-P-002 "
+        "verdict and the only place one is rendered. Wall-clock follows below, untargeted.",
+        "",
+        "A breaching call IS in this series: the figure is recorded before the raise. Were it "
+        "otherwise the only samples able to fail the gate would be ones the gate never sees.",
         "",
         "| Detector | Budget | n | P50 | P95 | P99 | max | Faults | Within budget (P99) |",
         "|---|---|---|---|---|---|---|---|---|",
     ]
     faults = detector_faults(batch)
-    for detector, stat in sorted(dstats.items()):
-        budget = BUDGETS_MS.get(detector)
-        verdict = "—" if budget is None else ("yes" if stat.p99 < budget else "**NO**")
+
+    def _fault_cell(detector: str) -> str:
         modes = faults.get(detector, {})
-        fault_cell = (
+        return (
             "0" if not modes
             else f"{int(sum(modes.values()))} ("
                  + ", ".join(f"{m} ×{int(v)}" for m, v in sorted(modes.items())) + ")"
         )
+
+    for detector, stat in sorted(astats.items()):
+        budget = budget_ms(detector) if detector in BUDGETS_MS else None
+        verdict = "—" if budget is None else ("yes" if stat.p99 < budget else "**NO**")
         lines.append(
             f"| `{detector}` | {f'{budget:.0f} ms' if budget else '—'} | {stat.n} "
             f"| {stat.p50:.3f} | {stat.p95:.3f} | {stat.p99:.3f} | {stat.maximum:.3f} "
-            f"| {fault_cell} | {verdict} |"
+            f"| {_fault_cell(detector)} | {verdict} |"
         )
-    absent = sorted(set(BUDGETS_MS) - set(dstats))
-    if absent:
+
+    # Ran, but produced no in-thread figure. A distinct state from "never ran": a hang's worker
+    # never returns, so nothing measured it, and an untested budget must not read as a met one.
+    ran_no_attributable = sorted((set(dstats) | set(wall_fault)) - set(astats))
+    if ran_no_attributable:
         lines += [
             "",
-            f"**Not exercised in this run:** {', '.join(f'`{d}`' for d in absent)}. These are "
-            "unimplemented or policy-gated detectors, so their budgets are untested rather "
-            "than met — the distinction M-10 draws between \"checked, clean\" and \"never "
-            "checked\", applied to a benchmark.",
+            "**Ran, but no in-thread figure:** "
+            + ", ".join(f"`{d}`" for d in ran_no_attributable)
+            + ". A hang's worker never returns, so no attributable time exists to judge — the "
+            "budget is **untested**, not met. Their wall-clock appears below.",
         ]
+
+    lines += [
+        "",
+        "### Superseded verdict — preserved, not deleted",
+        "",
+        "> The run of **2026-08-30** published these two rows as NFR-P-002 violations, rendered "
+        "on **wall-clock** — the clock ADR-036 had already rejected "
+        "(`[D3-nfr-p002-gate-reads-the-clock-adr-036-rejected]`):",
+        ">",
+        "> | Requirement | Detector | Stat | Budget | Measured (wall-clock) |",
+        "> |---|---|---|---|---|",
+        "> | NFR-P-002 | `tier2_injection` | P99 | 25.0 ms | **25.569 ms**, 0 faults |",
+        "> | NFR-P-002 | `tier2_toxicity` | P99 | 25.0 ms | **25.114 ms**, 2 faults |",
+        ">",
+        "> **Superseded by the attributable verdict above.** Kept because both figures are real "
+        "measurements and deleting a published breach to replace it with a friendlier "
+        "instrument is exactly what an instrument change must not be allowed to do "
+        "(AGENTS.md §7). These are a HISTORICAL RECORD of a prior artifact, not this run's "
+        "data — no figure in them is recomputed here.",
+        "",
+        "## Per-detector wall-clock — UNTARGETED (the holds' constituent)",
+        "",
+        "**Not a budget series, and never was a fair one** (ADR-036 item 5): for a pool "
+        "detector this includes queue wait and GIL contention with whatever shared its lane. "
+        "It stays published because it is what the holds are made of, and what a user waits "
+        "for. Percentiles are over calls that **returned**; faulted calls are a separate row "
+        "set below rather than mixed in — the A2 partition, so a fault and a breach can never "
+        "read as one event counted twice.",
+        "",
+        "| Detector | n | P50 | P95 | P99 | max |",
+        "|---|---|---|---|---|---|",
+    ]
+    for detector, stat in sorted(dstats.items()):
+        lines.append(
+            f"| `{detector}` | {stat.n} | {stat.p50:.3f} | {stat.p95:.3f} "
+            f"| {stat.p99:.3f} | {stat.maximum:.3f} |"
+        )
+    if wall_fault:
+        lines += [
+            "",
+            "**Wall-clock of faulted calls** (`outcome=fault`) — published, separately. A "
+            "timeout consumed real time; hiding it would make the breach invisible.",
+            "",
+            "| Detector | n | P50 | P99 | max |",
+            "|---|---|---|---|---|",
+        ]
+        for detector, stat in sorted(wall_fault.items()):
+            lines.append(
+                f"| `{detector}` | {stat.n} | {stat.p50:.3f} | {stat.p99:.3f} "
+                f"| {stat.maximum:.3f} |"
+            )
+
+    absent = sorted(set(BUDGETS_MS) - (set(dstats) | set(wall_fault) | set(astats)))
+    if absent:
+        # Partitioned by the REASON a detector has no row, because the two are different
+        # claims and the earlier single sentence ("unimplemented or policy-gated") went
+        # false for the first stage that was neither. `entity_enricher` is implemented and
+        # runs; it has no row because 04 §2.2 makes enrichment its own stage, so it is in no
+        # `LANES` row and a lane-shaped harness cannot reach it — and its budget is a 10 ms
+        # per-sentence AGGREGATE (M-18) rather than a per-detector lane latency, a different
+        # quantity rather than a missing measurement of this one. Derived from `LANES` so the
+        # next off-lane stage classifies itself instead of being misfiled (M-45).
+        lane_members = {d for names in LANES.values() for d in names}
+        unbuilt = [d for d in absent if d in lane_members]
+        off_lane = [d for d in absent if d not in lane_members]
+        if unbuilt:
+            lines += [
+                "",
+                f"**Not exercised in this run:** {', '.join(f'`{d}`' for d in unbuilt)}. These "
+                "are unimplemented or policy-gated detectors, so their budgets are untested "
+                "rather than met — the distinction M-10 draws between \"checked, clean\" and "
+                "\"never checked\", applied to a benchmark.",
+            ]
+        if off_lane:
+            lines += [
+                "",
+                "**Implemented, but outside this harness:** "
+                + ", ".join(f"`{d}`" for d in off_lane)
+                + ". In no `LANES` row, so no lane benchmark can produce a row for it: its "
+                "budget is untested **here**, which is a narrower claim than untested. Listed "
+                "rather than omitted, because a detector silently missing from a latency "
+                "table reads as one that met its budget.",
+            ]
 
     lines += [
         "",
@@ -877,9 +1098,16 @@ def render(
             "**No violation.** Both requirements were evaluated against emitted series: "
             "NFR-P-001 on the two per-hold series above (ADR-030 scope), NFR-P-002 on the "
             "per-detector budgets. `--check` exits zero on this state and nonzero on any row "
-            "above appearing. **Coverage is what bounds this, not the verdict:** the budgets "
-            "the projection below composes belong to detectors that do not exist yet, so this "
-            "is a pass at the current detector set, not a pass at the documented one."
+            "above appearing. **Coverage is what bounds this, not the verdict:** "
+            + (
+                "the projection below still composes budgets for "
+                + ", ".join(f"`{d}`" for d in pending)
+                + ", which are not live, so this is a pass at the current detector set, not a "
+                "pass at the documented one."
+                if pending
+                else "every hot-path detector with a budget is now live and exercised above, so "
+                "this verdict covers the documented detector set."
+            )
         )
     else:
         lines.append(
@@ -913,9 +1141,18 @@ def render(
         "## Forward projection — what happens when the remaining hot-path detectors land",
         "",
         "**This section is a PROJECTION, not a measurement.** Every figure is arithmetic over "
-        "the 04 §2 declared budgets, not an observation: `tier2_toxicity` and `tier2_injection` "
-        "are unimplemented, so nothing here has been run. It is derived from `LANES` and "
-        "`BUDGETS_MS` rather than written down, so a budget or lane change moves it.",
+        "the 04 §2 declared budgets, not an observation. It is derived from `LANES` and "
+        "`BUDGETS_MS` rather than written down, so a budget or lane change moves it."
+        + (
+            " Still unimplemented, and therefore genuinely unmeasurable here: "
+            + ", ".join(f"`{d}`" for d in pending)
+            + ". Detectors that ARE live appear as measurements in the per-detector table "
+            "above; their budgets are projected here only to keep this arithmetic comparable "
+            "to the pre-ADR-030 figures it is kept to justify."
+            if pending
+            else " Every detector it composes is now live and measured above, so this section "
+            "is retained as the historical basis for ADR-030 rather than as a forecast."
+        ),
         "",
         "This section is also **the evidence that motivated ADR-030**, which re-scoped NFR-P-001 "
         "onto the per-hold series after this arithmetic showed the old per-request target could "
@@ -999,15 +1236,31 @@ def render(
         "sentence-level interception promises — each hold is the delay before *that* sentence "
         "appears — and the total is published untargeted beside it so a reader can see both.",
         "",
-        "**The fit is now unconditional (M-18 / M-19 closed).** It was conditional when ADR-030 "
-        "was accepted: `entity_enricher` was budgeted per *span*, so a heavily-enriched sentence "
-        "composed to `60 + 10k` and crossed the 100 ms per-sentence P99 at **k = 4**, with no doc "
-        "bounding `k`. 04 §2.2 now caps enrichment at **10 ms aggregate per sentence**, so `k` "
-        "leaves the arithmetic entirely, and the policy+action step carries a **combined 5 ms "
-        "budget** instead of sitting untracked inside a targeted quantity. Worst cases become "
-        "30 / 40 / 45 / 75 ms and every row fits. Both caps were ruled where the budget lives "
-        "(04 §2.2) rather than inside the target that needed them — inventing a bound to make "
-        "one's own target fit is the move AGENTS.md §5.4 forbids.",
+        "**The unconditional fit (M-18 / M-19) is now contested — see below.** It was "
+        "conditional when ADR-030 was accepted: `entity_enricher` was budgeted per *span*, so a "
+        "heavily-enriched sentence composed to `60 + 10k` and crossed the 100 ms per-sentence P99 "
+        "at **k = 4**, with no doc bounding `k`. 04 §2.2 now caps enrichment at **10 ms aggregate "
+        "per sentence**, so `k` leaves the arithmetic entirely, and the policy+action step carries "
+        "a **combined 5 ms budget** instead of sitting untracked inside a targeted quantity. Both "
+        "caps were ruled where the budget lives (04 §2.2) rather than inside the target that "
+        "needed them — inventing a bound to make one's own target fit is the move AGENTS.md §5.4 "
+        "forbids.",
+        "",
+        "**ADR-030's worst cases are re-derived under Amendment 3 (2026-08-30), which closed "
+        "`[D1-per-hold-derivation-maxes-detectors-that-share-one-worker]` (08).** ADR-034 Part A "
+        "binds five *named* model detectors to one shared `max_workers=1` pool, so a lane's pool "
+        "users **serialize** and compose as `sum`; only non-pool detectors overlap (`~max`). A "
+        "hold is therefore `max(\u03a3 pool, max(non-pool)) + 5 ms` engine step, and the six rows "
+        "read 30 / 30 / 40 / 70 / 100 / 130 ms \u2014 the context-docs row moved 45 \u2192 70 and "
+        "the `on_sampled` row 75 \u2192 100. **No target moved.** The two rows that no longer fit "
+        "a plausible target (`on_sampled`, with and without context docs) publish "
+        "**untargeted**, following the per-request-sum precedent rather than widening a target to "
+        "admit them. The composition is executable rather than prose: `eval.check_derivations` "
+        "re-derives all six rows from `BUDGETS_MS` and the pool-user set, and on first run it "
+        "caught three pool-sum cells in the amendment's own table that had omitted "
+        "`entity_enricher`. **The measured rows above and the two computed projection readings "
+        "are unaffected**: this section publishes the `sum` and `max` readings side by side, and "
+        "the pool-aware composition lies between them, which is what reporting both was for.",
         "",
         "One adjacency ADR-030 records rather than rounds away: the **enriched typical** row "
         "lands at exactly **40.0 ms** against a strict `< 40` P50. It is not a breach, because "
@@ -1026,7 +1279,7 @@ def render(
         "## Scope and limitations",
         "",
         "**The headline figure is cadence-independent by construction**, because 06 §4 excludes "
-        "upstream token wait from `gateway_overhead_ms`. That is verified, not assumed: "
+        "upstream token wait from `total_attributable_overhead_ms`. That is verified, not assumed: "
         "`test_overhead_is_independent_of_token_cadence` runs the same mix at two cadences and "
         "asserts the figure does not track the change.",
         "",
@@ -1141,7 +1394,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"  {e}", file=sys.stderr)
         return 1
 
-    violations = [*check_nfr_p001(batch), *check_nfr_p002(detector_stats(batch))]
+    # The ATTRIBUTABLE series (ADR-036 Amendment 1) — the gate's whole subject was the
+    # open D3. Passing `detector_stats` here is the defect, not a stylistic choice.
+    violations = [*check_nfr_p001(batch), *check_nfr_p002(detector_attributable_stats(batch))]
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(render(
         batch, dataset_dir=args.dataset_dir, provenance_note=provenance_note,

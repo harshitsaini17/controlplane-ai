@@ -1,0 +1,175 @@
+# ControlPlane.ai — continuous integration (M-21).
+#
+# Runs the four gates AGENTS.md §10 names as the repo's verification surface, on both
+# ends of the supported interpreter range. Nothing here is new verification: every step
+# is a command a contributor runs locally, which is the point — CI catches the case where
+# it passes on the author's machine and nowhere else.
+#
+# ─── CI NEVER WRITES TO reports/ ─────────────────────────────────────────────────────
+# `reports/` is version-controlled *evidence*, not build output (06 §8). A report is
+# citable only when it carries the commit it was generated at and a clean-tree stamp, so
+# a report produced by an ephemeral runner — on unknown hardware, from a detached HEAD —
+# would be a latency figure nobody can reproduce wearing the provenance of one somebody
+# can. Both harnesses therefore run with `--out "$RUNNER_TEMP/..."`, and the final step
+# asserts `reports/` is byte-identical afterwards. The assertion exists because a comment
+# promising this would not survive someone dropping the `--out` flag: the guard fails the
+# build, the comment would not.
+#
+# Committed reports come from a human running the harness on real hardware from a clean
+# tree, per 06 §8. CI's job is to prove the harnesses still *pass*, not to author evidence.
+#
+# Verified locally at the tree this file landed on: py3.12.12 and py3.14.6, full suite
+# exit 0 (964 tests, 0 failures, ~9 s each); fault injection 27/27; bench --check exit 0.
+# The matrix is a measured claim, not an aspiration.
+#
+# ─── TWO JOBS, AND WHY THE SECOND ONE EXISTS ──────────────────────────────────────────
+# `verify` runs the four gates on the light `[dev]` extra. `ml-closure` installs the full
+# `[dev,ml]` stack to run ONE invariant: ADR-035's guard that the `ml` extra can build the
+# tier-2 graph it is expected to serve. That test skips where the model stack is absent, and
+# a permanently-skipped invariant is not an invariant — so `verify` alone would leave
+# `[D2-tier2-served-graph-is-unbuildable-on-the-ml-extra]` free to re-open silently.
+# It is deliberately NOT a matrix job: it is a composition check about the dependency set,
+# not an interpreter-compatibility claim, and it downloads two checkpoints. Resolution across
+# both interpreters is verified separately (ADR-035 item 3, `pip install --dry-run`).
+# It still measures nothing — NFR-P-002 is a CPU-budget claim about real hardware.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false        # a 3.12-only break must not hide a 3.14-only break
+      matrix:
+        python: ["3.12", "3.14"]
+    name: verify (py${{ matrix.python }})
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # The light extra only. The 02 §8 model stack (`[ml]`) is deliberately absent:
+      # it needs CPU-only torch installed first (AGENTS.md §10) and NFR-P-002 is a
+      # CPU-budget claim measured on real hardware, not on a shared runner.
+      - name: Install (dev extra)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Unit + contract suite
+        run: python -m pytest -q
+
+      # 06 §1: the dataset is FROZEN. `--freeze` asserts byte-identity with the approved
+      # state, so an edited fixture fails here rather than silently moving a published rate.
+      - name: Dataset freeze gate
+        run: python -m eval.validate_dataset --freeze
+
+      # 06 §5 — nonzero exit on any failed 04 §5 fail-open/fail-closed invariant.
+      - name: Fault injection (04 §5 invariants)
+        run: python -m eval.fault_injection --out "$RUNNER_TEMP/fault_injection_report.md"
+
+      # 06 §4 — `--check` is the NFR-P-001/002 tripwire; it exits nonzero on a breach.
+      - name: Latency tripwire (NFR-P-001/002)
+        run: python -m eval.bench_latency --check --out "$RUNNER_TEMP/latency_report.md"
+
+      # The enforcement behind the provenance note at the top of this file.
+      - name: Assert reports/ untouched (06 §8 provenance)
+        run: |
+          if [ -n "$(git status --porcelain -- reports/)" ]; then
+            echo "::error::CI modified reports/ — committed evidence must come from a"
+            echo "::error::human run on real hardware from a clean tree (06 §8)."
+            git status --porcelain -- reports/
+            git diff -- reports/
+            exit 1
+          fi
+          echo "reports/ unchanged."
+
+  # ADR-035 — the `ml` extra must be able to BUILD the graph it serves, not just serve it.
+  # This is the only job that installs the model stack, and it runs a single test file.
+  ml-closure:
+    runs-on: ubuntu-latest
+    name: ml extra builds the tier-2 graph (ADR-035)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"        # the verified primary toolchain (AGENTS.md §10)
+
+      # Two checkpoints, ~130 MB of weights, re-downloaded on every run otherwise. Keyed on
+      # this workflow file so a change to the pinned checkpoints or extras busts the cache.
+      - name: Cache HuggingFace hub
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-tier2-${{ hashFiles('.github/workflows/ci.yml', 'pyproject.toml') }}
+          restore-keys: hf-tier2-
+
+      # CPU-only torch FIRST, per AGENTS.md §10: the default index pulls the multi-GB CUDA
+      # stack for no benefit here, and on a shared runner that is most of the job's wall-clock.
+      - name: Install (dev,ml — CPU-only torch first)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -e ".[dev,ml]"
+
+      # The NER model is a SEPARATE artifact from the spacy wheel, and ADR-033 declares
+      # `en_core_web_sm` an import name in its own right (`availability.REQUIREMENTS`). A host
+      # with spaCy but no model is therefore still an ml-incomplete host: `MISSING_ML` would be
+      # non-empty, every `requires_ml` test would skip HERE too, and the job below would report
+      # green having proved nothing. This line is what makes this the host those tests run on.
+      - name: Download the NER model (ADR-011)
+        run: python -m spacy download en_core_web_sm
+
+      # The tests `verify` cannot run, run here at full strength. This is the other half of the
+      # marker in tests/ml_stack.py: skipping them on the light host is only defensible because
+      # this step exists. Several assert an EXACT boot manifest, which holds only where the
+      # injected absence is the only absence — so they are strong here and unrunnable there.
+      - name: ML-gated tests (skipped on the light host, must run here)
+        run: |
+          set -o pipefail
+          python -m pytest -m requires_ml -p no:randomly | tee "$RUNNER_TEMP/mlgated.txt"
+          if grep -qiE "[0-9]+ skipped" "$RUNNER_TEMP/mlgated.txt"; then
+            echo "::error::requires_ml tests SKIPPED on a host that installed [dev,ml]."
+            echo "::error::They are skipped on the light verify job BY DESIGN, so a skip here"
+            echo "::error::means they run in NO job at all — see tests/ml_stack.py."
+            exit 1
+          fi
+          if ! grep -qE "[0-9]+ passed" "$RUNNER_TEMP/mlgated.txt"; then
+            echo "::error::no requires_ml test ran — the marker or its selector is broken."
+            exit 1
+          fi
+
+      # The guard itself. `-p no:randomly` is not needed; the file is self-contained and its
+      # slow build is module-scoped. If this fails with `missing: onnx`, a build dependency
+      # left the `ml` extra and the D2 trap is back — fix the extra, not the test.
+      - name: ADR-035 closure invariant
+        run: python -m pytest tests/test_ml_extra_closure.py -v
+
+      # A skip here means the job proved nothing, which is the exact failure mode this job
+      # exists to prevent. Fail loudly rather than reporting a green tick for a no-op.
+      - name: Assert the invariant actually ran
+        run: |
+          python -m pytest tests/test_ml_extra_closure.py -q 2>&1 | tee /tmp/mlout.txt
+          if grep -qiE "[0-9]+ skipped" /tmp/mlout.txt; then
+            echo "::error::ADR-035 closure tests SKIPPED on a host that installed [dev,ml]."
+            echo "::error::A skipped invariant is not an invariant — see ADR-035 consequence 3."
+            exit 1
+          fi
+          echo "closure invariant ran."

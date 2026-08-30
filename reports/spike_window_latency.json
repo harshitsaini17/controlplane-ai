@@ -1,0 +1,664 @@
+{
+  "spike": "ADR-032 \u2014 full-coverage strided windows for tier2_injection",
+  "model_id": "madhurjindal/Jailbreak-Detector",
+  "budget_ms": 25.0,
+  "backend": "onnx_int8",
+  "filler": "synthetic (deterministic); no corpus text",
+  "window": {
+    "tokens": 104,
+    "overlap": 26,
+    "policy_bound_tokens": 4000
+  },
+  "platform": "Linux-7.1.2-arch3-1-x86_64-with-glibc2.43",
+  "cpu_count": 12,
+  "python": "3.14.6",
+  "onnxruntime": "1.29.0",
+  "load_at_process_start": {
+    "load1": 0.6,
+    "load5": 0.94,
+    "load15": 0.98,
+    "cpus": 12
+  },
+  "code": {
+    "commit": "445ca31dd0872b52e55c07901bb3489c48a986e7",
+    "dirty": false
+  },
+  "runs": [
+    {
+      "threads": 6,
+      "reps": 40,
+      "load_at_phase_start": {
+        "load1": 0.6,
+        "load5": 0.94,
+        "load15": 0.98,
+        "cpus": 12
+      },
+      "model_id": "madhurjindal/Jailbreak-Detector",
+      "params_m": 65.8,
+      "export_s": 1.24,
+      "quantize_s": 1.61,
+      "graph_mb": 66.2,
+      "filler_tokens": 4082,
+      "filler_chars": 22639,
+      "window_tokens": 104,
+      "window_overlap": 26,
+      "window_step": 76,
+      "window_content_tokens": 102,
+      "bound_windows": 53,
+      "bound_coverage_tokens": 4054,
+      "tokenize": {
+        "178": {
+          "n": 40,
+          "calls": 1,
+          "cold_ms": 0.47,
+          "p50": 0.37,
+          "p95": 0.39,
+          "p99": 0.41,
+          "max": 0.42,
+          "percentiles_resolved": true,
+          "tokens": 178,
+          "chars": 978,
+          "windows": 2
+        },
+        "634": {
+          "n": 40,
+          "calls": 1,
+          "cold_ms": 1.41,
+          "p50": 1.49,
+          "p95": 1.67,
+          "p99": 1.83,
+          "max": 1.83,
+          "percentiles_resolved": true,
+          "tokens": 634,
+          "chars": 3511,
+          "windows": 8
+        },
+        "4000": {
+          "n": 40,
+          "calls": 1,
+          "cold_ms": 7.72,
+          "p50": 7.65,
+          "p95": 8.09,
+          "p99": 8.22,
+          "max": 9.14,
+          "percentiles_resolved": true,
+          "tokens": 4000,
+          "chars": 22189,
+          "windows": 53
+        }
+      },
+      "ladder": {
+        "1": {
+          "windows": 1,
+          "covers_tokens": 102,
+          "sequential": {
+            "n": 40,
+            "calls": 1,
+            "cold_ms": 11.99,
+            "p50": 10.92,
+            "p95": 11.7,
+            "p99": 11.87,
+            "max": 12.17,
+            "percentiles_resolved": true
+          },
+          "batched": {
+            "n": 40,
+            "calls": 1,
+            "cold_ms": 11.39,
+            "p50": 11.27,
+            "p95": 11.81,
+            "p99": 12.59,
+            "max": 12.76,
+            "percentiles_resolved": true
+          }
+        },
+        "2": {
+          "windows": 2,
+          "covers_tokens": 178,
+          "sequential": {
+            "n": 40,
+            "calls": 2,
+            "cold_ms": 21.78,
+            "p50": 22.81,
+            "p95": 24.61,
+            "p99": 24.76,
+            "max": 26.53,
+            "percentiles_resolved": true
+          },
+          "batched": {
+            "n": 40,
+            "calls": 1,
+            "cold_ms": 22.76,
+            "p50": 21.21,
+            "p95": 21.77,
+            "p99": 22.53,
+            "max": 22.7,
+            "percentiles_resolved": true
+          }
+        },
+        "4": {
+          "windows": 4,
+          "covers_tokens": 330,
+          "sequential": {
+            "n": 40,
+            "calls": 4,
+            "cold_ms": 45.86,
+            "p50": 45.98,
+            "p95": 48.4,
+            "p99": 48.77,
+            "max": 51.36,
+            "percentiles_resolved": true
+          },
+          "batched": {
+            "n": 40,
+            "calls": 1,
+            "cold_ms": 45.13,
+            "p50": 43.09,
+            "p95": 45.8,
+            "p99": 46.71,
+            "max": 48.34,
+            "percentiles_resolved": true
+          }
+        },
+        "8": {
+          "windows": 8,
+          "covers_tokens": 634,
+          "sequential": {
+            "n": 40,
+            "calls": 8,
+            "cold_ms": 95.86,
+            "p50": 94.0,
+            "p95": 96.1,
+            "p99": 96.99,
+            "max": 98.05,
+            "percentiles_resolved": true
+          },
+          "batched": {
+            "n": 40,
+            "calls": 1,
+            "cold_ms": 96.4,
+            "p50": 91.03,
+            "p95": 96.93,
+            "p99": 97.42,
+            "max": 99.34,
+            "percentiles_resolved": true
+          }
+        },
+        "16": {
+          "windows": 16,
+          "covers_tokens": 1242,
+          "sequential": {
+            "n": 40,
+            "calls": 16,
+            "cold_ms": 196.46,
+            "p50": 191.74,
+            "p95": 214.07,
+            "p99": 229.64,
+            "max": 237.71,
+            "percentiles_resolved": true
+          },
+          "batched": {
+            "n": 40,
+            "calls": 1,
+            "cold_ms": 206.87,
+            "p50": 200.38,
+            "p95": 206.53,
+            "p99": 208.58,
+            "max": 210.85,
+            "percentiles_resolved": true
+          }
+        },
+        "32": {
+          "windows": 32,
+          "covers_tokens": 2458,
+          "sequential": {
+            "n": 40,
+            "calls": 32,
+            "cold_ms": 391.09,
+            "p50": 391.66,
+            "p95": 398.78,
+            "p99": 401.56,
+            "max": 407.41,
+            "percentiles_resolved": true
+          },
+          "batched": {
+            "n": 40,
+            "calls": 1,
+            "cold_ms": 468.81,
+            "p50": 450.09,
+            "p95": 498.77,
+            "p99": 506.82,
+            "max": 615.88,
+            "percentiles_resolved": true
+          }
+        },
+        "53": {
+          "windows": 53,
+          "covers_tokens": 4054,
+          "sequential": {
+            "n": 40,
+            "calls": 53,
+            "cold_ms": 657.29,
+            "p50": 655.5,
+            "p95": 680.19,
+            "p99": 686.25,
+            "max": 700.21,
+            "percentiles_resolved": true
+          },
+          "batched": {
+            "n": 40,
+            "calls": 1,
+            "cold_ms": 813.88,
+            "p50": 794.18,
+            "p95": 811.15,
+            "p99": 865.42,
+            "max": 934.12,
+            "percentiles_resolved": true
+          }
+        }
+      },
+      "load_before_batch_curve": {
+        "load1": 6.04,
+        "load5": 3.01,
+        "load15": 1.74,
+        "cpus": 12
+      },
+      "batch_curve": {
+        "1": {
+          "n": 10,
+          "calls": 53,
+          "cold_ms": 656.92,
+          "p50": 656.48,
+          "p95": 662.84,
+          "p99": 662.84,
+          "max": 688.37,
+          "percentiles_resolved": false
+        },
+        "2": {
+          "n": 10,
+          "calls": 27,
+          "cold_ms": 598.1,
+          "p50": 601.44,
+          "p95": 607.65,
+          "p99": 607.65,
+          "max": 611.36,
+          "percentiles_resolved": false
+        },
+        "4": {
+          "n": 10,
+          "calls": 14,
+          "cold_ms": 602.63,
+          "p50": 637.25,
+          "p95": 679.66,
+          "p99": 679.66,
+          "max": 723.59,
+          "percentiles_resolved": false
+        },
+        "8": {
+          "n": 10,
+          "calls": 7,
+          "cold_ms": 651.57,
+          "p50": 632.27,
+          "p95": 653.02,
+          "p99": 653.02,
+          "max": 689.35,
+          "percentiles_resolved": false
+        },
+        "16": {
+          "n": 10,
+          "calls": 4,
+          "cold_ms": 679.14,
+          "p50": 678.05,
+          "p95": 744.06,
+          "p99": 744.06,
+          "max": 744.45,
+          "percentiles_resolved": false
+        },
+        "32": {
+          "n": 10,
+          "calls": 2,
+          "cold_ms": 730.19,
+          "p50": 727.48,
+          "p95": 730.92,
+          "p99": 730.92,
+          "max": 774.93,
+          "percentiles_resolved": false
+        },
+        "53": {
+          "n": 10,
+          "calls": 1,
+          "cold_ms": 796.38,
+          "p50": 799.73,
+          "p95": 812.83,
+          "p99": 812.83,
+          "max": 830.68,
+          "percentiles_resolved": false
+        }
+      },
+      "load_at_end": {
+        "load1": 7.28,
+        "load5": 3.9,
+        "load15": 2.13,
+        "cpus": 12
+      }
+    },
+    {
+      "threads": 1,
+      "reps": 40,
+      "load_at_phase_start": {
+        "load1": 7.28,
+        "load5": 3.9,
+        "load15": 2.13,
+        "cpus": 12
+      },
+      "model_id": "madhurjindal/Jailbreak-Detector",
+      "params_m": 65.8,
+      "export_s": 1.1,
+      "quantize_s": 1.59,
+      "graph_mb": 66.2,
+      "filler_tokens": 4082,
+      "filler_chars": 22639,
+      "window_tokens": 104,
+      "window_overlap": 26,
+      "window_step": 76,
+      "window_content_tokens": 102,
+      "bound_windows": 53,
+      "bound_coverage_tokens": 4054,
+      "tokenize": {
+        "178": {
+          "n": 40,
+          "calls": 1,
+          "cold_ms": 0.44,
+          "p50": 0.38,
+          "p95": 0.4,
+          "p99": 0.4,
+          "max": 0.44,
+          "percentiles_resolved": true,
+          "tokens": 178,
+          "chars": 978,
+          "windows": 2
+        },
+        "634": {
+          "n": 40,
+          "calls": 1,
+          "cold_ms": 1.45,
+          "p50": 1.5,
+          "p95": 1.66,
+          "p99": 1.67,
+          "max": 1.72,
+          "percentiles_resolved": true,
+          "tokens": 634,
+          "chars": 3511,
+          "windows": 8
+        },
+        "4000": {
+          "n": 40,
+          "calls": 1,
+          "cold_ms": 8.4,
+          "p50": 7.83,
+          "p95": 8.18,
+          "p99": 8.32,
+          "max": 8.83,
+          "percentiles_resolved": true,
+          "tokens": 4000,
+          "chars": 22189,
+          "windows": 53
+        }
+      },
+      "ladder": {
+        "1": {
+          "windows": 1,
+          "covers_tokens": 102,
+          "sequential": {
+            "n": 40,
+            "calls": 1,
+            "cold_ms": 49.18,
+            "p50": 49.77,
+            "p95": 50.67,
+            "p99": 50.76,
+            "max": 52.7,
+            "percentiles_resolved": true
+          },
+          "batched": {
+            "n": 40,
+            "calls": 1,
+            "cold_ms": 48.5,
+            "p50": 49.64,
+            "p95": 50.42,
+            "p99": 51.12,
+            "max": 51.34,
+            "percentiles_resolved": true
+          }
+        },
+        "2": {
+          "windows": 2,
+          "covers_tokens": 178,
+          "sequential": {
+            "n": 40,
+            "calls": 2,
+            "cold_ms": 99.54,
+            "p50": 98.91,
+            "p95": 101.76,
+            "p99": 102.09,
+            "max": 103.08,
+            "percentiles_resolved": true
+          },
+          "batched": {
+            "n": 40,
+            "calls": 1,
+            "cold_ms": 98.84,
+            "p50": 98.58,
+            "p95": 99.66,
+            "p99": 99.89,
+            "max": 99.94,
+            "percentiles_resolved": true
+          }
+        },
+        "4": {
+          "windows": 4,
+          "covers_tokens": 330,
+          "sequential": {
+            "n": 40,
+            "calls": 4,
+            "cold_ms": 197.49,
+            "p50": 196.41,
+            "p95": 198.86,
+            "p99": 200.81,
+            "max": 203.29,
+            "percentiles_resolved": true
+          },
+          "batched": {
+            "n": 40,
+            "calls": 1,
+            "cold_ms": 198.12,
+            "p50": 195.53,
+            "p95": 198.24,
+            "p99": 198.89,
+            "max": 199.62,
+            "percentiles_resolved": true
+          }
+        },
+        "8": {
+          "windows": 8,
+          "covers_tokens": 634,
+          "sequential": {
+            "n": 40,
+            "calls": 8,
+            "cold_ms": 391.16,
+            "p50": 390.05,
+            "p95": 397.52,
+            "p99": 399.96,
+            "max": 409.75,
+            "percentiles_resolved": true
+          },
+          "batched": {
+            "n": 40,
+            "calls": 1,
+            "cold_ms": 396.75,
+            "p50": 395.22,
+            "p95": 399.79,
+            "p99": 401.46,
+            "max": 403.31,
+            "percentiles_resolved": true
+          }
+        },
+        "16": {
+          "windows": 16,
+          "covers_tokens": 1242,
+          "sequential": {
+            "n": 40,
+            "calls": 16,
+            "cold_ms": 782.13,
+            "p50": 778.68,
+            "p95": 783.95,
+            "p99": 784.06,
+            "max": 785.04,
+            "percentiles_resolved": true
+          },
+          "batched": {
+            "n": 40,
+            "calls": 1,
+            "cold_ms": 816.07,
+            "p50": 804.41,
+            "p95": 812.85,
+            "p99": 819.77,
+            "max": 832.84,
+            "percentiles_resolved": true
+          }
+        },
+        "32": {
+          "windows": 32,
+          "covers_tokens": 2458,
+          "sequential": {
+            "n": 40,
+            "calls": 32,
+            "cold_ms": 1564.16,
+            "p50": 1537.64,
+            "p95": 1565.22,
+            "p99": 1565.67,
+            "max": 1567.36,
+            "percentiles_resolved": true
+          },
+          "batched": {
+            "n": 40,
+            "calls": 1,
+            "cold_ms": 1650.98,
+            "p50": 1639.82,
+            "p95": 1655.8,
+            "p99": 1656.38,
+            "max": 1664.01,
+            "percentiles_resolved": true
+          }
+        },
+        "53": {
+          "windows": 53,
+          "covers_tokens": 4054,
+          "sequential": {
+            "n": 40,
+            "calls": 53,
+            "cold_ms": 2544.61,
+            "p50": 2541.99,
+            "p95": 2795.42,
+            "p99": 2797.44,
+            "max": 2816.78,
+            "percentiles_resolved": true
+          },
+          "batched": {
+            "n": 40,
+            "calls": 1,
+            "cold_ms": 2808.01,
+            "p50": 2778.38,
+            "p95": 2791.45,
+            "p99": 2797.05,
+            "max": 2800.24,
+            "percentiles_resolved": true
+          }
+        }
+      },
+      "load_before_batch_curve": {
+        "load1": 1.05,
+        "load5": 1.7,
+        "load15": 1.76,
+        "cpus": 12
+      },
+      "batch_curve": {
+        "1": {
+          "n": 10,
+          "calls": 53,
+          "cold_ms": 2540.66,
+          "p50": 2533.29,
+          "p95": 2541.17,
+          "p99": 2541.17,
+          "max": 2547.5,
+          "percentiles_resolved": false
+        },
+        "2": {
+          "n": 10,
+          "calls": 27,
+          "cold_ms": 2526.46,
+          "p50": 2597.97,
+          "p95": 2606.23,
+          "p99": 2606.23,
+          "max": 2614.88,
+          "percentiles_resolved": false
+        },
+        "4": {
+          "n": 10,
+          "calls": 14,
+          "cold_ms": 2594.16,
+          "p50": 2592.88,
+          "p95": 2601.81,
+          "p99": 2601.81,
+          "max": 2624.3,
+          "percentiles_resolved": false
+        },
+        "8": {
+          "n": 10,
+          "calls": 7,
+          "cold_ms": 2638.58,
+          "p50": 2622.13,
+          "p95": 2640.55,
+          "p99": 2640.55,
+          "max": 2643.87,
+          "percentiles_resolved": false
+        },
+        "16": {
+          "n": 10,
+          "calls": 4,
+          "cold_ms": 2673.4,
+          "p50": 2672.62,
+          "p95": 2679.41,
+          "p99": 2679.41,
+          "max": 2696.8,
+          "percentiles_resolved": false
+        },
+        "32": {
+          "n": 10,
+          "calls": 2,
+          "cold_ms": 2772.04,
+          "p50": 2767.6,
+          "p95": 2779.88,
+          "p99": 2779.88,
+          "max": 2783.13,
+          "percentiles_resolved": false
+        },
+        "53": {
+          "n": 10,
+          "calls": 1,
+          "cold_ms": 2841.3,
+          "p50": 2837.16,
+          "p95": 2853.42,
+          "p99": 2853.42,
+          "max": 2880.39,
+          "percentiles_resolved": false
+        }
+      },
+      "load_at_end": {
+        "load1": 1.96,
+        "load5": 1.74,
+        "load15": 1.75,
+        "cpus": 12
+      }
+    }
+  ]
+}

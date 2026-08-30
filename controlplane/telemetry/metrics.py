@@ -64,8 +64,14 @@ REGISTRY: dict[str, MetricSpec] = {
                    "one per request, by verdict (FR-OBS-001 verdict mix)"),
         MetricSpec("cp_gateway_overhead_ms", "histogram", ("use_case",),
                    "hot-path overhead; 06 §4 formula is normative (NFR-P-001)"),
-        MetricSpec("cp_detector_latency_ms", "histogram", ("detector",),
-                   "per-detector latency vs the NFR-P-002 budgets"),
+        # ADR-036 Amendment 1: TWO series, and only one of them carries a budget verdict.
+        # Wall-clock is untargeted (it is the holds' constituent) and partitioned by `outcome`
+        # so a fault and a breach can never be one event counted twice; `attributable` is the
+        # NFR-P-002 instrument, the same in-thread figure `run_with_budget` enforces on.
+        MetricSpec("cp_detector_latency_ms", "histogram", ("detector", "outcome"),
+                   "per-detector WALL-CLOCK, untargeted; `outcome` is ok|fault (A2)"),
+        MetricSpec("cp_detector_attributable_ms", "histogram", ("detector",),
+                   "per-detector in-thread CPU — the NFR-P-002 series (ADR-036 Am. 1)"),
         MetricSpec("cp_detector_failures_total", "counter", ("detector", "fail_mode"),
                    "detector faults by resolution mode (04 §5, ADR-027)"),
         MetricSpec("cp_pii_intercepts_total", "counter", ("category", "use_case"),
@@ -93,6 +99,16 @@ REGISTRY: dict[str, MetricSpec] = {
         MetricSpec("cp_enrichment_skipped_total", "counter", ("use_case", "reason"),
                    "enrichment stopped early — 10 ms/sentence aggregate cap or a "
                    "failure (04 §2.2); never blocks, not a fail_mode class"),
+        # ADR-033 state (c). No `use_case` label, deliberately: unloadability is a
+        # property of the PROCESS, identical for every request this boot, so a per-use-case
+        # breakdown would multiply one boot-time fact across the dashboard as if it varied.
+        MetricSpec("cp_detector_timeout_abandoned_total", "counter", ("detector",),
+                   "executor task abandoned after a budget timeout (ADR-034 Part A): "
+                   "Python cannot preempt a thread, so the worker finishes while the "
+                   "request proceeds under fail_mode"),
+        MetricSpec("cp_detector_unavailable_total", "counter", ("detector",),
+                   "registered but unloadable at boot — dependency absent (ADR-033); "
+                   "counted per affected request, never a fault record"),
     )
 }
 

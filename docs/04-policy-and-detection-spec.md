@@ -55,9 +55,9 @@ Common contract: `async detect(ctx) -> list[Signal]`; must respect its latency b
 |---|---|---|---|---|
 | `tier1_pii` | input + output_sentence | <2 ms | `pii.*` | compiled regex + Aho-Corasick keyword sets; span-accurate for redaction. **Pattern set is normative in §2.5 (ADR-026), including two documented scope exclusions** |
 | `tier1_blocklist` | input + output_sentence | <2 ms | `security.blocklist` | per-use-case extra terms via policy `blocklist_extra` |
-| `tier2_injection` | input | <25 ms | `security.prompt_injection` | small transformer, CPU/ONNX; score = model prob |
+| `tier2_injection` | input | <25 ms **per 104-token window** (ADR-032), enforced **inside** the detector; the runner's ceiling is **length-parametric** (ADR-034 Part B) | `security.prompt_injection` | small transformer, CPU/ONNX; score = **MAX over strided windows** (104 tokens / overlap 26 / step 76), full input coverage — no prefix privileged, no 512-token blind spot. `window_count` + max-window index in signal meta; multi-window cost published untargeted |
 | `tier2_toxicity` | output_sentence | <25 ms | `toxicity.*` | moderate vs high via detector-internal cutoffs (0.5/0.8 defaults; overridable in policy `detector_params`) |
-| `fast_consistency` | output_full* | <60 ms | `hallucination.low_confidence` | 2nd sample at temperature; embedding cosine; *runs on accumulated response so far at each sentence boundary using the parallel-sample stream (see §2.3) |
+| `fast_consistency` | output_full* | <60 ms | `hallucination.low_confidence` | 2nd sample at temperature; embedding cosine; *runs on accumulated response so far at each sentence boundary using the parallel-sample stream (see §2.3). **CUT to roadmap — SL-6, 2026-08-30**: this row is the specification and is retained; no implementation ships |
 | `rag_grounding` | output_sentence | <30 ms | `hallucination.ungrounded_claim` | only when request carries `context` docs; sentence-vs-context embedding entailment proxy |
 | `numeric_claims` | output_sentence | <5 ms | `hallucination.unsourced_numeric` | **quantity-shaped** numerals only (§2.4, ADR-025 — the bare large-digit-run rule is DELETED) with no citation marker (§2.4.2) and no match in provided context; identifier structures are excluded by a pre-filter; high-stakes use cases map it to ESCALATE |
 | `cost_budget` | input | <1 ms | `cost.*` | ledger lookup; token estimate via tokenizer count × price table |
@@ -65,6 +65,58 @@ Common contract: `async detect(ctx) -> list[Signal]`; must respect its latency b
 | `conv_tracker` | conversation | <1 ms | `conversation.cumulative_risk` | running totals of pii/hallucination signals per conversation id — **`stage` ∈ {output_sentence, output_full, conversation} only** (ADR-021) |
 
 **Stage names each detector's native granularity — the unit of text it consumes — not a whitelist of delivery modes:** a non-streaming pipeline buffers the full response and runs the `output_sentence` detectors over that buffered text (02 §4), so `output_full` marks the detectors that *cannot* work sentence-by-sentence rather than the only ones that run when a whole response is available (M-11, ratified 2026-08-27).
+
+
+### 2.1 Two budget mechanisms, and the vehicle every model detector runs on (ADR-034)
+
+A budget is only a budget if the thing it wraps can be interrupted. Two rules follow, and they are
+recorded here together because the deviation that produced them was caused by a doc stating one
+while the code enforced the other.
+
+**(a) Execution vehicle — generic.** Every **CPU-bound model detector** — `tier2_injection`,
+`tier2_toxicity`, `rag_grounding`, `fast_consistency`'s embedding comparison, `entity_enricher` —
+runs its inference on a **dedicated single-worker `ThreadPoolExecutor`, awaited from the detector**.
+Never inline on the event loop. ONNX Runtime releases the GIL during `sess.run`, so the loop stays
+live for concurrent requests; and an awaited future is what makes `asyncio.wait_for` a real
+enforcement point rather than a dead letter, since against inline CPU work the timeout fires only
+once control returns. `max_workers=1` serializes inference, preserving the one-inference-at-a-time
+conditions **SL-5** measured under, and **queue wait counts inside the ceiling**. Serialization
+also fixes how a **lane** composes: two pool users on one lane add their budgets rather than
+overlapping, so a hold is `max(Σ pool, max(non-pool)) + engine` (ADR-030 Amendment 3).
+`compose_hold` in `detectors/base.py` is the single implementation, and `eval.check_derivations`
+re-derives the published table from it.
+
+A timed-out executor task is **abandoned, not killed** — Python cannot preempt a running thread, so
+the request proceeds under policy `fail_mode` while the thread finishes. Counted by
+`cp_detector_timeout_abandoned_total{detector}` (05 §5) so the condition is visible rather than
+inferred.
+
+**(b) Budget shape.** Most detectors carry a **flat** budget: the number in the table is the number
+the runner's `wait_for` receives. `tier2_injection` is **parametric**: its per-window budget is
+enforced *inside* the detector, window by window, while the runner enforces a ceiling derived from
+ADR-032's measured series — `max(25.0, envelope(n_windows) × 2)`, floored at the flat 25 ms for
+single-window inputs. The ceiling therefore means *"materially slower than its own measured
+envelope"*, not *"longer than one window's budget"*, which was a statement about input length
+wearing a budget's clothes. This is what stops `fail_closed` blocking every long input and
+`fail_open` silently skipping it. `run_with_budget`'s guarantee is consequently **two-tier**, and
+that is a stated trade-off rather than an emergent one.
+
+The envelope is grounded on ADR-032's **1-thread** column, not its 6-thread column: the two differ
+by **4.12×** — 12.38 ms vs 51.05 ms per-window P99 at the **2-window rung**, both sequential
+(ADR-032 Correction 1 re-derived this pair; the withdrawn figure quoted a ratio from the 1-window rung
+while citing 2-window cells) — so a 2× safety factor over the optimistic figures sits *below* the
+pessimistic cost and would trip on contention alone. NFR-P-002 is **not** restated by this and SL-5's disclosure is
+unchanged.
+
+**Span disclosure, normative for every published `tier2_injection` figure.** ADR-032's window series
+times `sess.run` **only** (tokenization is outside its clock). A detector pays tokenization too —
+measured **0.40 ms P99 at 2 windows and 8.32 ms P99 at the 4000-token bound** (1-thread, the
+grounding column; 0.41 / 8.22 at 6 threads). Both figures are ADR-032 Correction 1's: when this
+disclosure was first written **no script in this repo measured tokenization**, and the asserted
+figures it carried — 1.59 and 27.33 — were high by ~4x and ~3x respectively. Any figure this repo
+publishes for this detector **states which spans it covers**. This is a disclosure, not a
+contradiction: 06 §4 defines `input_hold_ms` as "ingress + input-lane time", which includes
+tokenization by construction.
 
 ### 2.2 Enrichment stage — `entity_enricher` (ADR-011)
 
@@ -89,6 +141,13 @@ A skipped span is a legal signal, not a malformed one: ADR-019 rejects an *unrec
 - `consistency: on` **requires `streaming: false`** (schema-enforced). The full response and a parallel 2nd sample are compared once, pre-delivery — the check is always available and nothing reaches the user before the verdict. (UC-3.)
 - `consistency: on_sampled` (streaming; UC-1 at deep-audit rate): the 2nd sample streams in parallel from dispatch; at each sentence boundary the aligned prefix is compared **only if** sample-2 has ≥ 70% of the primary's released+buffered length. Otherwise the sentence proceeds *without* the signal, audited as `meta.consistency:"lagged"` and counted in `cp_consistency_lagged_total`; deep audit is the backstop.
 - `consistency: off`: `rag_grounding` covers the performance plane where context exists.
+
+**All three shipped policies read `off` as of 2026-08-30 (SL-6).** `fast_consistency` is cut to
+roadmap — this section remains its specification, not a description of running code. Two
+consequences worth stating rather than leaving to be inferred: the `on` and `on_sampled` modes
+above are **unexercised by any shipped policy** (still schema-enforced, and still selectable),
+and the plane is covered *where context exists* — a context-free claim goes unscored on the
+performance plane, which is precisely what the cut gives up.
 
 Cost: ~2× tokens wherever sampling occurs — a policy knob (coverage vs cost), said openly in the demo.
 
@@ -238,14 +297,16 @@ than hidden: see 06 §3's revision-methodology requirement.
 # policies/finance_advisor.yaml
 schema_version: 1
 use_case: finance_advisor
-policy_version: 3                # bump on every change; engine stamps it into audit
+policy_version: 4                # bump on every change; engine stamps it into audit
 geography: EU                    # metadata usable by mappings; data not code
 risk_appetite: low               # low | medium | high (informational + default pack selector)
 
-streaming: false                 # consistency:on requires full buffering (ADR-014)
+streaming: false                 # UC-3 judges the full response before delivery (01 §3).
+                                 # ADR-014 also forced it while consistency was "on"
 sampling:
   deep_audit_rate: 0.25
-consistency: "on"                # on | on_sampled | off   (on ⇒ streaming:false)
+consistency: "off"               # on | on_sampled | off   (on ⇒ streaming:false).
+                                 # "off" since the SL-6 cut; rag_grounding covers the plane
 cascade_probe: "off"             # ADR-013; high-stakes → always frontier tier
 
 thresholds:                      # calibrated per 06 §3; conformal-style quantiles
@@ -302,6 +363,8 @@ Validation: pydantic schema (`policy/schema.py`). Rules: action values ∈ {pass
 
 **YAML quoting (Q-09).** `consistency` and `cascade_probe` values **must be quoted** in policy files. PyYAML implements YAML 1.1, where the bare tokens `on`/`off`/`yes`/`no` resolve to *booleans* — so `cascade_probe: on` loads as `True` and fails validation. `streaming` is a genuine boolean and stays unquoted. The loader raises a targeted error for this case rather than a bare enum mismatch.
 
+**Message templates (owner ruling, 2026-08-28).** Both `messages.*` values are **templates**, rendered once at load. The only permitted placeholder is `{use_case}`; a literal brace is written doubled (`{{`). Any other placeholder — an unknown name, a positional `{}` or `{0}`, or attribute/index access such as `{use_case.__class__}` — is a **load-time validation error**, not a runtime one: the alternatives are raising inside a BLOCK (turning a refusal into a 500) or serving the raw template to the caller. Rendering happens in the schema rather than at the use sites because the two strings are read from nine places (six verdict branches in `policy/actions.py`, three audit `fallback_used` sites in `gateway/app.py`), and a renderer at the use site is one a tenth call site can forget. Consequence for 05 §3: the audit record's `fallback_used` stores the **rendered** text the caller received, which is what that field already claimed to record and is still operator-authored config rather than model output. Found by manual gateway testing — a live `hr_copilot` BLOCK returned the literal `under {use_case} policy` — and pinned by the `messages.*` rendering tests in `tests/test_policy_schema.py`.
+
 **Stage rule (ADR-015).** Label eligibility is necessary but not sufficient, and it is the only part of the rule a *schema* can check. An edit-mapped **signal** must additionally carry a `span` **or** be `stage: output_sentence` (the whole-sentence soften scope of §6). A signal satisfying neither has no editable extent, and §4.3 step 4 promotes it to ESCALATE. This is a per-signal runtime check in `policy/engine.py`, not a schema check. Consequence worth stating explicitly: `fast_consistency` is `output_full` and span-less by design, so mapping `hallucination.low_confidence: edit` yields ESCALATE at every firing — policies should map that label to its real consequence rather than rely on promotion (see `policies/support_bot.yaml`).
 
 ## 4. The policy engine — verdict state machine
@@ -345,13 +408,31 @@ All fast-path signals for the current unit (input stage, or one output sentence 
    policy_version → audit.
 ```
 
+**Request-level aggregation (owner ruling, 2026-08-28).** Steps 1–5 evaluate **one unit**, but
+05 §3 has one `verdict` column per request. The stamped verdict is therefore the **most severe
+action across every evaluated unit** of that request — the input lane (§4.5), every output unit,
+and the conversation stage — under the §4.2 total order. Not the last unit's, and not the output
+lane's alone: a request whose *prompt* was redacted did not "pass" because its response happened
+to be clean. So an input-stage EDIT with a clean output stamps `verdict=edit`, counts in
+`cp_requests_total{verdict=edit}`, and renders `X-ControlPlane-Actions: edit` per 05 §1.1; an
+input EDIT alongside an output BLOCK stamps `block`.
+
+The **evidence** carried with that stamp is the *union* over units, not the winning unit's row:
+`detector_failures_json` is read off the stamped verdict, so keeping one unit's record would drop
+a §5 fault from another unit whenever the two tied on severity. `contributing_signal_ids` and
+`failure_record_ids` still filter that union against the stamped action, which is what keeps
+"recorded but not contributing" (a `fail_open` fault under a PASS) representable.
+
 ### 4.4 Streaming interaction
 - PASS/EDIT: sentence (possibly transformed) is released; stream continues.
 - BLOCK: stream terminated; `messages.block_fallback` sent; remaining upstream tokens drained & discarded (still audited).
 - ESCALATE: stream terminated; **entire response** (released + unreleased parts) quarantined as a review item; user gets `escalate_user_notice`.
 
 ### 4.5 Input-stage verdicts
-Input BLOCK/ESCALATE short-circuits before dispatch (no upstream call, no cost).
+Input BLOCK/ESCALATE short-circuits before dispatch (no upstream call, no cost). "No cost"
+is recorded as such rather than as an absence: the record carries `tokens_in`/`tokens_out`
+of **0/0** and, on a `measured`-class provider, `est_cost_usd` of **0.0** — see the
+no-dispatch rows in 05 §3.
 
 **Input EDIT is supported, as pre-dispatch redaction (ADR-020).** Spans are replaced in the prompt *before* the upstream call, the categories are audited, and dispatch proceeds — so the provider never receives the raw value. The input is fully buffered before dispatch, so this is strictly simpler than the mid-stream output-sentence case: no partial release, no recall problem, no latency race.
 
@@ -363,11 +444,19 @@ This supersedes the v1 ban, which was unenforceable as written: it claimed schem
 
 ## 5. Failure semantics (fail-open / fail-closed) — FR-POL-006
 
-On `DetectorTimeout`/`DetectorError` the gateway synthesizes a **`DetectorFailureRecord`** —
-a distinct type, **never a `Signal`** (ADR-027):
+On `DetectorTimeout`/`DetectorError`/`DetectorHang` the gateway synthesizes a
+**`DetectorFailureRecord`** — a distinct type, **never a `Signal`** (ADR-027):
 ```
-{failure_id, detector, error_class, stage, fail_mode_applied, ts}
+{failure_id, detector, error_class, stage, fail_mode_applied, ts, attributable_ms}
 ```
+`attributable_ms` (ADR-036 item 4) is the **in-thread execution measured for the faulting
+call**, or `null` when nothing measured it. Present always: a recorded `null` says "nothing
+measured this" — the normal case for a `DetectorHang`, whose worker never returned — where an
+absent key would say "we did not record", the distinction 05 §3 already draws for the id lists.
+It exists because the misattribution ADR-036 removed was invisible *precisely* because no record
+carried this number: a budget breach and a queue-wait artifact both arrived as `DetectorTimeout`
+with nothing to tell them apart. `DetectorHang` is the wall-clock backstop firing (ADR-036
+item 3) and is **not** an NFR-P-002 breach; it is a separate `error_class` for that reason.
 A detector fault is an **operational event, not a content risk**: no span, no plane, not
 detector-emitted, and not mapped by the label→action table — `fail_mode` governs it, per
 detector class. It therefore has no place in the closed §1.1 taxonomy, and `Signal` is right to
@@ -383,6 +472,8 @@ Resolution by policy `fail_mode` for that detector's class — **semantics uncha
 - **fail_closed** → the record forces an **ESCALATE floor** on the unit's verdict (never a
   silent BLOCK — a human sees why). A *floor*, not an override: §4.2 severity still lets a
   genuine content BLOCK win, so failure handling can never downgrade a block into a release.
+
+**A third state never reaches this resolution at all (ADR-033).** The two modes above resolve a detector that *ran and faulted*. A detector that is **registered but unloadable** — its dependency absent at load — produced no fault to resolve: nothing ran, so there is no `error_class` and no `fail_mode_applied`. It is a **boot-time** condition, recorded in `detectors.unavailable[]` and counted by `cp_detector_unavailable_total{detector}`, and it is enforced at boot rather than per request: if any active policy maps that detector's class to `fail_closed`, **the gateway refuses to boot**, because a fail-closed promise with the protector absent is a guarantee it cannot keep. Under `fail_open` for every policy that uses it, boot proceeds loudly and each affected record carries the entry. `entity_enricher` has no `fail_mode` class at all (§2.2) and so can never trigger the refusal.
 
 Records travel in `detector_failures_json`, never `signals_json` (05 §3/§4), and the §4.3
 step-5 stamp names contributing signal_ids **and** failure_record_ids — so an ESCALATE with

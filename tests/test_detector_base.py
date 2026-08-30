@@ -12,18 +12,25 @@ test is small enough that the plugin buys nothing.
 from __future__ import annotations
 
 import asyncio
+import json
+import time
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 from controlplane.detectors.base import (
     BUDGETS_MS,
+    ParametricBudget,
+    budget_ms,
+    ceiling_ms,
     ENRICHED_LABELS_KEY,
     DetectorContext,
     ENRICHED_ONLY_LABELS,
     Detector,
     DetectorError,
     DetectorFailure,
+    DetectorHang,
     DetectorTimeout,
     Plane,
     ScoreKind,
@@ -34,6 +41,7 @@ from controlplane.detectors.base import (
     get_detector,
     register,
     registered_names,
+    run_in_executor,
     run_with_budget,
 )
 from controlplane.policy.schema import TAXONOMY
@@ -315,7 +323,7 @@ def test_stub_detector_satisfies_the_protocol_structurally() -> None:
 
 
 @pytest.mark.parametrize(
-    ("detector", "budget_ms"),
+    ("detector", "expected_ms"),
     [
         ("tier1_pii", 2.0),
         ("tier1_blocklist", 2.0),
@@ -330,9 +338,144 @@ def test_stub_detector_satisfies_the_protocol_structurally() -> None:
         ("entity_enricher", 10.0),
     ],
 )
-def test_nfr_p_002_budget_matches_the_doc_table(detector: str, budget_ms: float) -> None:
-    """Transcription check against 04 §2 / 04 §2.2 — a drifted budget is a silent NFR change."""
-    assert BUDGETS_MS[detector] == budget_ms
+def test_nfr_p_002_budget_matches_the_doc_table(detector: str, expected_ms: float) -> None:
+    """Transcription check against 04 §2 / 04 §2.2 — a drifted budget is a silent NFR change.
+
+    Reads through `budget_ms()` rather than indexing `BUDGETS_MS`, because ADR-034 Part C made
+    the values `float | ParametricBudget`. The accessor returns the **per-unit** figure, which
+    is the one 04 §2 tabulates and the one NFR-P-002 is scoped to — deliberately not the runner
+    ceiling. The parameter is `expected_ms`, not `budget_ms`: the old name shadowed the accessor
+    this test now calls.
+    """
+    assert budget_ms(detector) == expected_ms
+
+
+def test_adr034_only_tier2_injection_is_parametric() -> None:
+    """The union type must stay narrow — one parametric entry, introduced for one measured reason.
+
+    Pinned because a second parametric budget added casually would silently widen the two-tier
+    `run_with_budget` guarantee that ADR-034 documents as applying to exactly this detector.
+    """
+    parametric = {n for n, v in BUDGETS_MS.items() if isinstance(v, ParametricBudget)}
+    assert parametric == {"tier2_injection"}
+
+
+def test_adr034_ceiling_equals_budget_for_flat_and_single_window() -> None:
+    """A caller that never sees a multi-window input cannot tell the two accessors apart.
+
+    That equivalence is the compatibility claim ADR-034 Part C makes, so it is asserted rather
+    than trusted: only `tier2_injection`, and only above one window, may differ.
+    """
+    for name in BUDGETS_MS:
+        assert ceiling_ms(name, 1) == budget_ms(name), name
+    for name in BUDGETS_MS:
+        if name != "tier2_injection":
+            assert ceiling_ms(name, 53) == budget_ms(name), name
+
+
+#: ADR-032's published artifact. Read at test time, never transcribed: the figures below
+#: were hardcoded once and drifted from every artifact version that ever existed (see
+#: `test_adr034_grounding_figures_are_derivable_from_the_artifact`), which is the same
+#: defect class ADR-032 Correction 1 exists to close.
+ARTIFACT = Path(__file__).resolve().parents[1] / "reports" / "spike_window_latency.json"
+
+
+def _ladder(threads: int) -> dict[int, dict[str, dict[str, float]]]:
+    """ADR-032's ladder for one thread setting, keyed by window count."""
+    artifact = json.loads(ARTIFACT.read_text())
+    run = next(r for r in artifact["runs"] if r["threads"] == threads)
+    return {int(k): v for k, v in run["ladder"].items()}
+
+
+def _worst_per_window_p99(threads: int) -> tuple[int, float]:
+    """Worst per-window P99 across **both** columns, and the rung it occurs at.
+
+    Both columns because the bound batch mode is *neither* of them: the ladder measures
+    `sequential` and `batched (all in one call)`, while ADR-032 Correction 2 binds **batch 2**.
+    Taking the envelope of both is what keeps the ceiling above real cost without depending on
+    which batch is bound — so this assertion survives a re-pick, and a re-pick that made it fail
+    would be telling us something worth knowing rather than merely breaking a test.
+    """
+    per_window = {
+        n: max(row["sequential"]["p99"], row["batched"]["p99"]) / n
+        for n, row in _ladder(threads).items()
+    }
+    rung = max(per_window, key=lambda n: per_window[n])
+    return rung, per_window[rung]
+
+
+def test_adr034_parametric_ceiling_grows_and_clears_the_measured_envelope() -> None:
+    """The ceiling must exceed ADR-032's measured 1-thread envelope at every measured rung.
+
+    A ceiling below the measurement would cancel a detector performing exactly as published —
+    the defect `[D1-windowed-injection-cannot-be-enforced-by-a-per-call-budget]` filed. The
+    envelope is the **worst of both columns** at each rung, matching what `per_unit_ms` is
+    grounded on; rungs and figures come from the artifact, so a re-measurement re-points this
+    test instead of silently invalidating it.
+
+    Rung 1 is excluded from the clearance assertion deliberately: `resolve()` floors the
+    single-window case at `nominal_ms` (25 ms), which sits *below* the measured 1-thread
+    single-window cost. That gap is NFR-P-002's scope boundary and SL-5's standing
+    disclosure — not a ceiling defect — so asserting it away here would hide it.
+    """
+    envelope = {
+        n: max(row["sequential"]["p99"], row["batched"]["p99"])
+        for n, row in _ladder(1).items()
+        if n > 1
+    }
+    assert len(envelope) >= 5, f"artifact ladder too sparse to be a real check: {envelope}"
+
+    prev = ceiling_ms("tier2_injection", 1)
+    for windows, measured in sorted(envelope.items()):
+        got = ceiling_ms("tier2_injection", windows)
+        assert got > measured, f"{windows} windows: ceiling {got} <= measured {measured}"
+        assert got > prev, "the ceiling must be monotonic in window count"
+        prev = got
+
+
+def test_adr034_grounding_figures_are_derivable_from_the_artifact() -> None:
+    """`per_unit_ms` and `fixed_ms` must equal what the artifact says, to the digit.
+
+    `base.py` transcribes both rather than reading `reports/` at runtime, because production
+    code must not depend on a report file. This is the guard that makes the transcription
+    honest — and it is not hypothetical: the series this file used to pin matched **no**
+    version of the artifact, in any column, at any rung, and additionally pinned a 53-window
+    rung the withdrawn run never measured. A figure whose stated derivation cannot reproduce
+    it either gains a source or loses the claim; there is no third state (ADR-032
+    Correction 1).
+    """
+    budget = BUDGETS_MS["tier2_injection"]
+    assert isinstance(budget, ParametricBudget)
+
+    rung, worst = _worst_per_window_p99(1)
+    assert round(worst, 2) == budget.per_unit_ms, (
+        f"per_unit_ms={budget.per_unit_ms} but the artifact's worst per-window P99 is "
+        f"{worst:.2f} at the {rung}-window rung"
+    )
+
+    artifact = json.loads(ARTIFACT.read_text())
+    run = next(r for r in artifact["runs"] if r["threads"] == 1)
+    tokenize_at_bound = run["tokenize"][str(artifact["window"]["policy_bound_tokens"])]
+    assert tokenize_at_bound["percentiles_resolved"], "an unresolved percentile is not a P99"
+    assert tokenize_at_bound["p99"] == budget.fixed_ms, (
+        f"fixed_ms={budget.fixed_ms} but the artifact measures tokenization at the bound at "
+        f"{tokenize_at_bound['p99']} ms P99"
+    )
+
+
+def test_adr034_run_with_budget_refuses_a_parametric_default() -> None:
+    """Defaulting a parametric entry to `nominal_ms` is the exact defect ADR-034 removes.
+
+    25 ms would cancel every multi-window scan, so the wrapper must refuse rather than guess.
+    """
+    class _Injection:
+        name = "tier2_injection"
+
+        async def detect(self, ctx: Any) -> list[Signal]:      # pragma: no cover - never awaited
+            return []
+
+    with pytest.raises(ValueError, match="parametric budget"):
+        asyncio.run(run_with_budget(_Injection(), object()))
 
 
 def test_budget_table_covers_exactly_the_documented_detectors() -> None:
@@ -355,21 +498,69 @@ def test_run_with_budget_returns_signals_on_the_happy_path() -> None:
     assert len(signals) == 1 and detector.calls == 1
 
 
-def test_run_with_budget_raises_detector_timeout_past_its_budget() -> None:
-    """04 §2: a detector must not hang; the gateway enforces asyncio.wait_for."""
+def test_run_with_budget_raises_detector_hang_past_the_backstop() -> None:
+    """04 §2: a detector must not hang; `wait_for` is the backstop that ends one.
+
+    **Asserted `DetectorTimeout` until ADR-036 re-pointed the vocabulary**, and the change is
+    the substance rather than a rename. This detector `await`s — it burns no thread CPU at all,
+    so under ADR-036 it cannot breach an NFR-P-002 budget, which now binds detector-attributable
+    time. Calling this a budget breach was the misattribution ADR-036 removed. What is true of it
+    is that the call never came back, and `DetectorHang` says exactly that.
+
+    Paired with `test_run_with_budget_raises_detector_timeout_on_in_thread_overrun` below: one
+    pins the backstop, the other the budget. Either alone would be satisfied by a bug — collapse
+    the two `error_class` values into one and this test still passes while the audit loses the
+    only thing that distinguishes a real breach from a scheduling artifact.
+    """
 
     class Slow:
         name = "tier1_pii"
 
         async def detect(self, ctx: object) -> list[Signal]:
-            await asyncio.sleep(0.5)  # 500 ms vs a 2 ms budget
+            await asyncio.sleep(0.5)  # 500 ms against a 2 ms budget, 4 ms backstop
+            return []
+
+    with pytest.raises(DetectorHang) as excinfo:
+        asyncio.run(run_with_budget(Slow(), ctx=None))
+    assert excinfo.value.detector == "tier1_pii"
+    assert excinfo.value.error_class == "DetectorHang"
+    assert "ADR-036" in str(excinfo.value)
+    assert "not an NFR-P-002 breach" in str(excinfo.value)
+    assert excinfo.value.attributable_ms is None, (
+        "nothing measured in-thread work here; a number would imply the worker reported one"
+    )
+
+
+def test_run_with_budget_raises_detector_timeout_on_in_thread_overrun() -> None:
+    """ADR-036 item 2: the NFR-P-002 budget binds in-thread execution, and still bites.
+
+    The window this has to hit is narrow *by construction*, which is why it is worth pinning:
+    the budget can only be the thing that fires when attributable CPU exceeds it while
+    wall-clock stays under the 2x backstop. That is not a contrived case — it is the shape of
+    the `tier2_toxicity` breach that opened the deviation (31.0 ms attributable, 31.3 ms wall,
+    backstop 50 ms). CPU-bound work in the executor is what makes the two clocks separable.
+    """
+
+    class Grinder:
+        name = "tier1_pii"
+
+        async def detect(self, ctx: object) -> list[Signal]:
+            def burn() -> None:
+                target = time.thread_time() + 0.014  # 14 ms CPU vs a 10 ms budget
+                while time.thread_time() < target:
+                    sum(range(500))
+
+            await run_in_executor(burn, detector=self.name)
             return []
 
     with pytest.raises(DetectorTimeout) as excinfo:
-        asyncio.run(run_with_budget(Slow(), ctx=None))
-    assert excinfo.value.detector == "tier1_pii"
+        asyncio.run(run_with_budget(Grinder(), ctx=None, budget_ms=10.0))
     assert excinfo.value.error_class == "DetectorTimeout"
     assert "NFR-P-002" in str(excinfo.value)
+    assert excinfo.value.attributable_ms is not None
+    assert excinfo.value.attributable_ms > 10.0, (
+        f"the breach must be reported as measured, got {excinfo.value.attributable_ms}"
+    )
 
 
 def test_run_with_budget_wraps_a_raise_as_detector_error() -> None:
@@ -721,6 +912,13 @@ def test_fr_pol_002_ctx_carries_no_policy_and_no_action_map() -> None:
     Asserting the whole field set rather than "no policy field" is deliberate: it also
     catches the subtler version, where someone adds `use_case` or `label_actions` for
     convenience and re-opens the door a different way.
+
+    `cost` is the third projected-policy channel and is listed here on the same terms as the
+    other two: the gateway performs the use-case-keyed ledger read and projects the resulting
+    **quantities**, so `cost_budget` compares numbers it cannot attribute to a use case. It is
+    admitted to this set only because the nested field set is pinned directly below — widening
+    the outer assertion without that would trade a guard for a hole, since a nested model can
+    carry a `use_case` the outer check would never see.
     """
     assert set(DetectorContext.model_fields) == {
         "text",
@@ -729,4 +927,41 @@ def test_fr_pol_002_ctx_carries_no_policy_and_no_action_map() -> None:
         "conversation_id",
         "blocklist_extra",
         "detector_params",
+        "cost",
     }
+
+
+def test_fr_pol_002_cost_view_carries_quantities_and_nothing_identifying() -> None:
+    """The nested half of the guard above: what may travel inside `ctx.cost`.
+
+    Two separate properties, and they fail for different reasons. **No identifying field** is
+    FR-POL-002 — `use_case`, a policy or version handle, or a label→action map would each let
+    a detector learn whose budget it is enforcing (AGENTS.md §9.1). **Scalars only** is
+    NFR-SEC-001: the ledger's own inputs include turn text and salted turn hashes, and a
+    detector writes `evidence` straight into `audit_records.signals_json`, so a `str` field
+    here is one convenience edit away from user content in the audit log. `bool` is allowed
+    (`repeated_turn` is the *fact* of a repeat, which is the signal); `str` and `bytes` are
+    not.
+    """
+    from controlplane.detectors.base import CostView
+
+    assert set(CostView.model_fields) == {
+        "ceiling_usd",
+        "spend_usd",
+        "priced_requests",
+        "per_request_max_tokens",
+        "est_request_tokens",
+        "loop_max_requests_per_min",
+        "requests_in_window",
+        "repeated_turn",
+    }
+    leaked = [
+        name for name in CostView.model_fields
+        if any(token in name for token in ("use_case", "policy", "action", "text", "hash", "id"))
+    ]
+    assert leaked == [], f"identifying field(s) on the cost channel: {leaked}"
+    for name, field in CostView.model_fields.items():
+        rendered = str(field.annotation)
+        assert "str" not in rendered and "bytes" not in rendered, (
+            f"CostView.{name} can carry text ({rendered}); the cost channel is quantities only"
+        )

@@ -23,10 +23,16 @@ detector tuning travels in policy `detector_params`, which the engine passes thr
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 import asyncio
+import contextvars
 import re
 import time
 import uuid
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from enum import Enum
 from typing import Annotated, Any, Protocol, runtime_checkable
 
@@ -40,21 +46,29 @@ from controlplane.policy.schema import TAXONOMY, ParamValue
 
 __all__ = [
     "BUDGETS_MS",
+    "ParametricBudget",
     "DetectorContext",
     "ENRICHED_LABELS_KEY",
     "ENRICHED_ONLY_LABELS",
     "Detector",
     "DetectorError",
     "DetectorFailure",
+    "DetectorHang",
     "DetectorTimeout",
+    "HANG_BACKSTOP_FACTOR",
     "Plane",
     "ScoreKind",
     "Signal",
     "Stage",
     "clear_registry",
     "get_detector",
+    "budget_ms",
+    "ceiling_ms",
+    "shutdown_model_executor",
+    "model_executor",
     "register",
     "registered_names",
+    "run_in_executor",
     "run_with_budget",
 ]
 
@@ -123,8 +137,15 @@ class DetectorFailure(Exception):
     taxonomy). Its resolution is the policy's `fail_mode` for that detector's class —
     never a decision made here."""
 
-    def __init__(self, detector: str, message: str = "") -> None:
+    def __init__(
+        self, detector: str, message: str = "", attributable_ms: float | None = None
+    ) -> None:
         self.detector = detector
+        #: In-thread execution measured for this call, or None when nothing measured it
+        #: (a non-pool detector, or a backstop abandonment whose worker had not returned).
+        #: ADR-036 item 4: recorded so a real breach and a scheduling artifact stay
+        #: distinguishable in the audit forever. A duration is not content (NFR-SEC-001).
+        self.attributable_ms = attributable_ms
         super().__init__(message or f"{type(self).__name__} in detector {detector!r}")
 
     @property
@@ -141,6 +162,19 @@ class DetectorTimeout(DetectorFailure):
     """Detector exceeded its NFR-P-002 budget. Raised by `run_with_budget`."""
 
 
+class DetectorHang(DetectorFailure):
+    """The wall-clock **hang backstop** fired: the call did not return within 2x its ceiling.
+
+    Deliberately NOT a `DetectorTimeout`. ADR-036 binds NFR-P-002 to detector-attributable
+    time, so a detector that sat in a pool queue has not breached its budget — but a call that
+    never returns still has to be survivable, and `wait_for` is the only thing that can end it.
+    The two are different findings and 04 §5 records them as different `error_class` values:
+    `DetectorTimeout` says "this detector spent too long executing", `DetectorHang` says "this
+    call did not come back". Collapsing them would rebuild exactly the misattribution ADR-036
+    exists to remove, and would do it invisibly (ADR-034 Part B's genuine-anomaly framing).
+    """
+
+
 class DetectorError(DetectorFailure):
     """Detector raised. Wraps the original exception without leaking its text into
     a signal — an upstream traceback could contain the very content being checked
@@ -151,13 +185,79 @@ class DetectorError(DetectorFailure):
 # NFR-P-002 budgets, transcribed from the 04 §2 registry table
 # --------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class ParametricBudget:
+    """A budget whose runner ceiling scales with input length (ADR-034 Part B).
+
+    Only `tier2_injection` carries one. 04 §2 budgets it **per 104-token window** while the
+    runner has always handed `wait_for` a flat scalar, and the two cannot both be honoured by
+    any implementation — the deviation that produced ADR-034. The resolution is two-tier:
+
+    * the **per-window** budget (`nominal_ms`) is enforced *inside* the detector, window by
+      window, and is what NFR-P-002 is scoped to (ADR-032: single-window inputs);
+    * the **runner ceiling** is `resolve(units)`, a coarse liveness backstop meaning
+      *"materially slower than its own measured envelope"* rather than *"longer than one
+      window's budget"*. That distinction is what stops `fail_closed` blocking every long
+      input and `fail_open` silently skipping it.
+
+    `per_unit_ms` and `fixed_ms` are **transcribed from ADR-032's measured series**, the same
+    way `BUDGETS_MS` is transcribed from the 04 §2 table — not fitted, and not read from
+    `reports/` at runtime (production code must not depend on a report file). The
+    transcription is not trusted either: a test re-derives both from the artifact and fails
+    on drift, because "transcribed" is precisely how a figure loses its derivation.
+
+    **The 1-thread column, deliberately** (ADR-034 M-30). ADR-032 publishes both thread
+    settings and SL-5 stands on the gap: 12.38 ms vs 51.05 ms P99 per window at the
+    2-window rung, a **4.12x**
+    spread. A ceiling built on the optimistic column sits *below* the pessimistic cost, so it
+    would fire on **contention** — which for a concurrent gateway is the normal case, not an
+    edge. A loose ceiling can only fail to catch a mildly-slow detector; a tight one causes
+    false blocks and false skips on live traffic.
+    """
+
+    #: The 04 §2 per-unit figure. What NFR-P-002 is compared against, and what every
+    #: budget-reading consumer sees via `budget_ms()`.
+    nominal_ms: float
+    #: Measured cost per unit — ADR-032's 1-thread series, worst per-window P99 across
+    #: **both** ladder columns (52.78 ms = 2797.44/53, the 53-window bound rung, sequential).
+    #: Worst-across-both because the *bound* batch mode is not either ladder column: the ladder
+    #: measures `sequential` and `batched (all in one call)`, while ADR-032 Correction 2 binds
+    #: **batch 2**. Grounding on the envelope of both columns is therefore conservative by
+    #: construction rather than by luck — batch 2 costs 48.63 ms/window at the 53-window rung
+    #: (2577.48/53, 1-thread), *below* this figure, so the ceiling sits above real cost, which
+    #: is the direction M-30 requires. ADR-034's own Correction 2 note says the same: this
+    #: figure is grounded on the ladder and does not move with the bound batch.
+    per_unit_ms: float
+    #: Length-independent cost inside the same span — tokenization, which ADR-032's table
+    #: excludes (it times `sess.run` only) and a detector cannot. Measured 8.32 ms P99 (1-thread) at the
+    #: 4000-token bound; carried as a flat term because it is dwarfed by the per-unit sum.
+    fixed_ms: float
+    #: Multiplier over the measured envelope. 2.0 per the ruling.
+    safety_factor: float = 2.0
+
+    def resolve(self, units: int) -> float:
+        """Ceiling for `units` windows, floored at `nominal_ms` for the single-unit case."""
+        if units <= 1:
+            return self.nominal_ms
+        envelope = self.fixed_ms + self.per_unit_ms * units
+        return max(self.nominal_ms, envelope * self.safety_factor)
+
+
 #: Fast-path budget per detector, in milliseconds. Spec constants — NOT tunable per
 #: use case. `entity_enricher` is listed for completeness but is NOT a policy
 #: `fail_mode` class: 04 §2.2 says enrichment failure skips and logs, never blocks.
-BUDGETS_MS: dict[str, float] = {
+#:
+#: Values are `float | ParametricBudget` (ADR-034 Part C). Read a comparable number with
+#: `budget_ms(name)` and a runner ceiling with `ceiling_ms(name, units)`; indexing this
+#: mapping directly for arithmetic is what the union is there to make visible.
+BUDGETS_MS: dict[str, float | ParametricBudget] = {
     "tier1_pii": 2.0,
     "tier1_blocklist": 2.0,
-    "tier2_injection": 25.0,
+    # ADR-034: per-window budget 25 ms (04 §2, NFR-P-002 single-window scope); runner
+    # ceiling parametric on window count, grounded on ADR-032's 1-thread series.
+    "tier2_injection": ParametricBudget(
+        nominal_ms=25.0, per_unit_ms=52.78, fixed_ms=8.32
+    ),
     "tier2_toxicity": 25.0,
     "fast_consistency": 60.0,
     "rag_grounding": 30.0,
@@ -167,6 +267,206 @@ BUDGETS_MS: dict[str, float] = {
     "conv_tracker": 1.0,
     "entity_enricher": 10.0,
 }
+
+
+def budget_ms(name: str) -> float:
+    """The comparable NFR-P-002 figure for `name` (ADR-034 Part C).
+
+    For a flat entry this is the entry. For a parametric one it is `nominal_ms` — the 04 §2
+    per-unit budget, which is what NFR-P-002 is scoped to and what a per-detector latency
+    histogram must be compared against. It is deliberately **not** the runner ceiling: a
+    report comparing measured latency against a length-scaled backstop would be comparing a
+    detector's cost against a liveness guard and calling the result a budget verdict.
+    """
+    entry = BUDGETS_MS[name]
+    return entry.nominal_ms if isinstance(entry, ParametricBudget) else entry
+
+
+def ceiling_ms(name: str, units: int = 1) -> float:
+    """The ceiling the runner's `wait_for` should receive for `name` at `units` units.
+
+    Equal to `budget_ms(name)` for every flat entry and for the single-unit case, so a caller
+    that never sees a multi-unit input cannot tell the difference — which is the point: only
+    `tier2_injection` is parametric, and only above one window.
+    """
+    entry = BUDGETS_MS[name]
+    return entry.resolve(units) if isinstance(entry, ParametricBudget) else entry
+
+
+# --------------------------------------------------------------------------
+# Execution vehicle for CPU-bound model detectors (ADR-034 Part A)
+# --------------------------------------------------------------------------
+
+#: The 04 §2 rule (a) roster: the detectors whose inference runs on the shared pool.
+#:
+#: Declared rather than derived, because three of the five do not exist yet — a set built by
+#: inspecting `run_on_model_pool` callers would be silently short today and would make the
+#: ADR-030 Amendment 3 composition wrong in the safe-looking direction. Pinned against 04 §2
+#: rule (a)'s own sentence by `tests/test_hold_composition.py`, so the roster and the spec
+#: cannot drift apart unnoticed.
+POOL_USERS: frozenset[str] = frozenset({
+    "tier2_injection",
+    "tier2_toxicity",
+    "rag_grounding",
+    "fast_consistency",
+    "entity_enricher",
+})
+
+#: The engine step inside every hold: `cp.policy.evaluate` + `cp.action.apply`, combined.
+#:
+#: Set by ADR-030, which is why it is not in `BUDGETS_MS` — that dict is per-detector NFR-P-002
+#: budgets, and this is neither a detector nor a budget anyone measures against. It lives here
+#: so the ADR-030 derivation and its guard read one number.
+ENGINE_STEP_MS: float = 5.0
+
+
+def compose_hold(names: "Iterable[str]") -> float:
+    """The ADR-030 Amendment 3 worst-case hold for a lane carrying `names`.
+
+    `max(Σ pool users, max(non-pool)) + engine`. Pool users **sum** because `max_workers=1`
+    serializes them (ADR-034 Part A, load-bearing); non-pool detectors **overlap** the pool work
+    rather than adding to it, since a forward pass in a worker thread releases the event loop.
+
+    ADR-030 originally composed every hold as `max(...)` over the whole lane, which is correct
+    only where a lane holds at most one pool user — and two of its six rows hold more. The
+    correction was found by reading ADR-034 against it, not by a measurement, and Amendment 3
+    records that this function is the executable form of the rule: a sixth pool user or a budget
+    edit now moves the published table or fails `eval.check_derivations`.
+    """
+    members = list(names)
+    pool = sum(budget_ms(n) for n in members if n in POOL_USERS)
+    other = [budget_ms(n) for n in members if n not in POOL_USERS]
+    return max(pool, max(other) if other else 0.0) + ENGINE_STEP_MS
+
+
+#: One process-wide, single-worker pool shared by every model detector.
+#:
+#: `max_workers=1` is load-bearing rather than a default (ADR-034 Part A). It serializes
+#: inference across concurrent requests, which preserves the one-inference-at-a-time
+#: conditions **SL-5** measured under: a pool that let four requests infer at once would push
+#: per-request parallelism toward ADR-032's 1-thread column, and no figure in this repo
+#: describes that.
+#:
+#: **ADR-036 supersedes the sentence that used to stand here** ("queue wait is real wait, and
+#: it counts inside the ceiling"). Queue wait *is* real wait — it simply is not this detector's.
+#: The old reasoning conflated the NFR-P-002 budget with the NFR-P-001 hold: because the hold
+#: must include queueing, the budget was made to include it too. ADR-036 separates them. The
+#: budget binds **detector-attributable** time (in-thread execution); queue wait, GIL contention
+#: and loop scheduling are lane-composition costs and belong to the HOLD series, where ADR-030
+#: Amendment 3 already sums pool users. Nothing is hidden: the hold still measures wall-clock.
+#:
+#: Shared across detectors, not one pool each, for the same reason: two pools would each
+#: believe they had the CPU to themselves.
+_MODEL_EXECUTOR: ThreadPoolExecutor | None = None
+_EXECUTOR_LOCK = threading.Lock()
+
+
+def model_executor() -> ThreadPoolExecutor:
+    """The shared single-worker inference pool, created on first use.
+
+    Lazy so that importing this module on a host with no model stack costs nothing, and so
+    that a process which never runs a model detector never spawns a thread.
+    """
+    global _MODEL_EXECUTOR
+    with _EXECUTOR_LOCK:
+        if _MODEL_EXECUTOR is None:
+            _MODEL_EXECUTOR = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="cp-model"
+            )
+        return _MODEL_EXECUTOR
+
+
+#: Multiplier on a detector's ceiling at which the wall-clock **hang backstop** fires.
+#:
+#: Not a budget and not a tolerance: ADR-036 item 3. The NFR-P-002 budget is enforced against
+#: in-thread execution *after* the call returns, which cannot rescue a call that never returns
+#: at all — so `wait_for` stays, retargeted from "the budget" to "something is wrong". 2x is
+#: deliberately loose: anything close to 1x would re-enforce the budget on wall-clock through
+#: the back door, which is the defect ADR-036 removes.
+HANG_BACKSTOP_FACTOR: float = 2.0
+
+#: Per-call sink for in-thread execution time, in ms. `run_with_budget` installs a fresh list
+#: and `run_in_executor` appends to it from inside the worker.
+#:
+#: A ContextVar holding a **mutable** list, which is what makes it survive two boundaries that
+#: a plain value would not: `asyncio.wait_for` runs the detector in a task carrying a *copy* of
+#: this context (the copy holds the same list), and the executor worker inherits no context at
+#: all (the closure captures the object before the hop). `list.append` from the worker thread is
+#: atomic under the GIL. `None` means nobody is measuring — a detector called outside
+#: `run_with_budget` must not silently accumulate into a previous call's sink.
+_ATTRIBUTABLE_MS: contextvars.ContextVar[list[float] | None] = contextvars.ContextVar(
+    "cp_attributable_ms", default=None
+)
+
+
+async def run_in_executor(fn: Any, /, *args: Any, detector: str = "") -> Any:
+    """Await `fn(*args)` on the shared inference pool. The only sanctioned way to infer.
+
+    Never call a model synchronously from a detector: ONNX Runtime releases the GIL during
+    `sess.run`, so an awaited executor future keeps the event loop live for concurrent
+    requests, and — the half that matters for budgets — it is what makes `asyncio.wait_for`
+    an enforcement point instead of a dead letter. Against inline CPU work the timeout fires
+    only once control returns, which is the trap ADR-034 was filed about.
+
+    **A timed-out task is abandoned, not killed.** Python cannot preempt a running thread, so
+    cancellation stops this coroutine *waiting* while the worker finishes its current call.
+    The request proceeds under policy `fail_mode` immediately and the orphaned result is
+    discarded; with one worker, that tail is queue wait for the next request. Each
+    abandonment increments `cp_detector_timeout_abandoned_total{detector}` so the condition is
+    countable rather than inferred from a latency histogram (ADR-034 Part A).
+    """
+    loop = asyncio.get_running_loop()
+    sink = _ATTRIBUTABLE_MS.get()
+
+    def _timed() -> Any:
+        # Clocked HERE, inside the worker, because this span is the only part of the call that
+        # is this detector's own work (ADR-036 item 2). Everything outside it — pool queue wait,
+        # GIL contention with the asyncio detectors sharing the lane, loop scheduling — is
+        # lane composition, and ADR-030 Amendment 3 already charges it to the hold.
+        #
+        # `thread_time`, NOT `perf_counter` — and this is a deliberate departure from the
+        # instrument ADR-036's ruling names in passing (PROVISIONAL, batch review at phase end).
+        # A worker thread's `perf_counter` span counts every microsecond it sits blocked on the
+        # GIL while the asyncio detectors in the same lane run, so it relocates the clock without
+        # isolating anything: measured p50 229.26 ms under lane contention against 12.04 ms on a
+        # quiet loop, and 31.02 ms attributable against 31.3 ms wall-clock in the gateway — the
+        # two are the same number. Enforcing on it produced 18/30 spurious control faults, worse
+        # than the 2/30 that opened the deviation. `thread_time` is per-thread CPU time and
+        # excludes GIL-wait: 26.04 ms under the same contention, 11.98 ms quiet. The ruling's
+        # *intent* is explicit — "scheduling, GIL contention, and pool-queue wait belong to the
+        # HOLD series" — and this is the instrument that achieves it.
+        #
+        # Caveat, recorded rather than smoothed: ORT's calling thread spin-waits on its intra-op
+        # pool, so this figure still rises under real CPU competition (11.98 -> 26.04 ms). It is
+        # detector-attributable CPU, not a contention-free constant.
+        t0 = time.thread_time()
+        try:
+            return fn(*args)
+        finally:
+            if sink is not None:
+                sink.append((time.thread_time() - t0) * 1000.0)
+
+    try:
+        return await loop.run_in_executor(model_executor(), _timed)
+    except asyncio.CancelledError:
+        if detector:
+            # Imported here, not at module scope: `base` is the detector contract and must
+            # not acquire a telemetry dependency for a counter on an exceptional path.
+            from controlplane.telemetry.metrics import REGISTRY_DEFAULT
+
+            REGISTRY_DEFAULT.increment(
+                "cp_detector_timeout_abandoned_total", detector=detector
+            )
+        raise
+
+
+def shutdown_model_executor() -> None:
+    """Drop the shared pool. Test-support and clean-shutdown only."""
+    global _MODEL_EXECUTOR
+    with _EXECUTOR_LOCK:
+        if _MODEL_EXECUTOR is not None:
+            _MODEL_EXECUTOR.shutdown(wait=False)
+            _MODEL_EXECUTOR = None
 
 
 # --------------------------------------------------------------------------
@@ -381,6 +681,50 @@ class Signal(BaseModel):
 # --------------------------------------------------------------------------
 
 
+class CostView(BaseModel):
+    """Cost-plane scalars for `cost_budget` / `loop_guard`, projected by the gateway.
+
+    **Numbers and one boolean. No text, no ids, no hashes** — a cost detector needs the
+    *quantities* a ceiling is compared against and nothing else, so this model cannot carry
+    content into `evidence` even by accident (NFR-SEC-001).
+
+    It is plain data for the reason `DetectorContext` already gives: a ledger is keyed by
+    use case, and a detector that could see its use case is one conditional away from being
+    the policy engine (AGENTS.md §9.1). So the gateway performs the keyed ledger read and
+    hands over the result; the detector does arithmetic. The trade-off is recorded in
+    `detectors/cost.py` — the detector's measured latency is the arithmetic only, not the
+    lookup 04 §2's row text implies.
+
+    A `None` limit means *no policy figure reached us*, which is distinct from a limit of
+    zero. Both cost detectors treat a null limit as "nothing has been shown to be breached"
+    and stay silent, rather than inferring a breach from absent evidence.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    #: `budget.monthly_usd` for this request's use case.
+    ceiling_usd: Annotated[float, Field(ge=0.0)] | None = None
+    #: Spend counted against that ceiling: carried `cost_ledger` baseline + measured rows.
+    spend_usd: Annotated[float, Field(ge=0.0)] = 0.0
+    #: How many rows in the window carried a non-null `est_cost_usd`. A dev-class provider
+    #: writes NULL (ADR-018/022), so a low count beside a low spend means "unknown", not
+    #: "cheap" — the detector reports it so an auditor can tell those apart.
+    priced_requests: Annotated[int, Field(ge=0)] = 0
+
+    #: `budget.per_request_max_tokens`.
+    per_request_max_tokens: Annotated[int, Field(ge=0)] | None = None
+    #: Estimated tokens for this request. An ESTIMATE, and named one: see
+    #: `pipeline.estimate_tokens` for the divisor and why it is not a tokenizer count.
+    est_request_tokens: Annotated[int, Field(ge=0)] = 0
+
+    #: `budget.loop_max_requests_per_min`.
+    loop_max_requests_per_min: Annotated[int, Field(ge=0)] | None = None
+    #: Requests seen for this conversation in the trailing `ledger.LOOP_WINDOW_S`.
+    requests_in_window: Annotated[int, Field(ge=0)] = 0
+    #: Whether this turn is near-identical to the previous one, normalized.
+    repeated_turn: bool = False
+
+
 class DetectorContext(BaseModel):
     """What a detector receives. 04 §2 writes `async detect(ctx) -> list[Signal]` and
     never says what `ctx` holds, so this is the minimal shape the *documented* detector
@@ -393,6 +737,9 @@ class DetectorContext(BaseModel):
     * `conversation_id` — `loop_guard` and `conv_tracker` are per-conversation (04 §2).
     * `blocklist_extra` / `detector_params` — the two policy fields 04 §2/§3 hand to a
       detector.
+    * `cost` — the cost-plane scalars (`CostView`) `cost_budget` and `loop_guard` read.
+      Projected by the gateway for the same reason the two fields above are: plain data,
+      never a `Policy` and never a ledger handle.
 
     **Policy values arrive as plain data, never as a `Policy` object.** base.py's stated
     asymmetry is that nothing here reads a policy, and it is what keeps FR-POL-002 true:
@@ -409,6 +756,7 @@ class DetectorContext(BaseModel):
     conversation_id: str | None = None
     blocklist_extra: list[str] = Field(default_factory=list)
     detector_params: dict[str, dict[str, ParamValue]] = Field(default_factory=dict)
+    cost: CostView = Field(default_factory=CostView)
 
     def params_for(self, detector: str) -> dict[str, ParamValue]:
         """Per-detector overrides (04 §3 `detector_params`), empty when unset.
@@ -495,6 +843,8 @@ async def run_with_budget(
     detector: Detector,
     ctx: Any,
     budget_ms: float | None = None,
+    *,
+    attributable_out: list[float] | None = None,
 ) -> list[Signal]:
     """Run one detector under its NFR-P-002 budget.
 
@@ -502,6 +852,19 @@ async def run_with_budget(
     caller has exactly one failure vocabulary to map onto policy `fail_mode` (04 §5).
     This function never consults a policy and never decides an action — it cannot tell
     fail_open from fail_closed, and that separation is the point.
+
+    `attributable_out`, when given, receives the single in-thread figure this call was
+    JUDGED on — the ADR-036 Amendment 1 quantity, and the only one an NFR-P-002 verdict may
+    be rendered against. An explicit out-list rather than a metrics call, because the
+    detector layer holds no telemetry dependency on the hot path (§2 of this module) and,
+    decisively, because the benchmark reads a *specific* registry instance: observing into
+    `REGISTRY_DEFAULT` from here would leave `bench_latency` with an empty series and no way
+    to tell that from a detector that never ran. Appended, never assigned, so a caller
+    reusing one list across a lane accumulates rather than silently overwrites.
+
+    A hang contributes NOTHING to it, deliberately: its worker never returned, so no
+    in-thread figure exists, and an absent observation is the honest record where a zero
+    would be a measurement nobody made.
 
     `latency_ms` is stamped here, on the measured wall-clock of the call, for any
     signal that left it at 0.0. Detectors are free to report their own finer-grained
@@ -515,19 +878,42 @@ async def run_with_budget(
     """
     name = getattr(detector, "name", type(detector).__name__)
     if budget_ms is None:
-        budget_ms = BUDGETS_MS.get(name)
-        if budget_ms is None:
+        entry = BUDGETS_MS.get(name)
+        if entry is None:
             raise ValueError(
                 f"no budget for detector {name!r}: pass budget_ms explicitly or add it "
                 "to BUDGETS_MS from the 04 §2 table"
             )
+        if isinstance(entry, ParametricBudget):
+            # Deliberately refused rather than defaulted to `nominal_ms`. A parametric
+            # ceiling depends on how much input this request may carry, which only the
+            # caller knows (04 §9 puts `per_request_max_tokens` in policy) — and defaulting
+            # to the single-window figure would cancel every multi-window scan at 25 ms,
+            # which is the exact defect ADR-034 exists to remove. Failing loudly here keeps
+            # the two-tier guarantee visible at the call site.
+            raise ValueError(
+                f"detector {name!r} has a parametric budget (ADR-034): resolve a ceiling "
+                "with `ceiling_ms(name, units)` and pass it explicitly. There is no safe "
+                "default — `nominal_ms` would cancel every multi-unit input."
+            )
+        budget_ms = entry
 
     started = time.perf_counter()
+    sink: list[float] = []
+    token = _ATTRIBUTABLE_MS.set(sink)
     try:
-        signals = await asyncio.wait_for(detector.detect(ctx), timeout=budget_ms / 1000.0)
+        signals = await asyncio.wait_for(
+            detector.detect(ctx), timeout=HANG_BACKSTOP_FACTOR * budget_ms / 1000.0
+        )
     except asyncio.TimeoutError as exc:
-        raise DetectorTimeout(
-            name, f"detector {name!r} exceeded its {budget_ms} ms budget (NFR-P-002)"
+        # The BACKSTOP, not the budget (ADR-036 item 3). `attributable_ms` is whatever the
+        # worker had finished reporting; None when it never returned, which is the normal case
+        # for a genuine hang and is itself the distinguishing fact.
+        raise DetectorHang(
+            name,
+            f"detector {name!r} did not return within {HANG_BACKSTOP_FACTOR:g}x its "
+            f"{budget_ms} ms ceiling (ADR-036 hang backstop, not an NFR-P-002 breach)",
+            attributable_ms=(sum(sink) if sink else None),
         ) from exc
     except DetectorFailure:
         raise  # already in the right vocabulary; don't double-wrap
@@ -537,10 +923,29 @@ async def run_with_budget(
         # Deliberately not interpolating `exc` — its text may quote the checked
         # content, and this message can reach a log (NFR-SEC-001).
         raise DetectorError(
-            name, f"detector {name!r} raised {type(exc).__name__}"
+            name,
+            f"detector {name!r} raised {type(exc).__name__}",
+            attributable_ms=(sum(sink) if sink else None),
         ) from exc
 
+    finally:
+        _ATTRIBUTABLE_MS.reset(token)
+
     elapsed_ms = (time.perf_counter() - started) * 1000.0
+    # ADR-036 item 2: the budget binds detector-attributable time. An empty sink means the
+    # detector never touched the pool, and for a non-pool detector wall-clock IS its
+    # attributable time — so the fallback needs no `POOL_USERS` branch here, and a detector
+    # moving between pools cannot change which clock judges it.
+    attributable_ms = sum(sink) if sink else elapsed_ms
+    if attributable_out is not None:
+        attributable_out.append(attributable_ms)
+    if attributable_ms > budget_ms:
+        raise DetectorTimeout(
+            name,
+            f"detector {name!r} exceeded its {budget_ms} ms budget (NFR-P-002): "
+            f"{attributable_ms:.1f} ms of in-thread execution",
+            attributable_ms=attributable_ms,
+        )
     if not isinstance(signals, list) or not all(isinstance(s, Signal) for s in signals):
         raise DetectorError(
             name, f"detector {name!r} must return list[Signal] (04 §2 contract)"

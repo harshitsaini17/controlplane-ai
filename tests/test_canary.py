@@ -56,12 +56,21 @@ CANARY_KEY = "sk-canary-fixture-not-a-real-key"
 
 @pytest.fixture
 def creds(monkeypatch):
-    """`kiro-local` declares `key_env: UPSTREAM_API_KEY` (NFR-SEC-002).
+    """Credential the ACTIVE provider, whichever it is (NFR-SEC-002).
 
-    Without it `auth_headers` raises `UpstreamError` before the canary can dispatch, which
-    would make every end-to-end test here fail for a reason unrelated to the invariant.
+    Without a key `auth_headers` raises `UpstreamError` before the canary can dispatch,
+    which would make every end-to-end test here fail for a reason unrelated to the
+    invariant — which is exactly what happened when `active_provider` moved from
+    `kiro-local` (`UPSTREAM_API_KEY`) to `groq` (`GROQ_API_KEY`) on 2026-08-30.
+
+    Both names are set rather than the active one alone, deliberately: a fixture that
+    looked up the active provider's `key_env` would still couple these tests to a
+    deployment choice they have no opinion about, one indirection further away. The value
+    is fake and the upstream is a `MockTransport`, so nothing here can reach a real
+    provider on either key.
     """
     monkeypatch.setenv("UPSTREAM_API_KEY", CANARY_KEY)
+    monkeypatch.setenv("GROQ_API_KEY", CANARY_KEY)
     return CANARY_KEY
 
 
@@ -382,9 +391,19 @@ def test_canary_on_startup_respects_the_config_switch(config) -> None:
 
 
 def test_canary_on_startup_enforces(config, creds) -> None:
-    """The one call a startup hook needs: run, then enforce, in that order."""
+    """The one call a startup hook needs: run, then enforce, in that order.
+
+    Pinned on a **dev-class** active provider, because the warn-and-continue branch this
+    asserts is dev-class behaviour by ruling: on a measured provider the same failed canary
+    is boot-FATAL (ADR-028), so once `active_provider` became `groq` the `pytest.warns`
+    here could never be satisfied — the call raises instead. Stating the class explicitly
+    keeps the assertion about the ordering it names.
+    """
+    dev_active = config.model_copy(deep=True)
+    dev_active.active_provider = "kiro-local"
     with pytest.warns(UsageSanityWarning):
-        result = asyncio.run(canary_on_startup(dispatcher(config, prompt_tokens=5074)))
+        result = asyncio.run(canary_on_startup(
+            dispatcher(dev_active, prompt_tokens=5074), config=dev_active))
     assert result is not None and result.passed is False
 
 

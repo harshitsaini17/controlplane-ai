@@ -33,6 +33,14 @@ OpenAI-compatible request body, passed through with these gateway extensions:
 | ERR-GW-001 | 500 | internal gateway error | yes |
 Error body: `{error:{code, message, request_id}}`. Never include prompt/response content in error bodies.
 
+`request_id` is **always populated**, including on the two ingress rejections above, and the
+matching `X-ControlPlane-Request-Id` header is present per §1.1's "All responses carry" rule.
+The id is therefore minted *before* use-case resolution: an id is a correlation handle for
+one exchange, not a property of a successfully resolved policy, and the request an operator
+most needs to look up is the one that was refused. It is the same id the audit record carries
+whenever the request got far enough to produce one — a rejected request has no record, which
+is why the id on a 400 correlates a log line rather than a row.
+
 ## 2. Admin API (localhost/demo only — no auth in v1, stated limitation)
 
 | Endpoint | Purpose |
@@ -69,8 +77,11 @@ CREATE TABLE audit_records (
                                 -- PURE Signals: a detector fault is never one (ADR-027)
   detector_failures_json TEXT,  -- list[DetectorFailureRecord] per 04 §5 (ADR-027):
                                 -- {failure_id, detector, error_class, stage,
-                                --  fail_mode_applied, ts}. Operational events, not
-                                -- content risks: no span, no plane, no label, no text
+                                --  fail_mode_applied, ts, attributable_ms}. Operational
+                                -- events, not content risks: no span, no plane, no label,
+                                -- no text. `attributable_ms` = measured in-thread execution
+                                -- (ADR-036 item 4), null when unmeasured; a duration is not
+                                -- content, so NFR-SEC-001 does not reach it
   -- The §4.3 step-5 stamp (ADR-027 Amendment 1). JSON arrays of ids; `[]` when none
   -- contributed, NEVER NULL — `[]` is the fact "nothing did", NULL would say "we did
   -- not record". STORED, not derived: see the note below the table for why.
@@ -85,17 +96,22 @@ CREATE TABLE audit_records (
   cascade_escalated INTEGER,
   tokens_in INTEGER, tokens_out INTEGER, est_cost_usd REAL,
   latency_json TEXT,            -- per-detector ms + total_attributable_overhead_ms +
-                                --   upstream_ms + input_hold_ms + sentence_holds_ms[] +
-                                --   added_time_to_last_byte_ms   (ADR-030). The two per-hold
-                                --   series ARE emitted; the rename and the last-byte row are
-                                --   not yet (remainder of M-20) -- code still writes
-                                --   gateway_overhead_ms.
+                                --   upstream_ms + input_hold_ms + sentence_holds_ms[]
+                                --   (ADR-030). All four ARE emitted. The vocabulary is CLOSED
+                                --   and enforced here by check_latency_keys.
+                                --   added_time_to_last_byte_ms is NOT a key of this column:
+                                --   ADR-030 Amendment 1 re-sited it to 06 §4 as a
+                                --   benchmark-client quantity, because "client-observed" names
+                                --   a vantage the writer of this row does not have.
   -- Coverage: which detectors RAN for this request, and which were expected and did not
   -- (M-10). Absence of coverage is a fact a reader must be able to see, not infer from a
   -- short `signals_json`. `{}` means "coverage not recorded" and is distinct from
   -- `{"ran":[],"not_run":[]}` = "nothing ran and nothing was expected" — the same
   -- distinction ADR-027 Amendment 1 draws between `[]` and NULL. Any record the gateway
-  -- writes for a completed request states both lists.
+  -- writes for a completed request states both lists. **ADR-033 adds a third list,
+  -- `unavailable[]`** ({detector, missing}): registered but unloadable at boot, which is
+  -- neither a run nor an expected-and-skipped. A detector appears in AT MOST ONE of the
+  -- three.
   detectors_json TEXT NOT NULL DEFAULT '{}',
   sampled_deep INTEGER DEFAULT 0,
   -- Crash-safety marker (M-13). `complete` = the lifecycle finished and `verdict` is final.
@@ -149,16 +165,20 @@ removed without storing what it was.
 
 ## 4. Audit record — canonical JSON view
 
-The proposal/README show this shape (assembled from `audit_records`):
+The proposal/README show this shape (assembled from `audit_records`). The `fast_consistency`
+signal below is **illustrative of the record shape, not of current behaviour**: SL-6 cut that
+detector, so no signal carries `hallucination.low_confidence` today. The shape is what this
+section specifies, and it is unchanged by which detectors happen to be implemented:
 ```json
 {
-  "request_id": "…", "use_case": "finance_advisor", "policy_version": 3,
+  "request_id": "…", "use_case": "finance_advisor", "policy_version": 4,
   "verdict": "escalate",
   "signals": [{"detector":"fast_consistency","labels":["hallucination.low_confidence"],
                "score":0.41,"stage":"output_full","latency_ms":38.2}],
   "detector_failures": [{"failure_id":"…","detector":"tier2_toxicity",
                          "error_class":"DetectorTimeout","stage":"output_full",
-                         "fail_mode_applied":"fail_closed","ts":"…"}],
+                         "fail_mode_applied":"fail_closed","ts":"…",
+                         "attributable_ms":27.4}],
   "contributing_signal_ids": ["…"], "failure_record_ids": ["…"],
   "actions": {"quarantined": true, "review_id":"…",
               "input_redactions": [{"stage":"input","category":"pii.ssn",
@@ -167,10 +187,10 @@ The proposal/README show this shape (assembled from `audit_records`):
             "upstream_class":"measured","cascade_escalated":true},
   "cost": {"tokens_in":812,"tokens_out":344,"est_usd":0.0041},
   "latency": {"total_attributable_overhead_ms":46.1,"upstream_ms":1240.0,
-              "input_hold_ms":12.4,"sentence_holds_ms":[18.9,14.8],
-              "added_time_to_last_byte_ms":51.7},
+              "input_hold_ms":12.4,"sentence_holds_ms":[18.9,14.8]},
   "detectors": {"ran":["tier1_pii","numeric_claims"],
-                "not_run":[{"detector":"fast_consistency","reason":"not_implemented"}]},
+                "not_run":[{"detector":"fast_consistency","reason":"not_implemented"}],
+                "unavailable":[{"detector":"tier2_toxicity","missing":"onnxruntime"}]},
   "record_status": "complete",
   "override": {"decision":"approve","note":"claim verified against filing","ts":"…"}
 }
@@ -193,6 +213,17 @@ than a key inside `actions` precisely so that filter is expressible in SQL.
 `reason` vocabulary — **`not_implemented`** (the detector has no live implementation in this
 phase; see the deferred-scope register in 08). Extending this list is a doc change, as for any
 other fixed vocabulary here.
+
+**`unavailable` — registered but unloadable (ADR-033).** Entries are `{detector, missing}`, where
+`missing` names the absent dependency (an import name, never a traceback). This is the third
+lifecycle state and it is a **boot-time** fact: the detector has an implementation, so
+`not_implemented` would be a false statement, and nothing ran, so it is **not** a
+`DetectorFailureRecord` either. `dependency_unavailable` is deliberately **not** a `not_run`
+reason — that would restate an environment fact once per request while leaving unanswerable
+whether the coverage promise was ever keepable. A detector may appear in **at most one** of
+`ran`, `not_run`, `unavailable`; the write path enforces that, as it already does for the first
+two. Enforcement is at **boot**, mirroring FR-GW-006: any active policy mapping that detector's
+class to `fail_closed` refuses the boot outright (04 §5).
 
 **`{}` means "coverage not recorded"**, and is deliberately distinct from
 `{"ran":[],"not_run":[]}`, which asserts that nothing ran and nothing was expected. This is the
@@ -229,7 +260,8 @@ cp.policy.evaluate  cp.action.apply  cp.audit.write
 Metrics (name → labels):
 ```
 cp_requests_total{use_case,verdict}       cp_gateway_overhead_ms{use_case}   (histogram)
-cp_detector_latency_ms{detector}          cp_detector_failures_total{detector,fail_mode}
+cp_detector_latency_ms{detector,outcome}  cp_detector_failures_total{detector,fail_mode}
+cp_detector_attributable_ms{detector}     # ADR-036 Amendment 1: the NFR-P-002 instrument
 cp_pii_intercepts_total{category,use_case}
 cp_est_cost_usd_total{use_case,model}     cp_cascade_escalations_total{use_case}
 cp_review_items_total{use_case,status}    cp_deep_audit_entropy{use_case}    (gauge)
@@ -237,10 +269,21 @@ cp_consistency_lagged_total{use_case}     cp_probe_rejections_total{use_case}
 cp_fallback_engaged_total{from_provider,to_provider,reason}      # FR-GW-006
 cp_pricing_missing_total{provider,model}                        # ADR-022
 cp_enrichment_skipped_total{use_case,reason}                    # 04 §2.2 cap
+cp_detector_unavailable_total{detector}                         # ADR-033 state (c)
+cp_detector_timeout_abandoned_total{detector}                    # ADR-034 Part A
 ```
+**ADR-036 Amendment 1 — two detector-timing series, and which one carries the verdict.** ADR-036 ruled that an NFR-P-002 budget binds detector-**attributable** time, but the benchmark gate kept reading the wall-clock histogram, so a published verdict was rendered against the clock the ruling rejected (`[D3-nfr-p002-gate-reads-the-clock-adr-036-rejected]`). The vocabulary now carries both quantities explicitly, because they answer different questions and neither substitutes for the other:
+
+* **`cp_detector_attributable_ms{detector}`** — in-thread CPU per call, the same figure `run_with_budget` enforces on. **This is the NFR-P-002 series**, and the only one a budget verdict may be rendered against.
+* **`cp_detector_latency_ms{detector,outcome}`** — wall-clock through the event loop, **untargeted**. It is not a budget series and never was a fair one: for a pool detector it includes queue wait and GIL contention with whatever else shared the lane. It stays published because it is the **constituent of the holds** (ADR-036 item 5), which are what a user actually waits for, and withdrawing it would delete a real measurement.
+
+`outcome` is the **A2 partition**: `ok` for a call that returned, `fault` for one that raised. Wall-clock is observed for **both** — a timeout consumed real time and hiding it would make the breach invisible in the histogram — but they are now separable, so a fault and a budget breach can never be the same event counted twice under two names. That collapse was live: `tier2_toxicity` published a P99 over budget *and* 2 faults, where the top 1% of n=283 is ~3 samples, and nothing in the series could say whether those were the same two events.
+
+The label is on wall-clock only. `cp_detector_attributable_ms` has no `outcome`: an in-thread figure exists only when a worker measured one, so its absence is already the distinction, and a hang (whose worker never returned) contributes nothing rather than a zero.
+
 The definition of `cp_gateway_overhead_ms` / `latency_json.total_attributable_overhead_ms` is **normative in 06 §4** — implementations and dashboards must use that formula, not an ad-hoc one.
 
-**ADR-030 renamed that key** (`gateway_overhead_ms` → `total_attributable_overhead_ms`; same formula, no longer the targeted figure) and added three series: `input_hold_ms`, `sentence_holds_ms` (a **list**, one entry per sentence — the only non-scalar in this vocabulary, because NFR-P-001 now takes percentiles over holds rather than over requests) and `added_time_to_last_byte_ms`. This vocabulary is **enforced at the audit write path** by `check_latency_keys`, so all four are the contract here. `input_hold_ms` and `sentence_holds_ms` **are emitted** on both delivery paths (ADR-030's targeted series; the list carries one entry per released unit, and one for the buffered response on a non-streaming pipeline per M-11). The **rename** and `added_time_to_last_byte_ms` are **not yet emitted** — code still writes `gateway_overhead_ms` — which is the remainder of **M-20**; both are untargeted publication rows, so neither gates NFR-P-001. The metric name `cp_gateway_overhead_ms` is **unchanged**: renaming a metric would orphan history for a figure whose definition did not change.
+**ADR-030 renamed that key** (`gateway_overhead_ms` → `total_attributable_overhead_ms`; same formula, no longer the targeted figure) and added two series: `input_hold_ms` and `sentence_holds_ms` (a **list**, one entry per sentence — the only non-scalar in this vocabulary, because NFR-P-001 now takes percentiles over holds rather than over requests). This vocabulary is **enforced at the audit write path** by `check_latency_keys`, so these are the contract here. `input_hold_ms` and `sentence_holds_ms` **are emitted** on both delivery paths (ADR-030's targeted series; the list carries one entry per released unit, and one for the buffered response on a non-streaming pipeline per M-11). The **rename is emitted** as of 2026-08-28: the write path, `spans.py`'s enforced vocabulary and the single 06 §4 formula implementation all carry `total_attributable_overhead_ms`, and the function computing it was renamed with the key — a helper still called `gateway_overhead_ms` while writing the new key is the drift **M-20** was filed for. `added_time_to_last_byte_ms` is **not a key of this column at all**, and that is a decision rather than a pending item: **ADR-030 Amendment 1** re-sited it to **06 §4** as a benchmark-client quantity. Its definition begins "client-observed", and the gateway has no client vantage on either delivery path — a completed ASGI `send()` means *handed to the transport*, not received, the buffered write precedes the response by M-13's deliberate ordering, and the table is insert-only, so there is no later phase in which a post-delivery figure could arrive. Emitting a handoff delta under a name that promises a client stopwatch would have published a number whose label overstates it (AGENTS.md §7). It remains **published**, in the latency report, where the process holding the stopwatch is the one that measures it. **M-20's remainder closes with that re-siting**, not with an emission. The metric name `cp_gateway_overhead_ms` is **unchanged**: renaming a metric would orphan history for a figure whose definition did not change.
 
 ## 6. Config files
 
@@ -318,8 +361,22 @@ a gap loud rather than silent:
 | situation | behaviour |
 |---|---|
 | model missing from `pricing.models` at runtime | `est_cost_usd` = **null** (not 0.0, not a guess) + `cp_pricing_missing_total` |
+| **no dispatch** (04 §4.5 short-circuit), `measured` class | `tokens_in`/`tokens_out` = **0/0** and `est_cost_usd` = **0.0** — a *counted* zero, not an estimate; `model_used` stays null |
+| **no dispatch**, `dev` class | `tokens_in`/`tokens_out` = **0/0**, `est_cost_usd` = **null** |
 | provider declares `pricing: null`, `measured` class | boot **warning** naming the provider |
 | model missing at boot **and** named in `tiers`, `measured` class | **hard boot failure** — it is on a routing path, so it will answer requests and produce unpriceable audit records |
+
+The two **no dispatch** rows are the one place the null-not-zero rule inverts, and it
+inverts because the quantity changes rather than the policy (owner ruling, 2026-08-28).
+Row 1 is null because the cost is *unknown*; a short-circuited request sent nothing, so 0
+tokens is a **count** and — on a provider whose accounting is trustworthy — 0.0 is a
+**measurement** of what blocking before dispatch saved. Null there would delete the saving:
+null is excluded from an average, so a pipeline blocking half its traffic pre-dispatch
+would report the same mean cost as one blocking none. `dev` class stays null for the
+ADR-018 reason and not for want of arithmetic — its figures are barred from every
+judge-facing artifact, so a 0.0 from it would sit in the column those artifacts read.
+`model_used` is null on both rows: no model answered, and naming one would invent a
+dispatch.
 
 Both boot rows are **measured-class only**, and that scope is load-bearing rather than an
 omission. A `dev`-class provider exists under ADR-018 precisely to be usable *while*

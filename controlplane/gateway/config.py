@@ -82,8 +82,14 @@ class Tiers(BaseModel):
     """Tier name -> concrete provider model id (ADR-009's two-tier cascade).
 
     `None` means the provider cannot serve that tier. Both-`None` is legal for a
-    declared-but-not-yet-working provider (see `ollama-local`, Q-10) — but not for the
-    active one, which `GatewayConfig` enforces.
+    declared-but-not-yet-working provider — a provider can be described before a model is
+    available to serve it — but not for the active one, which `GatewayConfig` enforces.
+
+    A *partial* binding is the more common shape and is equally legal: `ollama-local` binds
+    `small` and leaves `frontier` null, because exactly one local model is evidenced (Q-10).
+    Filling the second tier with the same id to look complete would make ADR-009's cascade a
+    no-op while reading as configured, so `resolve` returns None and the caller refuses
+    rather than substituting.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -360,12 +366,25 @@ class TaintedDataError(RuntimeError):
     """
 
 
-def load_gateway_config(path: Path | str | None = None) -> GatewayConfig:
+def load_gateway_config(
+    path: Path | str | None = None, *, active: str | None = None
+) -> GatewayConfig:
     """Load and validate `config/gateway.yaml` (05 §6.1).
 
     Raises `FileNotFoundError` if absent and `pydantic.ValidationError` with a precise
     message if invalid — FR-CFG-001's "refuses to load with a precise error" discipline,
     applied to the gateway config for the same reason it applies to policies.
+
+    `active` overrides `active_provider` before validation, which is how the serving path
+    runs a measured upstream while the shipped default stays dev-class. That split is not
+    cosmetic: the key also sets the ADR-018 provenance class `require_measured_upstream()`
+    gates reports on, and the class offline paths inherit when they build a `Gateway` with
+    no config — and a fixture upstream reports no prompt tokens, which is boot-fatal for a
+    measured provider (FR-GW-006). See the comment above `active_provider` in the YAML.
+
+    The override goes through the constructor rather than `model_copy` + attribute
+    assignment, because that shortcut skips the provider-graph and pricing validators —
+    exactly the checks that must run on a provider about to serve real traffic.
     """
     config_path = Path(path) if path is not None else CONFIG_PATH
     raw: Any = yaml.safe_load(config_path.read_text())
@@ -373,6 +392,8 @@ def load_gateway_config(path: Path | str | None = None) -> GatewayConfig:
         raise ValueError(
             f"{config_path} did not parse to a mapping (got {type(raw).__name__})"
         )
+    if active is not None:
+        raw["active_provider"] = active
     return GatewayConfig(**raw)
 
 

@@ -126,9 +126,9 @@ def test_reload_picks_up_a_valid_change(policy_copy: Path) -> None:
     """FR-CFG-002: behaviour changes with no code change (the policy-as-config thesis)."""
     store = PolicyStore(policy_copy)
     store.load()
-    assert store.get("support_bot").policy_version == 2
+    assert store.get("support_bot").policy_version == 3
 
-    mutate(policy_copy / "support_bot.yaml", "policy_version: 2", "policy_version: 7")
+    mutate(policy_copy / "support_bot.yaml", "policy_version: 3", "policy_version: 7")
     assert store.reload()["support_bot"] == 7
     assert store.get("support_bot").policy_version == 7
 
@@ -156,7 +156,7 @@ def test_version_bump_with_a_content_change_does_not_warn(policy_copy: Path) -> 
     store.load()
     target = policy_copy / "support_bot.yaml"
     mutate(target, "deep_audit_rate: 0.10", "deep_audit_rate: 0.20")
-    mutate(target, "policy_version: 2", "policy_version: 3")
+    mutate(target, "policy_version: 3", "policy_version: 4")
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         store.reload()

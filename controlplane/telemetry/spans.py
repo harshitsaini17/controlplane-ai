@@ -10,8 +10,8 @@ missing panel three days later.
 
 Two names are deliberately NOT here:
 
-* `gateway_overhead_ms` and `upstream_ms` are `latency_json` keys but not spans —
-  05 §3 lists them alongside "per-detector ms", and `gateway_overhead_ms` is a
+* `total_attributable_overhead_ms` and `upstream_ms` are `latency_json` keys but not spans —
+  05 §3 lists them alongside "per-detector ms", and `total_attributable_overhead_ms` is a
   *derived* figure with a normative formula in 06 §4, not a measured interval.
   `LATENCY_EXTRA_KEYS` holds them so the write-path check knows they are legal.
 * There is no span for the deep lane. Nothing on the hot path awaits it
@@ -32,7 +32,7 @@ INPUT_TIER2 = "cp.input.tier2"
 COST_BUDGET = "cp.cost.budget"
 COST_ROUTE = "cp.cost.route"
 
-#: The upstream provider call. Excluded from `gateway_overhead_ms` by 06 §4 —
+#: The upstream provider call. Excluded from `total_attributable_overhead_ms` by 06 §4 —
 #: provider variance is not gateway overhead.
 UPSTREAM = "cp.upstream"
 
@@ -65,13 +65,15 @@ ALL: tuple[str, ...] = (
 )
 
 #: `latency_json` keys that are legal but are not spans (see the module docstring).
-#: `gateway_overhead_ms` is derived per the 06 §4 formula; `upstream_ms` is the
+#: `total_attributable_overhead_ms` is derived per the 06 §4 formula (ADR-030 renamed the key, not the
+#: formula, and NOT the `cp_gateway_overhead_ms` metric — renaming that would orphan
+#: history for a figure whose definition did not change); `upstream_ms` is the
 #: provider wait, recorded because it must be *subtractable*, not because it is ours.
 #: `input_hold_ms` and `sentence_holds_ms` are the ADR-030 per-hold series NFR-P-001
 #: targets — composed of measured intervals rather than being spans themselves, which is
 #: why they live here and not in `ALL`.
 LATENCY_EXTRA_KEYS: frozenset[str] = frozenset({
-    "gateway_overhead_ms",
+    "total_attributable_overhead_ms",
     "upstream_ms",
     "input_hold_ms",
     "sentence_holds_ms",

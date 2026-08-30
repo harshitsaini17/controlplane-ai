@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from enum import Enum
 from functools import cached_property
+from string import Formatter
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
@@ -262,10 +263,65 @@ class FailModes(_Section):
 
 
 class Messages(_Section):
-    """User-facing text; FR-POL-004 requires it to come from the policy file."""
+    """User-facing text; FR-POL-004 requires it to come from the policy file.
+
+    Both fields are **templates**, rendered once at load by `Policy._render_messages`.
+    What is stored on a loaded policy is therefore the final user-facing string, not the
+    file's literal text — see that validator for why rendering happens there.
+    """
 
     block_fallback: Annotated[str, Field(min_length=1)]
     escalate_user_notice: Annotated[str, Field(min_length=1)]
+
+
+#: Placeholders a `messages.*` template may use (04 §3). Deliberately a closed set: an
+#: unknown name is a silent bug in a judge-facing string, so it is a load-time error
+#: instead. Widening this is a one-line change plus a 04 §3 edit; it is not something a
+#: policy file may do on its own.
+MESSAGE_PLACEHOLDERS: frozenset[str] = frozenset({"use_case"})
+
+
+def render_message_template(template: str, *, field: str, context: dict[str, str]) -> str:
+    """Render one `messages.*` template, or raise with an actionable load-time error.
+
+    Placeholders are validated **before** the string is formatted, and only names in
+    `MESSAGE_PLACEHOLDERS` pass. That ordering matters for more than error quality:
+    `str.format` resolves attribute and index access inside a field name, so a template
+    reading `{use_case.__class__}` would reach into the object graph. Policy files are
+    trusted operator config rather than user input, so this is defence in depth and not a
+    live hole — but the check costs one pass and removes the question.
+
+    Raises:
+        ValueError: unknown placeholder, positional placeholder, attribute/index access,
+            or malformed braces. All four are load-time failures, never runtime.
+    """
+    try:
+        fields = [name for _, name, _, _ in Formatter().parse(template) if name is not None]
+    except ValueError as exc:                    # unbalanced or malformed braces
+        raise ValueError(
+            f"messages.{field} is not a valid template ({exc}). To show a literal brace, "
+            "double it: '{{' renders as '{'"
+        ) from exc
+
+    for name in fields:
+        if name in MESSAGE_PLACEHOLDERS:
+            continue
+        allowed = ", ".join(f"{{{n}}}" for n in sorted(MESSAGE_PLACEHOLDERS))
+        if not name:
+            detail = "positional placeholders ({}) are not supported"
+        elif name.isdigit():
+            detail = f"positional placeholders ({{{name}}}) are not supported"
+        elif "." in name or "[" in name:
+            detail = f"attribute and index access ({{{name}}}) is not permitted"
+        else:
+            detail = f"{{{name}}} is not a known placeholder"
+        raise ValueError(
+            f"messages.{field}: {detail}. Allowed: {allowed} (04 §3). A placeholder that "
+            "reaches a user unrendered is a visible defect, so this is refused at load "
+            "rather than shipped"
+        )
+
+    return template.format(**context)
 
 
 class Escalation(_Section):
@@ -433,6 +489,35 @@ class Policy(_Section):
                 "label would apply no transform. Input-stage labels are additionally "
                 "barred from edit by 04 §4.5."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _render_messages(self) -> "Policy":
+        """Render `messages.*` templates once, at load (FR-POL-004).
+
+        Rendering here rather than at each use site is what makes the guarantee total: the
+        two strings are read from **nine** places (six verdict branches in
+        `policy/actions.py`, three audit `fallback_used` sites in `gateway/app.py`), and a
+        renderer at the use site is one that a tenth call site can forget. A live
+        `hr_copilot` BLOCK returning the literal "under {use_case} policy" is what this
+        prevents.
+
+        Safe to do in place: `policy/store.py` builds each `Policy` exactly once per load
+        and never re-validates or copies it, so this cannot double-render. Nothing
+        downstream needs the raw template — the file digest is `sha256` over the file's
+        own bytes, and `GET /admin/policies` is an inventory that never returns the body.
+
+        One consequence worth stating: the audit record's `fallback_used` now stores the
+        text the caller actually received. That is strictly more faithful to what the
+        field claims to record, and it is still operator-authored config rather than model
+        output, so 05 §3's reason for storing it verbatim is unchanged.
+        """
+        context = {"use_case": self.use_case}
+        self.messages.block_fallback = render_message_template(
+            self.messages.block_fallback, field="block_fallback", context=context)
+        self.messages.escalate_user_notice = render_message_template(
+            self.messages.escalate_user_notice, field="escalate_user_notice",
+            context=context)
         return self
 
     @model_validator(mode="after")

@@ -9,12 +9,16 @@ fault stamped in `failure_record_ids`)." Both assertions are evaluated here, rea
 the audit record rather than from the HTTP response — the response says what the client saw,
 and 04 §5's claim is about what the system *recorded* about its own failure.
 
-**The class 06 §5 names is not the class that can carry it this phase, and that is stated
-rather than quietly substituted.** §5 and 07 beat 7 both say `tier2`. Neither `tier2`
-detector (`tier2_injection`, `tier2_toxicity`) is live yet, so a tier2 fault cannot be
-injected at all — there is nothing to monkeypatch. What *is* live is `numeric_claims`, whose
-04 §2 class is `performance`, and the shipped policies give it the identical asymmetry the
-beat exists to show:
+**The class 06 §5 names is the class this run carries. The substitution is retired.** §5 and
+07 beat 7 both say `tier2`, and `tier2_toxicity` (OUTPUT_SENTENCE) now carries it. Worth recording
+why the stand-in stood as long as it did, because the second reason was not the first: initially
+no tier2 detector existed to monkeypatch, then `tier2_injection` shipped but runs at **INPUT**
+(04 §2) while this harness injects only at `FAULT_STAGES` — see `_Faulty` for why the input lane
+is a different phenomenon rather than an oversight. The harness needed no edit to close it:
+`faultable()` derives coverage, so a detector landing in an output lane changes the answer by
+itself. `numeric_claims` (04 §2 class `performance`) is still exercised beside it, now as
+corroboration rather than a stand-in, and the shipped policies give both classes the identical
+asymmetry the beat exists to show:
 
     performance:   support_bot fail_open · hr_copilot fail_open · finance_advisor fail_closed
     tier2:         support_bot fail_open · hr_copilot fail_open · finance_advisor fail_closed
@@ -22,9 +26,10 @@ beat exists to show:
 Same two-sided contrast, same requirement (FR-POL-006 is *per detector class*, not per
 detector). So SC-3 is demonstrable now on `performance`, and `tier2` is pinned as deferred by
 `test_tier2_is_not_yet_injectable` — the tripwire pattern ratified for OVLP-01/beat 4. When a
-tier2 detector lands, `CLASS_CARRIERS` picks it up automatically (it is derived, not listed)
-and that test fails, forcing 07 beat 7 back into review rather than letting the substitution
-become permanent.
+*faultable* tier2 detector lands, `class_carriers()` picks it up automatically (it is derived,
+not listed) and that test fails, forcing 07 beat 7 back into review rather than letting the
+substitution become permanent. `tier2_injection` going live already fired it once, which is how
+the stage precondition was found.
 
 `tier1` is live but cannot carry the beat for the opposite reason: all three policies set
 `tier1: fail_closed`, so it has no fail-open side. It is still exercised and reported, because
@@ -48,9 +53,9 @@ evaluated and recorded as non-binding, the same scoping `run_all.py` applies and
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import platform
-import subprocess
 import sys
 import tempfile
 from collections.abc import Sequence
@@ -62,19 +67,29 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from controlplane.audit.records import canonical_view
+from controlplane.detectors import rag_grounding as rag_grounding_mod
+from controlplane.detectors.availability import probe_availability
 from controlplane.detectors.base import DetectorTimeout, Stage
 from controlplane.gateway import pipeline
+from controlplane.detectors.onnx_models import warm_models
 from controlplane.gateway.app import Gateway, create_app
 from controlplane.gateway.config import (
     TaintedDataError,
     load_gateway_config,
     require_measured_upstream,
 )
-from controlplane.gateway.ingress import HEADER_REQUEST_ID, HEADER_USE_CASE
+from controlplane.gateway.ingress import CONTEXT_KEY, HEADER_REQUEST_ID, HEADER_USE_CASE
 from controlplane.gateway.sse_proxy import UpstreamResponse
 from controlplane.policy.engine import DETECTOR_FAIL_CLASS
 from controlplane.policy.store import PolicyStore
 from controlplane.telemetry.metrics import MetricsRegistry
+from eval.host_load import (
+    QUIET_LOAD1_MAX,
+    code_commit_cell,
+    git_stamp,
+    load_stamp,
+    quiet_verdict,
+)
 from eval.validate_dataset import (
     DATASET_DIR,
     FROZEN_COMMIT,
@@ -99,6 +114,55 @@ PROBE_CASE = "CLN-001"
 #: them identically; picking the one the doc names keeps the harness answerable to it.
 FAULT = DetectorTimeout
 
+#: The stages at which `_Faulty` raises — and therefore the only stages at which a fault can
+#: actually be injected. **Shared with `class_carriers()` so the fault site and the coverage
+#: derivation cannot drift.** A carrier chosen outside these stages is selected, reported as
+#: covering its class, and then never faults. That is not hypothetical: it is what happened the
+#: moment `tier2_injection` (an INPUT-only detector, 04 §2) went live — every tier2 assertion
+#: failed with `failures=[]` while the report still claimed tier2 was carried. The precondition
+#: was always there; it was satisfied by accident while every carrier happened to be output-lane.
+FAULT_STAGES: tuple[Stage, ...] = (Stage.OUTPUT_SENTENCE, Stage.OUTPUT_FULL)
+
+
+#: `{detector: missing dependency}` for every detector in a `FAULT_STAGES` lane, from ADR-033's
+#: single declaration. Probed once per process: `find_spec` is deterministic, and `LANES` is
+#: static, so re-probing per call would ask the same question a dozen times per run. Derived
+#: rather than hand-typed for the reason `run_all.UNLOADABLE` is: a module name written beside a
+#: `REQUIREMENTS` entry naming the same module is two declarations free to disagree.
+UNLOADABLE: dict[str, str] = {
+    entry.detector: entry.missing
+    for entry in probe_availability(
+        sorted({d for st in FAULT_STAGES for d in pipeline.LANES[st]})
+    )
+}
+
+
+def faultable() -> frozenset[str]:
+    """Live detectors `_Faulty` can actually raise for: in a `FAULT_STAGES` lane, AND loadable.
+
+    Membership only — ordering is left to `DETECTOR_FAIL_CLASS`, which preserves the 04 §2
+    registry order the carrier tie-break depends on.
+
+    **Three terms, and the third one is ADR-033.** Live is not enough, and neither is live-and-
+    in-lane: `run_lane` consults the boot manifest and never calls `detect()` on a detector this
+    host cannot load, so `_Faulty` is never invoked and raises nothing. Selecting such a detector
+    as a carrier produced a probe stamped `injected=<name>` whose `failures` was empty — a control
+    run mislabelled as a faulted one, which is the same misreport the in-lane term prevents,
+    arriving by a third route. On an `.[dev]`-only host that silently picked `tier2_toxicity` and
+    `rag_grounding` as the `tier2` and `performance` carriers and failed 16 of 39 assertions.
+
+    Excluding them is honest degradation rather than a weakened check: `run_suite` skips a class
+    with no carrier (`carrier is None: continue`), and the report renders it `— none live —` /
+    Exercisable **no**, with SC-3 stating it is not demonstrable. The claim shrinks to what the
+    host can actually exercise instead of failing an assertion about a fault that never fired. On
+    a host with the `ml` extra `UNLOADABLE` is empty and this term changes nothing, which is what
+    keeps the committed evidence (06 §8, generated on real hardware) at full strength.
+    """
+    return frozenset(
+        d for st in FAULT_STAGES for d in pipeline.LANES[st]
+        if d in pipeline.LIVE and d not in UNLOADABLE
+    )
+
 
 def probe_text(dataset_dir: Path = DATASET_DIR) -> str:
     """`PROBE_CASE`'s text, straight from the frozen dataset.
@@ -117,14 +181,21 @@ def probe_text(dataset_dir: Path = DATASET_DIR) -> str:
 def class_carriers() -> dict[str, str]:
     """`{fail_class: live detector able to carry a fault for it}`.
 
-    **Derived from `DETECTOR_FAIL_CLASS` ∩ `pipeline.LIVE`, never listed.** A hardcoded map
+    **Derived from `DETECTOR_FAIL_CLASS` ∩ `faultable()`, never listed.** A hardcoded map
     would keep reporting `tier2` as unexercisable after a tier2 detector landed, which is the
     one way this harness could lie: it would under-report coverage while every assertion still
     passed. Ties break on the 04 §2 registry order, which `DETECTOR_FAIL_CLASS` preserves.
+
+    **The intersection is with `faultable()`, not with `pipeline.LIVE`**, and the difference is
+    load-bearing: being live is not enough to carry a fault, the detector must also sit in a lane
+    where `_Faulty` raises. Selecting on liveness alone over-reports in the opposite direction to
+    the hardcoded map — it would claim a class was covered while its assertions failed with an
+    empty failure list, which is how `tier2_injection` surfaced this.
     """
     carriers: dict[str, str] = {}
+    injectable = faultable()
     for detector, fail_class in DETECTOR_FAIL_CLASS.items():
-        if detector in pipeline.LIVE and fail_class not in carriers:
+        if detector in injectable and fail_class not in carriers:
             carriers[fail_class] = detector
     return carriers
 
@@ -174,7 +245,7 @@ class _Faulty:
         self._real = real
 
     async def detect(self, ctx):
-        if ctx.stage in (Stage.OUTPUT_SENTENCE, Stage.OUTPUT_FULL):
+        if ctx.stage in FAULT_STAGES:
             raise FAULT(self.name, "injected by eval.fault_injection (06 §5)")
         return await self._real.detect(ctx)
 
@@ -239,6 +310,17 @@ def run_probe(
     if inject:
         if original is None:
             raise SystemExit(f"cannot inject into {inject!r}: not a live detector")
+        # Live is necessary but NOT sufficient: `_Faulty` raises only at `FAULT_STAGES`, so
+        # wrapping a detector outside those lanes yields a probe stamped `injected=<name>`
+        # whose `failures` is empty — a control run mislabelled as a faulted one, which is the
+        # exact misreport the dead-detector guard above exists to prevent. `tier2_injection`
+        # (INPUT-only) made that reachable, so the guard covers both reasons rather than one.
+        if inject not in faultable():
+            raise SystemExit(
+                f"cannot inject into {inject!r}: live but not faultable — it runs at no stage "
+                f"in {[s.name for s in FAULT_STAGES]}, so the fault would never fire and the "
+                "probe would report a control run as faulted"
+            )
         pipeline.LIVE[inject] = _Faulty(inject, original)
     try:
         with tempfile.TemporaryDirectory() as tmp:
@@ -249,11 +331,44 @@ def run_probe(
                 db_path=str(Path(tmp) / "audit.db"),
                 key_map={},
             )
+            # Build the served graphs BEFORE the request. `TestClient` is not
+            # context-managed here (see below), so the lifespan warm-up never fires and a
+            # lazy build would land ~8 s inside the request — which is how this harness
+            # caught the defect: the *control* probe, with no fault injected, reported
+            # `failures=['tier2_injection']` because the build blew the ceiling.
+            warm_models(pipeline.LIVE)
+            # `rag_grounding` warms SEPARATELY, and for the same reason the comment above
+            # exists: `warm_models` intersects with `onnx_models.SERVED`, and this detector is
+            # a sentence-transformers bi-encoder, not an ONNX-served graph — so that call
+            # reaches it not at all. Its cold load is seconds of *attributable in-thread CPU*
+            # under ADR-036, which inside the request is a 30 ms budget breach and a fabricated
+            # `performance` fault in the CONTROL probe. Exactly the tier2 defect, one detector
+            # later. Warmed via the module, not `pipeline.LIVE[...]`, so an injected `_Faulty`
+            # wrapper does not stop the real encoder being built.
+            if rag_grounding_mod.NAME in pipeline.LIVE:
+                try:
+                    asyncio.run(rag_grounding_mod.warm())
+                except Exception as exc:  # unloadable host (ADR-033) — not a probe failure
+                    print(f"  note: rag_grounding warm skipped ({exc})", file=sys.stderr)
             client = TestClient(create_app(gateway), raise_server_exceptions=False)
             response = client.post(
                 "/v1/chat/completions",
                 headers={HEADER_USE_CASE: use_case},
-                json={"messages": [{"role": "user", "content": text}]},
+                json={
+                    "messages": [{"role": "user", "content": text}],
+                    # `rag_grounding` is context-gated per 04 §2 ("only when request carries
+                    # context docs"), so without this key the pipeline skips it and `_Faulty`
+                    # never raises: the probe would report `failures=[]` for the `performance`
+                    # class while stamped as having injected into it.
+                    #
+                    # The doc is the probe text VERBATIM. Cosine of identical text is 1.0 — the
+                    # maximum a bounded [0, 1] score can take — so no τ that 06 §3 calibration
+                    # can produce puts this signal below `tau_high`, and the control probe stays
+                    # a clean pass. A merely related doc measured 0.07 and would fire a real
+                    # signal, changing the very verdicts these invariants assert on. It is also
+                    # not an invented fixture: it comes from the same frozen `PROBE_CASE`.
+                    CONTEXT_KEY: {"context": [text]},
+                },
             )
             view = canonical_view(gateway.conn, response.headers[HEADER_REQUEST_ID])
             policy = store.get(use_case)
@@ -283,6 +398,36 @@ def run_probe(
                 pipeline.LIVE.pop(inject, None)
             else:
                 pipeline.LIVE[inject] = original
+
+
+@dataclass(frozen=True)
+class RepOutcome:
+    """One repetition's headline, for the reproducibility section.
+
+    Exists because a single run of this harness is **not** a reproducible claim: two of the
+    04 §5 control-probe assertions are load-sensitive by the [[M-53]]/[[M-60]] mechanism (a
+    budget overrun reaches the audit record as a detector fault, so a contended pool can
+    manufacture a fault on a probe where none was injected). A one-run report cannot express
+    that, and the first published one said `39/39` for a suite whose rate it never measured.
+
+    Load is carried at **both** ends of the repetition. Start alone is not enough: a rep that
+    begins quiet and ends contended was not measured on a quiet host, and `load1` rises during
+    a run of this harness (measured: 1.04 -> 1.24 across one rep).
+    """
+
+    passed: int
+    total: int
+    failures: tuple[str, ...]
+    load1: float | None
+    load1_end: float | None = None
+
+    @property
+    def quiet(self) -> bool | None:
+        """Three-valued, like `host_load.is_quiet`: None when load was not recorded."""
+        seen = [v for v in (self.load1, self.load1_end) if v is not None]
+        if not seen:
+            return None
+        return max(seen) <= QUIET_LOAD1_MAX
 
 
 @dataclass(frozen=True)
@@ -340,16 +485,6 @@ def check(probe: Probe, expect_mode: str) -> list[Assertion]:
             )
         )
     return out
-
-
-def _git(*args: str) -> str:
-    try:
-        return subprocess.run(
-            ["git", *args], capture_output=True, text=True, check=True,
-            cwd=Path(__file__).resolve().parents[1],
-        ).stdout.strip()
-    except Exception:  # noqa: BLE001
-        return "unavailable"
 
 
 #: 01 §3 pipeline labels, so the report reads in the docs' vocabulary (06 §5 and 07 beat 7
@@ -421,10 +556,26 @@ def execute(dataset_dir: Path = DATASET_DIR) -> Run:
                assertions=assertions, store=store)
 
 
-def _provenance(dataset_dir: Path, provenance_note: str) -> list[str]:
+def _load_cell(stamp: dict[str, Any] | None) -> str:
+    """A load row, worded exactly as the two timing harnesses word theirs (06 §8)."""
+    if not stamp:
+        return "not recorded — NOT CITABLE (06 §8)"
+    trio = " / ".join("—" if stamp.get(k) is None else str(stamp[k])
+                      for k in ("load1", "load5", "load15"))
+    return f"{trio} · {stamp.get('cpus')} CPUs — **{quiet_verdict(stamp)}**"
+
+
+def _provenance(
+    dataset_dir: Path,
+    provenance_note: str,
+    *,
+    start_load: dict[str, Any] | None = None,
+    end_load: dict[str, Any] | None = None,
+    cmd_suffix: str = "",
+) -> list[str]:
     digest = dataset_digest(dataset_dir)
-    head = _git("rev-parse", "HEAD")
-    dirty = _git("status", "--porcelain")
+    # One definition in `eval/host_load.py` (AGENTS.md §7).
+    code = git_stamp()
     return [
         "## Provenance",
         "",
@@ -436,17 +587,153 @@ def _provenance(dataset_dir: Path, provenance_note: str) -> list[str]:
         f"{'MATCHES' if not check_freeze(dataset_dir) else 'MISMATCH'} |",
         f"| Probe case | `{PROBE_CASE}` (frozen; prompt **and** stub response) |",
         f"| Injected fault | `{FAULT.__name__}` (06 §5 \"raise timeout\") |",
-        f"| Code commit | `{head[:12]}`{' + uncommitted changes' if dirty else ''} |",
+        f"| Code commit | {code_commit_cell(code)} |",
         f"| Python | {platform.python_version()} |",
         f"| Platform | {platform.system()} {platform.release()} · {platform.machine()} |",
-        f"| Command | `python -m eval.fault_injection` |",
+        f"| Command | `python -m eval.fault_injection{cmd_suffix}` |",
+        f"| Host load at start (1/5/15) | {_load_cell(start_load)} |",
+        f"| Host load at end (1/5/15) | {_load_cell(end_load)} |",
         "",
         provenance_note,
         "",
     ]
 
 
-def render(run: Run, dataset_dir: Path, provenance_note: str) -> str:
+def _reproducibility_section(reps: Sequence[RepOutcome]) -> list[str]:
+    """The observed pass RATE, which replaces the single-run claim for a multi-rep run.
+
+    A reproducibility-honest number beats a clean one. Every sentence here is derived from the
+    repetitions' own stamps rather than asserted: an earlier draft of this function hardcoded
+    "every repetition ran on a quiet host" and printed it beside an end-of-run stamp reading
+    NOT CITABLE, which is precisely the defect class this repo keeps catching — a claim
+    described by a premise it does not come from.
+    """
+    if len(reps) < 2:
+        return []
+    best = max(r.passed for r in reps)
+    clean = [r for r in reps if not r.failures]
+    quiet_states = [r.quiet for r in reps]
+    all_quiet = all(q is True for q in quiet_states)
+    loud = [i for i, r in enumerate(reps, 1) if r.quiet is False]
+    unknown = [i for i, r in enumerate(reps, 1) if r.quiet is None]
+
+    if all_quiet:
+        host_line = (
+            f"All {len(reps)} repetitions stayed within the 06 §8 quiet threshold "
+            f"(`load1 <= {QUIET_LOAD1_MAX}`) at both ends, so the spread below is the "
+            "system's rather than the host's."
+        )
+    else:
+        parts = []
+        if loud:
+            parts.append(
+                "repetition" + ("s " if len(loud) > 1 else " ")
+                + ", ".join(str(i) for i in loud)
+                + f" exceeded the 06 §8 quiet threshold (`load1 <= {QUIET_LOAD1_MAX}`)"
+            )
+        if unknown:
+            parts.append(
+                "repetition" + ("s " if len(unknown) > 1 else " ")
+                + ", ".join(str(i) for i in unknown) + " recorded no load"
+            )
+        host_line = (
+            "**Not every repetition was measured on a quiet host**: " + "; ".join(parts)
+            + ". Those repetitions are **not citable** under 06 §8 and the rate below must be "
+            "read with them excluded — stated rather than smoothed over, because a rate whose "
+            "conditions differ per sample is not one number."
+        )
+
+    lines = [
+        "## Reproducibility across repetitions",
+        "",
+        f"**{len(clean)}/{len(reps)} repetitions reached {best}/{reps[0].total}.** "
+        + host_line,
+        "",
+        "| Rep | Passed | load1 start | load1 end | Quiet (06 §8) | Failing assertion |",
+        "|---:|---:|---:|---:|---|---|",
+    ]
+    for i, r in enumerate(reps, 1):
+        quiet_cell = {True: "yes", False: "**NO**", None: "not recorded"}[r.quiet]
+        lines.append(
+            f"| {i} | {r.passed}/{r.total} | {'—' if r.load1 is None else r.load1} "
+            f"| {'—' if r.load1_end is None else r.load1_end} | {quiet_cell} "
+            f"| {'none' if not r.failures else ', '.join(f'`{n}`' for n in r.failures)} |"
+        )
+
+    flaky: dict[str, int] = {}
+    for r in reps:
+        for name in r.failures:
+            flaky[name] = flaky.get(name, 0) + 1
+
+    lines += ["", "The assertions that did not hold in every repetition:", ""]
+    if flaky:
+        for name, n in sorted(flaky.items(), key=lambda kv: -kv[1]):
+            lines.append(f"- `{name}` — failed **{n}/{len(reps)}**")
+    else:
+        lines.append("- none — every assertion held in every repetition")
+
+    lines += [
+        "",
+        "### What these repetitions do and do not establish",
+        "",
+        "**They share one process, and therefore one warmed model pool.** The first repetition "
+        "pays first-touch ONNX graph initialization; every later one runs against models already "
+        "resident. So this rate measures the **warmed steady state**, which is the demo's "
+        "condition but not the harness's cold one — a fresh process per repetition is a different "
+        "and slower measurement, and it is where the [[M-53]]/[[M-60]] flake was originally "
+        "observed. A clean rate here therefore does **not** retire that mechanism; it bounds it "
+        "to the cold path and to contention.",
+        "",
+    ]
+    if flaky:
+        lines += [
+            "**Mechanism, not noise.** A detector that overruns its budget is recorded in the "
+            "audit record as a *detector fault*, and the control probe asserts that a run with no "
+            "injected fault records none. So a pool-serialized model detector that runs slow "
+            "enough on one sentence manufactures a fault the harness reads as a broken "
+            "invariant. The assertion is **not relaxed** to absorb it (AGENTS.md §5.4) — it "
+            "fires on exactly the condition it exists to guard, and the guard is working.",
+            "",
+        ]
+    else:
+        lines += [
+            "**The load-sensitive failure did not reproduce in this run, which is not the same "
+            "as absent.** The mechanism is documented: a budget overrun is recorded as a "
+            "*detector fault*, so a pool-serialized detector running slow manufactures a fault "
+            "on a probe where none was injected, and the control assertion correctly reads that "
+            "as a broken invariant. It was observed on this host across **separate** harness "
+            "processes at `load1` below the quiet threshold ([[M-60]]). Reporting a clean "
+            "in-process rate as evidence that it is fixed would be the error; the assertion "
+            "stays unrelaxed (AGENTS.md §5.4) precisely so the next occurrence is visible.",
+            "",
+        ]
+
+    lines += [
+        "### Superseded single-run claim — preserved, not deleted",
+        "",
+        "> The run of **2026-08-30** published this suite as **`39/39 passed`** from a single "
+        "repetition, with no load stamp ([[M-54]]) and therefore no way for a reader to check the "
+        "quiet-host condition the figure depended on.",
+        ">",
+        "> That number is a real measurement of one run and is kept for that reason. What was "
+        "wrong was the **claim shape**: a single run cannot state a rate, and this suite's "
+        "control-probe assertions are load-sensitive, so one clean run and a reproducible "
+        "invariant are different facts. Superseded by the rate above; no figure in this "
+        "blockquote is recomputed by this run.",
+        "",
+    ]
+    return lines
+
+
+def render(
+    run: Run,
+    dataset_dir: Path,
+    provenance_note: str,
+    *,
+    reps: Sequence[RepOutcome] = (),
+    start_load: dict[str, Any] | None = None,
+    end_load: dict[str, Any] | None = None,
+) -> str:
     """The 06 §5 report. Evidence first, verdict last."""
     store = run.store
     lines: list[str] = [
@@ -457,7 +744,9 @@ def render(run: Run, dataset_dir: Path, provenance_note: str) -> str:
         "preference. This report injects one fault and reads the consequence back out of the "
         "audit record. Feeds demo beat 7 / SC-3.",
         "",
-        *_provenance(dataset_dir, provenance_note),
+        *_provenance(dataset_dir, provenance_note, start_load=start_load,
+                     end_load=end_load,
+                     cmd_suffix="" if len(reps) < 2 else f" --reps {len(reps)}"),
         "## Method",
         "",
         f"1. Probe text is `{PROBE_CASE}` from the frozen dataset — used as **both** the prompt "
@@ -553,7 +842,9 @@ def render(run: Run, dataset_dir: Path, provenance_note: str) -> str:
         "",
         "## Assertions",
         "",
-        f"{sum(1 for a in run.assertions if a.passed)}/{len(run.assertions)} passed.",
+        f"{sum(1 for a in run.assertions if a.passed)}/{len(run.assertions)} passed"
+        + ("." if len(reps) < 2 else f" in this repetition — the final one of {len(reps)}. "
+           "The rate across all repetitions is the citable figure; see *Reproducibility* below."),
         "",
         "| Result | Assertion | Evidence |",
         "|---|---|---|",
@@ -561,20 +852,26 @@ def render(run: Run, dataset_dir: Path, provenance_note: str) -> str:
     for a in run.assertions:
         lines.append(f"| {'PASS' if a.passed else '**FAIL**'} | {a.name} | `{a.detail}` |")
 
+    lines += ["", *_reproducibility_section(reps)]
+
     absent = [fc for fc in FAIL_CLASSES if fc not in run.carriers]
     lines += [
         "",
         "## Scope and limitations",
         "",
-        f"**06 §5 and 07 beat 7 both name `tier2`; this run carries SC-3 on "
-        f"`{two_sided[0] if two_sided else 'nothing'}` instead.** Neither tier2 detector "
-        "(`tier2_injection`, `tier2_toxicity`) is implemented yet, so a tier2 fault cannot be "
-        "injected — there is nothing to monkeypatch. FR-POL-006 is stated per detector "
-        "*class*, and the class used here has the identical two-sided configuration "
-        "(fail_open on UC-1/UC-2, fail_closed on UC-3), so the requirement is verified on a "
-        "live class rather than asserted on an absent one. "
-        "`test_tier2_is_not_yet_injectable` fails the moment a tier2 detector lands, forcing "
-        "07 beat 7 back into review rather than letting the substitution become permanent.",
+        f"**06 §5 and 07 beat 7 both name `tier2`, and this run carries SC-3 on "
+        f"`{'tier2' if run.carriers.get('tier2') else 'nothing'}` — the substitution is "
+        "retired.** It stood for two phases and for two different reasons: first nothing tier2 "
+        "existed to monkeypatch, then `tier2_injection` shipped but runs at INPUT (04 §2) while "
+        "faults are injected only at the OUTPUT stages (`FAULT_STAGES`), where a fault is a "
+        "response-in-flight decision rather than a short-circuit before dispatch. "
+        f"`{run.carriers.get('tier2', '—')}` (OUTPUT_SENTENCE) closes it, and the harness needed "
+        "no edit: `faultable()` derives coverage rather than listing it. `performance` is still "
+        "shown alongside, now as corroboration rather than a stand-in — FR-POL-006 is stated per "
+        "detector *class*, and two classes with the same two-sided configuration showing the "
+        "same contrast is a stronger result than one. "
+        "`test_tier2_carries_sc3_on_the_class_the_docs_name` holds the line from the other side: "
+        "it fails if tier2 ever stops being carried.",
         "",
         f"**Classes with no live carrier:** {', '.join(f'`{c}`' for c in absent) or 'none'}. "
         "Their `fail_mode` values are still read from config and shown above, so the "
@@ -595,6 +892,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--dataset-dir", type=Path, default=DATASET_DIR)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    parser.add_argument(
+        "--reps",
+        type=int,
+        default=1,
+        help="repeat the whole suite N times and publish the observed pass RATE instead of a "
+             "single-run claim. Two of the control-probe assertions are load-sensitive by the "
+             "M-53/M-60 mechanism, so one run cannot establish them (06 §5). The report keeps "
+             "the LAST repetition's evidence tables and adds a per-rep rate table.",
+    )
     parser.add_argument(
         "--allow-dev",
         action="store_true",
@@ -634,19 +940,52 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"reports anything upstream-derived."
         )
 
-    run = execute(args.dataset_dir)
+    if args.reps < 1:
+        print("--reps must be >= 1", file=sys.stderr)
+        return 2
+
+    # Load is stamped around the WHOLE measurement, not per rep: the rate claim is
+    # "quiet host", and a run whose tail went loud must not read as quiet (06 §8, M-54).
+    start_load = load_stamp()
+    reps: list[RepOutcome] = []
+    run = None
+    for i in range(args.reps):
+        rep_load = load_stamp()
+        run = execute(args.dataset_dir)
+        rep_end = load_stamp()
+        reps.append(RepOutcome(
+            passed=sum(1 for a in run.assertions if a.passed),
+            total=len(run.assertions),
+            failures=tuple(a.name for a in run.failed),
+            load1=rep_load.get("load1"),
+            load1_end=rep_end.get("load1"),
+        ))
+        if args.reps > 1:
+            print(f"  rep {i + 1}/{args.reps}: {reps[-1].passed}/{reps[-1].total}"
+                  f" (load1 {reps[-1].load1})")
+    assert run is not None
+    end_load = load_stamp()
+
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(render(run, args.dataset_dir, provenance_note))
+    args.out.write_text(render(
+        run, args.dataset_dir, provenance_note,
+        reps=reps if args.reps > 1 else (),
+        start_load=start_load, end_load=end_load,
+    ))
 
     passed = sum(1 for a in run.assertions if a.passed)
     print(f"{args.out}: {passed}/{len(run.assertions)} assertions passed")
+    if args.reps > 1:
+        clean = sum(1 for r in reps if not r.failures)
+        print(f"  RATE: {clean}/{len(reps)} repetitions fully clean"
+              f" (best {max(r.passed for r in reps)}/{reps[0].total})")
     for a in run.failed:
         print(f"  FAIL {a.name} — {a.detail}", file=sys.stderr)
     # Nonzero on any failed assertion. These are documented 04 §5 semantics, not a measured
     # target, so a failure here is a broken invariant rather than a missed number — the one
     # case where exiting nonzero is unambiguously right (AGENTS.md §5.4 forbids the
     # alternative of relaxing the assertion).
-    return 1 if run.failed else 0
+    return 1 if any(r.failures for r in reps) else 0
 
 
 if __name__ == "__main__":

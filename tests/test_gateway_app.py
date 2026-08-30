@@ -24,29 +24,51 @@ provider key, which is also what makes it safe to run in CI (06 §4's stub-upstr
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
+import shutil
 import sqlite3
 import tempfile
 import threading
+import uuid
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from controlplane.audit.records import canonical_view
-from controlplane.detectors.base import DetectorError, Stage
+from controlplane.detectors import availability
+from controlplane.detectors.availability import DetectorUnavailableError
+from controlplane.detectors.base import DetectorError, Stage, registered_names
+from controlplane.gateway import app as app_module
 from controlplane.gateway import pipeline
 from controlplane.gateway.app import (
     HTTP_ESCALATE,
     CanaryUnavailableWarning,
+    DetectorUnavailableWarning,
     Gateway,
+    _request_verdict,
     create_app,
 )
 from controlplane.gateway.canary import UsageSanityError, UsageSanityWarning
 from controlplane.gateway.config import load_gateway_config
-from controlplane.gateway.ingress import HEADER_REQUEST_ID, HEADER_USE_CASE, UpstreamError
+from controlplane.gateway.ingress import (
+    HEADER_ACTIONS,
+    HEADER_REQUEST_ID,
+    HEADER_USE_CASE,
+    UpstreamError,
+)
+from controlplane.policy.engine import (
+    Action,
+    FailMode,
+    FailureOutcome,
+    Verdict,
+)
+from controlplane.policy.store import PolicyStore
 from controlplane.gateway.sse_proxy import UpstreamResponse
 from controlplane.telemetry.metrics import MetricsRegistry
+
+from tests.ml_stack import requires_ml
 
 ROOT = Path(__file__).resolve().parents[1]
 DATASET = ROOT / "eval" / "dataset"
@@ -336,14 +358,53 @@ def test_input_pii_is_redacted_before_dispatch(make_client) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_uc3_records_fast_consistency_as_not_run(make_client) -> None:
-    """The case `detectors_json` exists for: `consistency: "on"` with no implementation."""
-    client, gateway, _ = make_client("Markets closed higher.")
+def test_uc3_records_fast_consistency_as_not_run(make_client, tmp_path) -> None:
+    """The case `detectors_json` exists for: `consistency: "on"` with no implementation.
+
+    **SL-6 moved the premise off disk.** `finance_advisor` shipped `consistency: "on"`
+    until the `fast_consistency` cut set every policy to `off`; at `off`, 04 §2 excludes
+    the detector from `expected_for` entirely, so it is correctly neither `ran` nor
+    `not_run` (05 §4: "a detector switched off by policy is not listed"). The premise is
+    therefore **constructed** on a copy — `on` is still a legal mode, and this is the only
+    coverage of the state where a policy asks for a check that does not exist. The
+    alternative was deleting the test because the config stopped reaching it, which would
+    retire a live requirement on a config change.
+
+    The `off` behaviour is covered separately below, so both readings are pinned.
+    """
+    policy_dir = tmp_path / "policies_on"
+    policy_dir.mkdir()
+    for path in (ROOT / "policies").glob("*.yaml"):
+        shutil.copy(path, policy_dir)
+    target = policy_dir / "finance_advisor.yaml"
+    # streaming stays false, so ADR-014's `on => streaming: false` guard is satisfied.
+    text = target.read_text().replace('consistency: "off"', 'consistency: "on"', 1)
+    assert 'consistency: "on"' in text, "the shipped value moved; premise not constructed"
+    target.write_text(text)
+
+    client, gateway, _ = make_client("Markets closed higher.", store=PolicyStore(policy_dir))
     response = post(client, "finance_advisor")
 
     detectors = audit_of(gateway, response)["detectors"]
     gaps = {entry["detector"]: entry["reason"] for entry in detectors["not_run"]}
     assert gaps.get("fast_consistency") == "not_implemented"
+    assert "tier1_pii" in detectors["ran"]
+
+
+def test_uc3_omits_fast_consistency_entirely_when_consistency_is_off(make_client) -> None:
+    """SL-6's shipped state: `off` means not listed at all, not listed as a gap.
+
+    The distinction 05 §4 draws is what keeps `not_run` answering one question. A cut
+    detector appearing as `not_implemented` under `off` would report a coverage gap where
+    the policy declined the check.
+    """
+    client, gateway, _ = make_client("Markets closed higher.")
+    response = post(client, "finance_advisor")
+
+    detectors = audit_of(gateway, response)["detectors"]
+    listed = {e["detector"] for e in detectors["not_run"]} | set(detectors["ran"])
+    assert "fast_consistency" not in listed, \
+        "consistency: off excludes the detector from coverage (05 §4), cut or not"
     assert "tier1_pii" in detectors["ran"]
 
 
@@ -363,13 +424,23 @@ def test_rag_grounding_is_not_listed_when_no_context_docs_were_sent(make_client)
     assert "rag_grounding" not in names
 
 
-def test_rag_grounding_is_listed_as_a_gap_when_context_docs_were_sent(make_client) -> None:
+@requires_ml
+def test_rag_grounding_runs_when_context_docs_were_sent(make_client) -> None:
+    """05 §4: expected AND implemented, so it reports as `ran` rather than as a gap.
+
+    Was `..._is_listed_as_a_gap_...` and asserted the opposite. That is a transition, not a
+    weakened assertion (AGENTS.md §5.4): the old test pinned the *unimplemented* state, and its
+    premise expired the moment `rag_grounding` landed in `pipeline.LIVE` — a gap assertion that
+    still passed here would mean the detector had been registered and then silently skipped.
+    Asserting `ran` is strictly stronger: it excludes both `not_run` and absence, where the old
+    form excluded only one of the three states.
+    """
     client, gateway, _ = make_client("All good.")
     response = post(client, "support_bot",
                     **{"controlplane": {"context": ["a source document"]}})
     detectors = audit_of(gateway, response)["detectors"]
-    gaps = {e["detector"] for e in detectors["not_run"]}
-    assert "rag_grounding" in gaps
+    assert "rag_grounding" in set(detectors["ran"])
+    assert "rag_grounding" not in {e["detector"] for e in detectors["not_run"]}
 
 
 # ---------------------------------------------------------------------------
@@ -468,6 +539,17 @@ def test_streaming_overhead_excludes_token_wait_time(make_client) -> None:
     `total − upstream` the two would be within rounding of each other; the assertion is
     that gateway work is a small fraction of a slow stream, which is the claim NFR-P-001
     actually makes.
+
+    **The stub's cadence was re-anchored by ADR-036's sweep; the tolerance was not touched.**
+    At 20 ms/token this stub produced 60.6 ms of upstream against 68.0 ms of overhead and the
+    test failed — not because the property broke, but because the fixture was calibrated when
+    the sentence lane held one regex detector. `tier2_toxicity` adds ~12 ms per sentence, and
+    this text is three sentences, so the lane legitimately costs ~36 ms more than when the
+    20 ms figure was chosen: 3 x 12 + the pre-existing ~30 = the 68 ms measured. The honest fix
+    is to make the stub stream at a rate a real provider actually streams at — 80 ms/token is
+    within the ordinary range — rather than to relax `upstream / 2`, which is the thing under
+    test. Widening the ratio would have quietly converted "gateway work is a small fraction of
+    a slow stream" into "gateway work is comparable to it" while still reporting as a pass.
     """
     import asyncio
 
@@ -475,7 +557,7 @@ def test_streaming_overhead_excludes_token_wait_time(make_client) -> None:
 
     async def slow(messages, **kw):
         for word in stub.text.split(" "):
-            await asyncio.sleep(0.02)
+            await asyncio.sleep(0.08)
             yield word + " "
 
     stub.stream_text = slow
@@ -483,14 +565,14 @@ def test_streaming_overhead_excludes_token_wait_time(make_client) -> None:
 
     latency = audit_of(gateway, response)["latency"]
     assert latency["upstream_ms"] > 50.0, "the injected token-wait should dominate"
-    assert latency["gateway_overhead_ms"] < latency["upstream_ms"] / 2
+    assert latency["total_attributable_overhead_ms"] < latency["upstream_ms"] / 2
 
 
 def test_the_two_overhead_formulas_are_not_the_same_function() -> None:
     """06 §4 defines two formulas; a single implementation would be one of them."""
-    streaming = pipeline.gateway_overhead_ms(
+    streaming = pipeline.total_attributable_overhead_ms(
         total_ms=100.0, upstream_ms=80.0, held_ms=5.0, streaming=True)
-    buffered = pipeline.gateway_overhead_ms(
+    buffered = pipeline.total_attributable_overhead_ms(
         total_ms=100.0, upstream_ms=80.0, held_ms=5.0, streaming=False)
     assert streaming == 5.0 and buffered == 20.0
 
@@ -695,7 +777,7 @@ def test_m13_a_post_release_crash_still_writes_an_audit_record(tmp_path, monkeyp
     assert rows[0]["record_status"] == "partial"
     # Real measurements, not nulls: the row is kept out of aggregates by its status, so
     # there is no reason to blank fields that were genuinely observed (AGENTS.md §7).
-    assert set(json.loads(rows[0]["latency_json"])) >= {"gateway_overhead_ms", "upstream_ms"}
+    assert set(json.loads(rows[0]["latency_json"])) >= {"total_attributable_overhead_ms", "upstream_ms"}
     assert json.loads(rows[0]["detectors_json"])["ran"], "coverage records what had run"
 
 
@@ -874,18 +956,32 @@ class CanaryStub(Stub):
 
 
 def canary_app(tmp_path, prompt_tokens: int | None = 64, *, provider: str | None = None,
-               enabled: bool = True, fail: bool = False):
+               enabled: bool = True, fail: bool = False, store=None):
     """An app whose upstream reports `prompt_tokens`, returning (app, gateway).
 
     `provider` switches `active_provider`, which is how the dev/measured asymmetry is
     reached: the shipped active provider is `kiro-local` (dev), so a measured-class test
     must repoint the config rather than hand-build a `Provider`.
+
+    **`store` defaults to the fail-open policy set, and that default is load-bearing.** The
+    ADR-033 availability gate runs BEFORE the canary (`run_availability_gate`, deliberately, so
+    a boot that will refuse for a locally-knowable reason does not first spend an upstream round
+    trip). The shipped `finance_advisor` maps `tier2: fail_closed`, so on a host without the
+    `.[ml]` stack — CI's `verify` matrix installs `.[dev]` only — that gate raises before the
+    canary ever runs, and all seven canary tests fail on an assertion about `gateway.canary`
+    for a reason that has nothing to do with the canary. Every test here posts to no use case
+    (they hit `/metrics` or nothing), so a two-policy store is sufficient.
+
+    ADR-033 rule 4 permits exactly this — re-pointing a test at a fail-open fixture — and
+    forbids the other move, editing `finance_advisor`'s `fail_mode` to something nobody ships.
+    The refusal itself keeps its own tests: `test_a_fail_closed_policy_refuses_the_boot`.
     """
     config = load_gateway_config().model_copy(deep=True)
     if provider is not None:
         config.active_provider = provider
     config.usage_sanity.canary_on_startup = enabled
     gateway = Gateway(
+        store=fail_open_policies(tmp_path) if store is None else store,
         dispatcher=CanaryStub(prompt_tokens, fail=fail),
         config=config,
         metrics=MetricsRegistry(),
@@ -992,3 +1088,608 @@ def test_the_canary_error_carries_no_credential_material(tmp_path) -> None:
             pass
     assert "sk-" not in (gateway.canary_error or "")
     assert "Bearer" not in (gateway.canary_error or "")
+
+
+# ---------------------------------------------------------------------------
+# Request-level verdict aggregation (04 §4.3 step 5)
+#
+# Owner live-test finding, 2026-08-28 — found by manual testing, not by this suite. A
+# request whose PROMPT was redacted and whose response was clean stamped `verdict=pass`:
+# the stamp was taken from the output unit alone, so the gateway's most demonstrable
+# privacy behaviour was invisible in the record, in `cp_requests_total`, and to the
+# caller. The stamp is now the most severe action across every evaluated unit.
+#
+# `support_bot` is the only shipped policy that maps `pii.*` to `edit`, and it is
+# `streaming: true` — so the reachable input-EDIT path is the streaming one, which is
+# also why the header case below is a streaming assertion.
+# ---------------------------------------------------------------------------
+
+
+def _redactions(view: dict) -> list:
+    """The record's input-stage redactions, however `actions` arrives in the view."""
+    raw = view.get("actions_json") or view.get("actions")
+    actions = json.loads(raw) if isinstance(raw, str) else raw
+    return actions.get("input_redactions", [])
+
+
+def test_input_edit_with_a_clean_output_stamps_edit_not_pass(make_client) -> None:
+    """The owner's case, end to end: prompt redacted, response clean, verdict `edit`.
+
+    The redaction is asserted first and unconditionally. Were `tier1_pii` to stop firing
+    on this frozen case, this test must fail rather than quietly agree that a request with
+    no redactions stamped `pass` — which is exactly how the original bug survived 962
+    tests.
+    """
+    client, gateway, stub = make_client(CLEAN_INPUT["text"])
+    response = post(client, "support_bot", prompt=PII["text"])
+
+    assert response.status_code == 200
+    view = audit_of(gateway, response)
+    assert len(_redactions(view)) == 1, "no input redaction — the scenario did not occur"
+
+    assert view["verdict"] == "edit"
+    assert gateway.metrics.value_of(
+        "cp_requests_total", use_case="support_bot", verdict="edit"
+    ) == 1.0
+
+
+def test_the_input_edit_reaches_the_caller_in_both_renderings(make_client) -> None:
+    """05 §1.1: an edited request carries `X-ControlPlane-Actions: edit`.
+
+    M-12 reads the header as non-streaming-only because headers precede the body — true of
+    an *output* edit, but an input redaction is decided before dispatch, so it is known
+    before this response's status line exists. The owner's transcript lacked this header;
+    it was never reachable, since the only `pii.* -> edit` policy streams.
+    """
+    client, gateway, _ = make_client(CLEAN_INPUT["text"])
+    response = post(client, "support_bot", prompt=PII["text"])
+
+    assert response.headers.get(HEADER_ACTIONS) == "edit"
+    final = frames(response)[-1]["controlplane"]
+    assert final["verdict"] == "edit"
+    assert len(final["actions"]["input_redactions"]) == 1
+    # The body reports the input stage as the input stage, not as an output edit.
+    assert final["actions"]["applied"] == []
+    assert final["actions"]["input_redactions"][0]["stage"] == "input"
+
+
+def test_input_edit_with_an_output_block_stamps_the_more_severe_action(make_client) -> None:
+    """Most severe across units, not last-unit-wins and not first: `block` beats `edit`.
+
+    `pii.api_key -> block` (ADR-024) in the response gives two units with different
+    actions. The record must still keep the input redaction, or the stamp would be the
+    only surviving trace that the prompt was touched.
+    """
+    client, gateway, _ = make_client(case("pii.jsonl", "PII-036")["text"])
+    response = post(client, "support_bot", prompt=PII["text"])
+
+    view = audit_of(gateway, response)
+    assert view["verdict"] == "block"
+    assert len(_redactions(view)) == 1, "the input redaction was dropped by the block path"
+    assert gateway.metrics.value_of(
+        "cp_requests_total", use_case="support_bot", verdict="block"
+    ) == 1.0
+
+
+def test_aggregation_unions_the_evidence_it_does_not_pick_one_unit() -> None:
+    """A tie on severity must not silently discard the other unit's fault records.
+
+    `from_verdict` reads `detector_failures_json` straight off the stamped verdict, so
+    returning whichever unit tied first would delete a `fail_open` fault from the record
+    whenever the input unit also passed. 04 §5 requires the fault to be recorded whether
+    or not it contributed — this is the regression that behaviour caught.
+    """
+    class _Req:
+        use_case = "support_bot"
+        policy_version = 2
+
+    fault = FailureOutcome(
+        detector="tier2_toxicity", error_class="TimeoutError", fail_class="timeout",
+        fail_mode=FailMode.FAIL_OPEN, action=None, failure_id="f-1",
+    )
+    clean_input = Verdict(action=Action.PASS, use_case="support_bot", policy_version=2)
+    output_with_fault = Verdict(
+        action=Action.PASS, use_case="support_bot", policy_version=2,
+        failure_outcomes=(fault,),
+    )
+
+    stamped = _request_verdict([clean_input, output_with_fault], _Req())
+    assert stamped.action is Action.PASS
+    assert stamped.failure_outcomes == (fault,), "the fault vanished on a severity tie"
+    # fail_open contributed nothing, so it must not appear as a *reason* for the verdict.
+    assert stamped.failure_record_ids == ()
+
+
+def test_aggregation_over_no_units_is_pass_not_an_error() -> None:
+    """An empty candidate list is a real state (nothing evaluated), and PASS is truthful."""
+    class _Req:
+        use_case = "hr_copilot"
+        policy_version = 3
+
+    stamped = _request_verdict([None], _Req())
+    assert stamped.action is Action.PASS
+    assert stamped.use_case == "hr_copilot"
+    assert stamped.policy_version == 3
+
+
+def test_the_buffered_path_aggregates_the_input_edit_too(make_client, tmp_path) -> None:
+    """The same rule on the non-streaming path — which no shipped policy can reach.
+
+    `support_bot` is the only policy mapping `pii.* -> edit` and it is `streaming: true`,
+    so the buffered branch of the aggregation is unreachable from `policies/` and would
+    otherwise be untested code that only looks correct. Flipping the flag on a copy is
+    legal here because the ADR-014 guard binds `consistency: on`, and this policy is
+    `on_sampled`.
+
+    The point is that the rule is a property of the aggregation and not of a delivery
+    mode: whichever path a future policy takes, a redacted prompt must not stamp `pass`.
+    """
+    policy_dir = tmp_path / "policies"
+    policy_dir.mkdir()
+    for path in (ROOT / "policies").glob("*.yaml"):
+        shutil.copy(path, policy_dir)
+    buffered = policy_dir / "support_bot.yaml"
+    buffered.write_text(buffered.read_text().replace("streaming: true", "streaming: false", 1))
+
+    client, gateway, stub = make_client(
+        CLEAN_INPUT["text"], store=PolicyStore(policy_dir)
+    )
+    response = post(client, "support_bot", prompt=PII["text"])
+
+    assert response.status_code == 200
+    assert not response.headers["content-type"].startswith("text/event-stream"), \
+        "the policy copy did not actually take the buffered path"
+
+    body = response.json()
+    assert body["controlplane"]["verdict"] == "edit"
+    assert len(body["controlplane"]["actions"]["input_redactions"]) == 1
+    assert response.headers.get(HEADER_ACTIONS) == "edit"
+    assert audit_of(gateway, response)["verdict"] == "edit"
+
+
+# ---------------------------------------------------------------------------
+# Pre-dispatch cost accounting (owner ruling, 2026-08-28)
+#
+# 04 §4.5 answers an input BLOCK/ESCALATE without calling a provider. The record used to
+# leave tokens and cost null, reasoning that a zero "would claim a free upstream call
+# happened". The ruling inverts that for the quantities we actually know: nothing was
+# sent, so 0 tokens is a COUNT, and on a measured-class provider the cost is a *counted*
+# zero. Null is excluded from an average, so leaving it null deletes the saving — a
+# pipeline blocking half its traffic pre-dispatch would report the same mean cost as one
+# blocking none. `model_used` stays null: no model answered.
+#
+# The class split is the trap in testing this. The shipped `active_provider` is
+# `kiro-local`, which is DEV class, so an `est_usd is None` assertion against the default
+# config passes both before and after the change and pins nothing. The measured branch is
+# therefore tested against a measured-class config, not the default one.
+# ---------------------------------------------------------------------------
+
+
+def measured_config(tmp_path):
+    """The shipped config with a measured-class provider made active (ADR-018)."""
+    text = (ROOT / "config" / "gateway.yaml").read_text()
+    assert "active_provider: kiro-local" in text, "config drift: the dev default moved"
+    path = tmp_path / "gateway.yaml"
+    path.write_text(text.replace("active_provider: kiro-local", "active_provider: groq", 1))
+    config = load_gateway_config(path)
+    assert config.active.upstream_class.value == "measured"
+    return config
+
+
+def test_a_pre_dispatch_block_counts_zero_tokens_rather_than_unknown(make_client) -> None:
+    """0/0 is what we know, not what we failed to observe (04 §4.5)."""
+    client, gateway, stub = make_client("never reached")
+    response = post(client, "hr_copilot", prompt=PII["text"])
+
+    view = audit_of(gateway, response)
+    assert view["verdict"] == "block", "the scenario requires an input-stage terminal"
+    assert stub.calls == 0, "something dispatched — then 0/0 would be a false claim"
+    assert (view["cost"]["tokens_in"], view["cost"]["tokens_out"]) == (0, 0)
+    # No model answered, and naming one would invent the dispatch this test just ruled out.
+    assert view["model"]["used"] is None
+
+
+def test_the_measured_class_records_the_saving_as_a_counted_zero(make_client, tmp_path) -> None:
+    """`est_cost_usd = 0.0` on a measured provider: the request demonstrably cost nothing.
+
+    Asserted against a measured-class config because the shipped default is `dev`, where
+    the expected value is `None` — so this claim is untestable on the default config and a
+    test that used it would be reporting the dev branch's behaviour under the measured
+    branch's name.
+    """
+    client, gateway, _ = make_client("never reached", config=measured_config(tmp_path))
+    response = post(client, "hr_copilot", prompt=PII["text"])
+
+    view = audit_of(gateway, response)
+    assert view["verdict"] == "block"
+    assert view["cost"]["est_usd"] == 0.0
+    assert view["cost"]["est_usd"] is not None, "null would drop the saving from the mean"
+
+
+def test_the_dev_class_stays_null_even_pre_dispatch(make_client) -> None:
+    """ADR-018: `dev` accounting is not a measurement, so it has no zero to report.
+
+    The arithmetic is available here — 0 tokens times any price is 0 — and is deliberately
+    not used. A 0.0 from a dev provider is a figure barred from every judge-facing
+    artifact, sitting in the column those artifacts read.
+    """
+    client, gateway, _ = make_client("never reached")
+    assert gateway.config.active.upstream_class.value == "dev"
+
+    view = audit_of(gateway, post(client, "hr_copilot", prompt=PII["text"]))
+    assert view["cost"]["est_usd"] is None
+    # The counts are still real: they are observations, not prices.
+    assert (view["cost"]["tokens_in"], view["cost"]["tokens_out"]) == (0, 0)
+
+
+def test_a_dispatched_unpriceable_request_is_still_null_on_the_measured_class(
+    make_client, tmp_path
+) -> None:
+    """ADR-022 null-not-zero, where it still governs — the case the ruling did NOT touch.
+
+    The stub model is in no price table, so a dispatched request's cost is *unknown*. This
+    is the assertion that keeps the new rule scoped to the short-circuit: if the
+    counted-zero branch ever widened to cover dispatches, this would flip to 0.0 and claim
+    a real upstream call was free.
+    """
+    client, gateway, stub = make_client("Markets closed higher.",
+                                       config=measured_config(tmp_path))
+    view = audit_of(gateway, post(client, "finance_advisor"))
+
+    assert stub.calls == 1, "the scenario requires a real dispatch"
+    assert view["model"]["used"] == "stub-model"
+    assert view["cost"]["est_usd"] is None
+    assert (view["cost"]["tokens_in"], view["cost"]["tokens_out"]) == (11, 22)
+
+
+# ---------------------------------------------------------------------------
+# Ingress rejections carry a correlation id (owner live-test finding, 2026-08-28)
+#
+# `ingest` minted the request id on its own last line — after both rejections it can
+# raise — so an ERR-CFG-001/002 body reached the caller with `"request_id": ""` and no
+# `X-ControlPlane-Request-Id` header, against 05 §1.1's "All responses carry" promise. It
+# is now minted in the handler before use-case resolution.
+#
+# An id is a correlation handle for one exchange, not a property of a successfully
+# resolved policy: the request an operator most needs to look up is the one that was
+# refused.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "use_case, body, code",
+    [
+        ("no_such_pipeline", {}, "ERR-CFG-001"),          # rejected before any policy loads
+        ("finance_advisor", {"stream": True}, "ERR-CFG-002"),  # rejected against a policy
+    ],
+)
+def test_an_ingress_rejection_carries_a_real_request_id(
+    make_client, use_case: str, body: dict, code: str
+) -> None:
+    """Both ingress rejections, because they fail at different points in `ingest`.
+
+    ERR-CFG-001 is raised before a policy is resolved at all and ERR-CFG-002 relative to
+    one, so a mint that happened anywhere inside `ingest` would fix at most one of them.
+    """
+    client, _, _ = make_client()
+    response = post(client, use_case, prompt=CLEAN_INPUT["text"], **body)
+
+    assert response.status_code == 400
+    request_id = response.json()["error"]["request_id"]
+    assert request_id, f"{code} body carried an empty request_id"
+    # A real id, not a placeholder that merely satisfies "non-empty".
+    assert uuid.UUID(request_id)
+    assert response.headers[HEADER_REQUEST_ID] == request_id, \
+        "05 §1.1: all responses carry the header, and it must match the body"
+
+
+def test_each_rejection_gets_its_own_id(make_client) -> None:
+    """A constant would satisfy every other assertion here and correlate nothing."""
+    client, _, _ = make_client()
+    ids = {post(client, "no_such_pipeline").json()["error"]["request_id"] for _ in range(3)}
+    assert len(ids) == 3
+
+
+def test_the_id_still_correlates_the_header_with_the_audit_record(make_client) -> None:
+    """The property that could have regressed: the mint moved OUT of `ingest`.
+
+    Two ids — one minted in the handler and one inside `ingest` — would leave the header
+    naming a request the audit table has never heard of, which is worse than the empty
+    string this change removed: an operator would follow it to a confident dead end.
+    """
+    client, gateway, _ = make_client("Fine.")
+    response = post(client, "support_bot", prompt=CLEAN_INPUT["text"])
+
+    assert response.status_code == 200
+    assert audit_of(gateway, response)["request_id"] == response.headers[HEADER_REQUEST_ID]
+
+
+# ---------------------------------------------------------------------------
+# ADR-033 — registered but unloadable (state (c)), end to end
+# ---------------------------------------------------------------------------
+
+
+ABSENT_DEP = "onnxruntime_absent_on_purpose"
+
+
+def _genuinely_unloadable() -> dict[str, str]:
+    """`{detector: first missing module}` for the probe scope, computed WITHOUT the probe.
+
+    Deliberately not a call to `probe_availability`: a test that asked the probe whether it
+    agrees with itself would pass on any host and assert nothing. This reads `REQUIREMENTS` —
+    the declared contract — and resolves each name with `find_spec`, so the assertion compares
+    the probe's output against the declaration it is supposed to implement.
+
+    The two could in principle disagree on resolution semantics (metadata presence, namespace
+    packages). That would fail the caller, which is the correct outcome: a divergence between
+    "declared present" and "probe says present" is a finding, not noise to be tolerated.
+    """
+    out: dict[str, str] = {}
+    for detector in app_module._probe_scope():
+        for module in availability.REQUIREMENTS.get(detector, ()):
+            try:
+                found = importlib.util.find_spec(module) is not None
+            except (ImportError, ValueError):
+                found = False
+            if not found:
+                out[detector] = module
+                break
+    return out
+
+
+@pytest.fixture
+def unloadable_tier2(monkeypatch):
+    """Make `tier2_injection` genuinely unloadable, without faking a load (ADR-033 rule 4).
+
+    Two monkeypatches, and both are needed for the state to be *reachable* rather than
+    simulated. `_probe_scope` widens the probe to a detector Tier-2 has not yet bound into
+    `LIVE` — which is what a post-Tier-2 boot will look like — and `REQUIREMENTS` points it
+    at a module that does not exist on any host, so `find_spec` reports a real absence.
+    Nothing installs a stub loader: a probe satisfied by a fake would assert the opposite of
+    the invariant.
+
+    **Both patches now PRESERVE the host's real requirements** rather than replacing them.
+    Replacing `REQUIREMENTS` wholesale, and narrowing `_probe_scope` to a single name, made the
+    boot manifest claim every other detector was loadable — including `entity_enricher` on a host
+    without spaCy. `warm_detector_models` trusts that manifest, so it called `warm()` and the
+    lifespan died with `ModuleNotFoundError` on any `.[dev]`-only host, which is precisely the
+    absence ADR-033 exists to have already handled. The fixture's job is to make ONE detector
+    unloadable, not to assert the rest are fine.
+    """
+    monkeypatch.setattr(
+        availability,
+        "REQUIREMENTS",
+        {**availability.REQUIREMENTS, "tier2_injection": (ABSENT_DEP,)},
+    )
+    real_scope = app_module._probe_scope()
+    monkeypatch.setattr(
+        app_module,
+        "_probe_scope",
+        lambda: tuple(sorted(set(real_scope) | {"tier2_injection"})),
+    )
+
+
+def fail_open_policies(tmp_path):
+    """A policy dir whose every use case maps `tier2: fail_open`.
+
+    `support_bot` and `hr_copilot` copied as shipped — **not** `finance_advisor` with its
+    `fail_mode` edited. ADR-033 rule 4 permits re-pointing a test at a fail-open fixture and
+    forbids relaxing the strict policy, because a suite that edits `fail_closed` to get green
+    is testing a configuration nobody ships.
+    """
+    policy_dir = tmp_path / "fail_open_policies"
+    policy_dir.mkdir()
+    for name in ("support_bot.yaml", "hr_copilot.yaml"):
+        shutil.copy(ROOT / "policies" / name, policy_dir)
+    return PolicyStore(policy_dir)
+
+
+def test_the_probe_scope_is_the_union_of_both_binding_mechanisms() -> None:
+    """The gateway binds detectors two ways and they disagree; the probe must see both.
+
+    `pipeline.LIVE` is what the served path calls; `_REGISTRY` is the eval harness's route.
+    Probing only the registry leaves the mechanism inert on the served path (it is empty in
+    this process), and probing only `LIVE` misses a harness registration. Neither omission
+    fails loudly, so the union is pinned here.
+    """
+    assert set(pipeline.LIVE) <= set(app_module._probe_scope())
+    assert set(registered_names()) <= set(app_module._probe_scope())
+
+
+def test_the_manifest_names_exactly_the_dependencies_this_host_is_missing(make_client) -> None:
+    """The mechanism must be INERT until a detector actually fails to load.
+
+    **The premise stopped being universal, so the claim became two-sided.** This test was
+    `test_a_healthy_host_produces_an_empty_manifest` and asserted `manifest == ()`, justified by
+    "every detector in `LIVE` today is a regex pass that imports nothing". `tier2_injection`
+    ended that: it is live and needs `onnxruntime`/`transformers`/`onnx`. On CI's `verify` matrix
+    (`.[dev]` only) the manifest is correctly NON-empty, and asserting `()` there would assert
+    the probe is broken.
+
+    What the test always meant — the probe invents no absences — survives intact and now also
+    catches the opposite error, an absence the probe fails to report. `_genuinely_unloadable`
+    recomputes the expectation from `REQUIREMENTS` rather than from the probe, so this is not
+    the probe agreeing with itself. On a full `.[dev,ml]` host `expected` is empty and this
+    asserts exactly what the old test did.
+    """
+    _, gateway, _ = make_client()
+    expected = _genuinely_unloadable()
+    assert gateway.detectors_unloadable == expected
+    assert {e.detector: e.missing for e in gateway.detector_manifest} == expected
+
+
+@requires_ml
+def test_a_fail_closed_policy_refuses_the_boot(unloadable_tier2, tmp_path) -> None:
+    """★ ADR-033 rule 2: the shipped `finance_advisor` maps `tier2: fail_closed`.
+
+    Refusal happens at boot, from the lifespan hook — the FR-GW-006 canary's precedent. A
+    gateway that started here would promise fail-closed Tier-2 protection on every
+    `finance_advisor` request while recording the absence in a column nobody watches.
+    """
+    gateway = Gateway(
+        dispatcher=Stub("fine"), metrics=MetricsRegistry(),
+        db_path=str(tmp_path / "audit.db"), key_map={},
+    )
+    assert gateway.detectors_unloadable == {"tier2_injection": ABSENT_DEP}
+
+    with pytest.raises(DetectorUnavailableError) as exc:
+        with TestClient(create_app(gateway)):
+            pass
+    assert "finance_advisor" in str(exc.value)
+
+
+def test_a_bare_testclient_does_not_enforce_availability(unloadable_tier2, tmp_path) -> None:
+    """Same lifespan property the canary test pins, for the same reason.
+
+    Enforcement is a boot decision, so it fires under `with TestClient(app)` and not under a
+    bare call. This is why adding the hook left the existing suite intact, and it is worth
+    pinning separately from the refusal above.
+    """
+    gateway = Gateway(
+        dispatcher=Stub("fine"), metrics=MetricsRegistry(),
+        db_path=str(tmp_path / "audit.db"), key_map={},
+    )
+    assert TestClient(create_app(gateway)).get("/metrics").status_code == 200
+
+
+def test_a_fail_open_policy_set_warns_loudly_and_still_serves(
+    unloadable_tier2, tmp_path
+) -> None:
+    """Availability over strictness is a documented per-use-case choice (04 §5, 01 §3)."""
+    gateway = Gateway(
+        store=fail_open_policies(tmp_path), dispatcher=Stub("All good here."),
+        metrics=MetricsRegistry(), db_path=str(tmp_path / "audit.db"), key_map={},
+    )
+    with pytest.warns(DetectorUnavailableWarning, match="UNLOADABLE"):
+        with TestClient(create_app(gateway)) as client:
+            assert client.get("/metrics").status_code == 200
+
+
+@requires_ml
+def test_an_unloadable_detector_is_recorded_as_unavailable_not_not_run(
+    unloadable_tier2, tmp_path
+) -> None:
+    """★ The distinction the third state exists for (05 §4).
+
+    `tier2_injection` is in the input lane, so it reaches `note_missing` on a host that cannot
+    load it. Filing it as `not_implemented` would be a false statement in an append-only table:
+    the detector exists, and what is missing is a dependency this record can name.
+
+    **This docstring used to say "and absent from `LIVE`", which is how it reached
+    `note_missing` before the detector shipped.** That route is gone — `tier2_injection` is in
+    `LIVE` now — and the test failed with `KeyError: 'unavailable'` when it did, because
+    `run_lane` treated membership as proof of loadability and called `detect()` anyway. The
+    manifest check there is what this asserts today; `test_the_lane_never_calls_a_detector_the
+    _boot_manifest_says_cannot_load` pins that it is load-bearing rather than incidental.
+    """
+    gateway = Gateway(
+        store=fail_open_policies(tmp_path), dispatcher=Stub("All good here."),
+        metrics=MetricsRegistry(), db_path=str(tmp_path / "audit.db"), key_map={},
+    )
+    with pytest.warns(DetectorUnavailableWarning):
+        with TestClient(create_app(gateway), raise_server_exceptions=False) as client:
+            response = post(client, "support_bot", prompt=CLEAN_INPUT["text"])
+
+    assert response.status_code == 200
+    detectors = audit_of(gateway, response)["detectors"]
+    assert detectors["unavailable"] == [
+        {"detector": "tier2_injection", "missing": ABSENT_DEP}
+    ]
+    not_run = {entry["detector"] for entry in detectors["not_run"]}
+    assert "tier2_injection" not in not_run, "a detector may be in at most one list"
+    assert gateway.metrics.value_of(
+        "cp_detector_unavailable_total", detector="tier2_injection"
+    ) == 1.0
+
+
+@requires_ml
+def test_the_lane_never_calls_a_detector_the_boot_manifest_says_cannot_load(
+    unloadable_tier2, tmp_path, monkeypatch
+) -> None:
+    """★ The production defect wiring `tier2_injection` exposed, pinned by a spy.
+
+    `run_lane`'s loadability test was `LIVE.get(name) is None`, which was sufficient only while
+    ADR-033 state (c) could *only* be expressed by absence from `LIVE` — true while every live
+    detector was a dependency-free regex pass. A live detector with real imports makes state (c)
+    reachable *with* membership, and the lane then called `detect()` on a host the boot manifest
+    had already declared unable to load it: the ImportError would be filed as a per-request
+    transient fault, re-discovered on every request, instead of the host-level absence ADR-033
+    separates it from.
+
+    A spy rather than an assertion on the audit record, because the record cannot tell the two
+    apart once the reason is normalized — the claim here is specifically that **no call is
+    made**. `detect()` succeeds on this host (onnxruntime is installed), so without the manifest
+    check the spy fires and this test fails rather than passing for the wrong reason.
+    """
+    called: list[str] = []
+    real = pipeline.LIVE["tier2_injection"]
+
+    class Spy:
+        name = real.name
+
+        async def detect(self, ctx):
+            called.append(ctx.stage.name)
+            return await real.detect(ctx)
+
+    monkeypatch.setitem(pipeline.LIVE, "tier2_injection", Spy())
+    gateway = Gateway(
+        store=fail_open_policies(tmp_path), dispatcher=Stub("All good here."),
+        metrics=MetricsRegistry(), db_path=str(tmp_path / "audit.db"), key_map={},
+    )
+    with pytest.warns(DetectorUnavailableWarning):
+        with TestClient(create_app(gateway), raise_server_exceptions=False) as client:
+            response = post(client, "support_bot", prompt=CLEAN_INPUT["text"])
+
+    assert called == [], (
+        f"the manifest says tier2_injection cannot load here, yet the lane called it at {called}"
+    )
+    detectors = audit_of(gateway, response)["detectors"]
+    assert detectors["unavailable"] == [
+        {"detector": "tier2_injection", "missing": ABSENT_DEP}
+    ]
+
+
+def test_the_missing_dependency_is_an_import_name_never_a_traceback(
+    unloadable_tier2, tmp_path
+) -> None:
+    """NFR-SEC-001 shape rule: `missing` is a dependency name, like `error_class` is a class.
+
+    A caught `ImportError`'s message would be the convenient thing to store and can carry
+    absolute paths and interpreter internals into a column that is published in reports.
+    """
+    gateway = Gateway(
+        store=fail_open_policies(tmp_path), dispatcher=Stub("All good here."),
+        metrics=MetricsRegistry(), db_path=str(tmp_path / "audit.db"), key_map={},
+    )
+    with pytest.warns(DetectorUnavailableWarning):
+        with TestClient(create_app(gateway), raise_server_exceptions=False) as client:
+            response = post(client, "support_bot", prompt=CLEAN_INPUT["text"])
+
+    missing = audit_of(gateway, response)["detectors"]["unavailable"][0]["missing"]
+    assert missing == ABSENT_DEP
+    assert "/" not in missing and "\n" not in missing and "Error" not in missing
+
+
+def test_a_healthy_boot_omits_the_key_rather_than_writing_an_empty_list(
+    make_client, monkeypatch
+) -> None:
+    """`[]` would assert "this boot loaded everything" — a claim older rows never made.
+
+    The ADR-027 Amendment 1 distinction between `[]` and absent, applied to this column: an
+    absent key stays silent instead of back-dating a guarantee.
+
+    **The empty manifest is arranged now, not assumed.** It used to come for free — every live
+    detector imported nothing — and `tier2_injection` ended that, so on a host without `.[ml]`
+    this asserted the absence of a key ADR-033 correctly writes. Narrowing the probe to the
+    dependency-free detectors makes the premise structural rather than host-dependent, which is
+    the honest fix: the subject here is the serialize-time distinction between an absent key and
+    an empty list, and that has nothing to do with which host runs it.
+    """
+    monkeypatch.setattr(
+        app_module, "_probe_scope",
+        lambda: ("tier1_pii", "tier1_blocklist", "numeric_claims"),
+    )
+    client, gateway, _ = make_client("All good here.")
+    assert gateway.detector_manifest == (), "the narrowed scope must leave nothing unavailable"
+    response = post(client, "support_bot", prompt=CLEAN_INPUT["text"])
+    assert "unavailable" not in audit_of(gateway, response)["detectors"]

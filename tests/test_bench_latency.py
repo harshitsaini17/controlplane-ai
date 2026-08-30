@@ -9,7 +9,7 @@ zero, and that the NFR gates fire on the requirement each one actually scopes.
 
 One test is a **property** rather than a mechanic:
 `test_overhead_is_independent_of_token_cadence`. 06 §4 excludes upstream token wait from
-`gateway_overhead_ms`, so the headline figure must not move when the stub's cadence does. The
+`total_attributable_overhead_ms`, so the headline figure must not move when the stub's cadence does. The
 report cites this test by name as the evidence for that claim, so it must exist and must mean
 what the report says.
 
@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from controlplane.detectors.base import BUDGETS_MS, Stage
+from controlplane.detectors.base import BUDGETS_MS, Stage, budget_ms
 from controlplane.gateway.pipeline import LANES, LIVE
 from controlplane.policy.store import PolicyStore
 from controlplane.telemetry.metrics import MetricsRegistry
@@ -103,7 +103,7 @@ def test_overhead_is_independent_of_token_cadence(corpus):
     )
     delta_overhead = abs(ov_slow.p50 - ov_fast.p50)
     assert delta_overhead < 0.25 * delta_upstream, (
-        f"gateway_overhead_ms tracked the token cadence ({ov_fast.p50:.3f} -> "
+        f"total_attributable_overhead_ms tracked the token cadence ({ov_fast.p50:.3f} -> "
         f"{ov_slow.p50:.3f} ms against {delta_upstream:.1f} ms of added upstream wait); "
         "06 §4 excludes token wait from that figure"
     )
@@ -148,7 +148,7 @@ def test_the_harness_reads_only_keys_in_the_05_5_vocabulary():
     the report looks fine.
     """
     source = (ROOT / "eval" / "bench_latency.py").read_text()
-    for key in ("gateway_overhead_ms", "upstream_ms"):
+    for key in ("total_attributable_overhead_ms", "upstream_ms"):
         assert f'"{key}"' in source
         assert key in LATENCY_KEYS
     # `wall_ms` is the harness's own stopwatch and must NOT be presented as a latency key.
@@ -156,14 +156,14 @@ def test_the_harness_reads_only_keys_in_the_05_5_vocabulary():
 
 
 def test_a_missing_overhead_is_an_error_not_a_zero_sample():
-    """A row without `gateway_overhead_ms` is recorded as an error, never sampled as 0.0.
+    """A row without `total_attributable_overhead_ms` is recorded as an error, never sampled as 0.0.
 
     Structural, because provoking it needs a broken write path. A zero would be indexed into
     the percentiles as the fastest request in the run.
     """
     source = (ROOT / "eval" / "bench_latency.py").read_text()
-    assert "no gateway_overhead_ms" in source
-    assert 'overhead = latency.get("gateway_overhead_ms")' in source
+    assert "no total_attributable_overhead_ms" in source
+    assert 'overhead = latency.get("total_attributable_overhead_ms")' in source
     assert "if overhead is None:" in source
 
 
@@ -364,7 +364,7 @@ def test_detector_stats_are_read_from_the_registry_the_gateway_used(batch):
 
 def test_nfr_p002_is_checked_on_p99_against_the_declared_budget():
     """A P99 at or above budget violates; one below does not."""
-    budget = BUDGETS_MS["tier1_pii"]
+    budget = budget_ms("tier1_pii")
     inside = {"tier1_pii": bl.Stats(n=50, p50=0.1, p95=0.2, p99=budget - 0.01,
                                     minimum=0.05, maximum=budget - 0.01)}
     outside = {"tier1_pii": bl.Stats(n=50, p50=0.1, p95=0.2, p99=budget + 1.0,
@@ -404,13 +404,27 @@ def test_unexercised_budgets_are_reported_as_untested_not_met(batch):
 
 
 def test_faults_are_counted_and_absent_means_zero(batch):
-    """The per-detector table's `Faults` column exists, and a clean run reports 0.
+    """The per-detector table's `Faults` column exists, and a detector with no faults reports 0.
 
     Absent-means-zero is legitimate here and only here: a detector with latency observations
     demonstrably ran, so "no fault series" can only mean no fault. Contrast the latency table,
     where absent means never-checked.
+
+    **Asserted `detector_faults(batch) == {}` until ADR-036.** That was a precondition about the
+    host, not the claim in this test's name: `tier2_toxicity` genuinely breaches its 25 ms budget
+    when the suite competes for CPU, because ORT's calling thread spin-waits on its intra-op pool
+    and its attributable CPU rises with contention (measured p50 11.98 ms quiet, 26.04 ms under
+    load). Per AGENTS.md §7 that measurement stands; the harness is not made clean to satisfy a
+    test. Re-anchored on `tier1_pii` — a regex detector that runs on every request and touches no
+    pool — the property is exercised against a **mixed** mapping rather than an empty one, which
+    is strictly more coverage: it now proves that *this* detector's absence reads as zero while
+    another detector's faults are present, the case an empty dict could never distinguish. A
+    regression that made absence render blank, or that mislabelled the column, still fails here.
     """
-    assert bl.detector_faults(batch) == {}
+    faults = bl.detector_faults(batch)
+    assert "tier1_pii" not in faults, (
+        f"the absent-means-zero probe needs a fault-free detector; tier1_pii faulted: {faults}"
+    )
     body = bl.render(
         batch, dataset_dir=bl.DATASET_DIR, provenance_note="", cadence_ms=0.5,
         violations=[], live_note="",
@@ -517,15 +531,26 @@ def test_a_short_run_says_it_is_not_the_specified_benchmark(batch):
     assert "not the specified benchmark" in body
 
 
-def test_the_reference_row_is_labelled_as_not_the_headline(batch):
-    """06 §4 requires the wall-minus-upstream row be reported and never headlined."""
+def test_the_last_byte_row_is_labelled_as_not_the_headline(batch):
+    """06 §4 requires the wall-minus-upstream row be reported and never headlined.
+
+    The section anchor moved with **ADR-030 Amendment 1**, which absorbed the row formerly
+    called `reference_delta_ms` into `added_time_to_last_byte_ms` — one subtraction that had
+    been carrying two names. Every assertion below predates that and is unchanged: what the
+    amendment altered is the heading this test locates, not the caveats it enforces.
+    """
     body = bl.render(batch, dataset_dir=bl.DATASET_DIR, provenance_note="",
                      cadence_ms=0.5, violations=[], live_note="")
     assert "never as the headline number" in body
     assert "upper bound" in body
     headline_at = body.index("`total_attributable_overhead_ms` — streaming pipelines")
-    reference_at = body.index("Reference row")
-    assert headline_at < reference_at, "the reference row must not precede the headline table"
+    reference_at = body.index("### `added_time_to_last_byte_ms`")
+    assert headline_at < reference_at, "the untargeted row must not precede the headline table"
+    # The absorption itself: one name for one subtraction, and the old one retired.
+    assert "reference_delta_ms" not in body or "previously reported under the name" in body
+    assert "not read back from `latency_json`" in body, (
+        "the row must say it is client-measured; the gateway has no such vantage"
+    )
 
 
 def test_violations_render_as_a_d3_instruction_not_a_relaxed_target(batch):
@@ -602,7 +627,15 @@ def test_check_exits_nonzero_on_a_violation(tmp_path, monkeypatch):
         # a slow *sum* can no longer trip anything — a tripwire test built on it would pass by
         # asserting nothing. Overshooting `tier1_pii`'s 2 ms budget exercises the same
         # exit-code path against a requirement that is still live.
-        batch.metrics.observe("cp_detector_latency_ms", 5_000.0, detector="tier1_pii")
+        #
+        # ★ **RE-POINTED for ADR-036 Amendment 1**, and the re-point is the point. This
+        # previously seeded `cp_detector_latency_ms` (wall-clock). The gate now reads
+        # `cp_detector_attributable_ms`, so the old fixture would have kept the label error's
+        # place and then passed by asserting nothing — the identical failure mode the comment
+        # above already warns about, one requirement over. Seeding the series the gate does not
+        # read is now its own negative control, in
+        # `test_a_wall_clock_breach_alone_renders_no_budget_verdict`.
+        batch.metrics.observe("cp_detector_attributable_ms", 5_000.0, detector="tier1_pii")
         return batch
 
     monkeypatch.setattr(bl, "run_batch", slow)
@@ -626,7 +659,8 @@ def test_without_check_a_violation_still_exits_zero(tmp_path, monkeypatch):
 
     def slow(mix, *, cadence_ms=bl.DEFAULT_CADENCE_MS):
         batch = real(mix, cadence_ms=cadence_ms)
-        batch.metrics.observe("cp_detector_latency_ms", 5_000.0, detector="tier1_pii")
+        # The gated series (ADR-036 Amendment 1) — see the sibling test's note on the re-point.
+        batch.metrics.observe("cp_detector_attributable_ms", 5_000.0, detector="tier1_pii")
         return batch
 
     monkeypatch.setattr(bl, "run_batch", slow)
@@ -638,6 +672,68 @@ def test_without_check_a_violation_still_exits_zero(tmp_path, monkeypatch):
     # at the interpolated value rather than at the number handed in.
     assert "| NFR-P-002 | tier1_pii | P99 | 2.0 ms |" in body
     assert "never a relaxed threshold" in body
+
+
+def test_a_wall_clock_breach_alone_renders_no_budget_verdict(tmp_path, monkeypatch):
+    """★ The regression that produced `[D3-nfr-p002-gate-reads-the-clock-adr-036-rejected]`.
+
+    ADR-036 ruled that NFR-P-002 binds attributable time; the gate kept reading wall-clock, and
+    two VIOLATION rows shipped on the rejected clock. So the contract has two halves and this
+    test pins both:
+
+    1. a wall-clock overshoot with NO attributable overshoot renders **no** verdict — gating on
+       wall-clock would charge a detector for pool queue wait and GIL contention with whatever
+       else shared its lane, and call the result its budget;
+    2. the overshoot is still **PUBLISHED**, untargeted, because it is the holds' constituent
+       (ADR-036 item 5) and suppressing a real measurement is the other failure mode.
+
+    Half 2 is what makes this a test of the ruling rather than of the gate: an implementation
+    that simply stopped recording wall-clock would satisfy half 1 and be wrong.
+    """
+    real = bl.run_batch
+
+    def slow(mix, *, cadence_ms=bl.DEFAULT_CADENCE_MS):
+        batch = real(mix, cadence_ms=cadence_ms)
+        batch.metrics.observe(
+            "cp_detector_latency_ms", 5_000.0, detector="tier1_pii", outcome="ok"
+        )
+        return batch
+
+    monkeypatch.setattr(bl, "run_batch", slow)
+    out = tmp_path / "latency.md"
+    # Scoped to `tier1_pii`, NOT asserted through `main`'s exit code (M-58). The exit code
+    # aggregates every violation, so a *genuine* breach in an unrelated detector — and
+    # `tier2_injection` has one, 25.348 ms attributable, published 2026-08-30 — would fail this
+    # test while its message blamed the wall-clock gate. A negative control that misattributes
+    # its own failure is worse than no control: it would have sent a reader hunting a regression
+    # in the gate to explain a real measurement elsewhere.
+    rc = bl.main(["--requests", "6", "--out", str(out), "--check"])
+    body = out.read_text()
+    # The pin is PER-DETECTOR: no NFR-P-002 verdict may name `tier1_pii`, the detector whose
+    # wall-clock was inflated. This is a *tighter* assertion than the exact-row string it
+    # replaced, since it also catches the row being re-formatted, and unlike `rc` it cannot be
+    # satisfied or broken by any other detector's result.
+    charged = [
+        line for line in body.splitlines()
+        if "NFR-P-002" in line and "tier1_pii" in line
+    ]
+    assert not charged, (
+        "a wall-clock overshoot rendered an NFR-P-002 verdict for `tier1_pii` — the gate is "
+        f"reading the series ADR-036 rejected: {charged}"
+    )
+    # `rc` is deliberately NOT asserted to be 0 (M-58). It aggregates every violation, so a
+    # genuine breach in an unrelated detector — `tier2_injection` has one, 25.348 ms
+    # attributable, published 2026-08-30 — used to fail this test with a message blaming the
+    # wall-clock gate. A control that misattributes its own failure sends a reader hunting a
+    # regression in the gate to explain a real measurement somewhere else. What it MUST still
+    # pin is that the injected overshoot contributes no violation of its own, which the
+    # per-detector check above does directly rather than through a shared exit code.
+    assert rc in (0, 1)
+    assert "5000.000" in body, (
+        "the wall-clock overshoot must stay published (untargeted) — dropping it would "
+        "delete a real measurement to make an instrument change look clean"
+    )
+    assert "UNTARGETED" in body
 
 
 def test_the_command_stamp_reproduces_the_actual_invocation(tmp_path):
@@ -730,7 +826,7 @@ def test_sentence_counts_use_the_real_segmentation(corpus):
 
 
 def test_the_projection_is_derived_from_the_registry_not_written_down():
-    """Lane membership and every figure must come from `LANES` / `BUDGETS_MS`.
+    """Lane membership and every figure must come from `LANES` / `budget_ms()`.
 
     Pinned so a budget change moves the report instead of leaving a stale paragraph. The
     guard is a real substitution: raising a budget must raise the projected total.
@@ -739,7 +835,7 @@ def test_the_projection_is_derived_from_the_registry_not_written_down():
     before = bl.project_tier2(cases)
     seq = next(r for r in before["rows"] if r["mode_is_sum"])
     assert seq["sentence_ms"] == sum(
-        BUDGETS_MS[d] for d in LANES[Stage.OUTPUT_SENTENCE] if d != "rag_grounding"
+        budget_ms(d) for d in LANES[Stage.OUTPUT_SENTENCE] if d != "rag_grounding"
     )
     assert set(before["pending"]) == {
         d for d in (*LANES[Stage.INPUT], *LANES[Stage.OUTPUT_SENTENCE])
@@ -775,7 +871,7 @@ def test_both_lane_readings_are_reported(corpus):
     seq, par = rows
     assert seq["sentence_ms"] > par["sentence_ms"], "the sum must exceed the max"
     assert par["sentence_ms"] == max(
-        BUDGETS_MS[d] for d in LANES[Stage.OUTPUT_SENTENCE] if d != "rag_grounding"
+        budget_ms(d) for d in LANES[Stage.OUTPUT_SENTENCE] if d != "rag_grounding"
     )
 
 
@@ -791,7 +887,24 @@ def test_the_projection_is_labelled_a_projection_and_not_a_d3(batch, corpus):
     section = body[body.index("## Forward projection"):body.index("## Scope and limitations")]
     assert "PROJECTION, not a measurement" in section
     assert "not a D3" in section
-    assert "unimplemented" in section
+
+    # The disclosure claim has TWO branches and this pins both, because the branch it used
+    # to pin goes vacuous exactly when the build succeeds. While detectors are pending, the
+    # section must name them as unmeasurable. Once none are, "unimplemented" is absent *for
+    # the right reason* — and the sentence that replaces it is then the load-bearing claim,
+    # so it earns the same guard rather than none. Read from `projected_not_yet_live()`, the
+    # same source `render` derives the branch from, so this tracks the registry rather than a
+    # snapshot of it.
+    pending = bl.projected_not_yet_live()
+    if pending:
+        assert "unimplemented" in section
+        for detector in pending:
+            assert f"`{detector}`" in section, f"pending `{detector}` is not disclosed"
+    else:
+        assert "unimplemented" not in section
+        assert "now live and measured above" in section
+        # Still arithmetic over declared budgets, not a measurement wearing a new label.
+        assert "rather than as a forecast" in section
     # It must not claim the budgets are wrong, nor that tier2 will cost its full budget.
     assert "not a claim that the budgets are wrong" in section
     assert "not a prediction that tier2 will actually cost its full budget" in section

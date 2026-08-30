@@ -129,6 +129,11 @@ class DetectorFailureRecord:
 
     detector: str
     error_class: str
+    #: In-thread execution measured for the faulting call, or None when nothing measured it
+    #: (ADR-036 item 4). This is what keeps a genuine NFR-P-002 breach distinguishable from a
+    #: scheduling artifact *after the fact*, in the audit, forever — the misattribution
+    #: ADR-036 removed was invisible precisely because no record carried this number.
+    attributable_ms: float | None = None
     stage: Stage = Stage.OUTPUT_FULL
     failure_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     ts: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -183,11 +188,12 @@ class FailureOutcome:
     fail_class: str
     fail_mode: FailMode
     action: Action | None  # None == fail_open: proceed, audit only
+    attributable_ms: float | None = None  # ADR-036 item 4; carried through from the fault
     failure_id: str = ""
     stage: Stage = Stage.OUTPUT_FULL
     ts: str = ""
 
-    def audit_entry(self) -> dict[str, str]:
+    def audit_entry(self) -> dict[str, object]:
         """The `detector_failures_json` element for this fault (05 §3/§4, ADR-027).
 
         This is where `fail_mode_applied` becomes a recorded fact. It is emitted here
@@ -206,6 +212,11 @@ class FailureOutcome:
             "stage": self.stage.value,
             "fail_mode_applied": self.fail_mode.value,
             "ts": self.ts,
+            # ADR-036 item 4. Always present, `null` when unmeasured — the same rule 05 §3
+            # applies to the id lists: a recorded null says "nothing measured it" (a hang whose
+            # worker never returned), where an absent key would say "we did not record". A
+            # duration is not content, so this is outside NFR-SEC-001's concern.
+            "attributable_ms": self.attributable_ms,
         }
 
 
@@ -490,6 +501,7 @@ def resolve_failure(record: DetectorFailureRecord, policy: Policy) -> FailureOut
     return FailureOutcome(
         detector=record.detector,
         error_class=record.error_class,
+        attributable_ms=record.attributable_ms,
         fail_class=fail_class,
         fail_mode=mode,
         action=action,

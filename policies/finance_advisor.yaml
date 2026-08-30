@@ -3,14 +3,19 @@
 # fail_closed everywhere, non-streaming (ADR-014), always frontier tier (ADR-013).
 schema_version: 1
 use_case: finance_advisor
-policy_version: 3                # bump on every change; engine stamps it into audit
+policy_version: 4                # bump on every change; engine stamps it into audit (was 3: fast_consistency cut, SL-6)
 geography: EU
 risk_appetite: low               # low | medium | high (informational + default pack selector)
 
-streaming: false                 # consistency:on requires full buffering (ADR-014)
+streaming: false                 # UC-3 is high-stakes decision support (01 §3), so the full
+                                 # response is judged before delivery. This was *also* forced
+                                 # by ADR-014 while consistency was "on"; that guard no longer
+                                 # binds, and the value is deliberately unchanged (M-47).
 sampling:
   deep_audit_rate: 0.25
-consistency: "on"                  # on | on_sampled | off   (on => streaming:false)
+consistency: "off"                 # SL-6: fast_consistency is CUT to roadmap. Was "on".
+                                   # 04 §2.3: rag_grounding covers the performance plane
+                                   # where context exists. Quoted per Q-09.
 cascade_probe: "off"               # ADR-013; high-stakes -> always frontier tier
 
 thresholds:                      # calibrated per 06 §3; conformal-style quantiles

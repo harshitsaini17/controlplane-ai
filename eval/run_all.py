@@ -25,7 +25,6 @@ import argparse
 import asyncio
 import json
 import platform
-import subprocess
 import sys
 from collections import Counter
 from dataclasses import dataclass, field
@@ -35,9 +34,13 @@ from typing import Any, Iterable, Sequence
 
 from controlplane.detectors._v1_numeric_claims import numeric_claims as v1_numeric_claims
 from controlplane.detectors._v1_tier1_patterns import tier1_pii as v1_tier1_pii
+from controlplane.detectors.availability import probe_availability
+from controlplane.detectors import entity_enricher
 from controlplane.detectors.base import DetectorContext, Signal, Stage
 from controlplane.detectors.numeric_claims import numeric_claims
 from controlplane.detectors.tier1_patterns import tier1_blocklist, tier1_pii
+from controlplane.detectors.tier2_injection import tier2_injection
+from controlplane.detectors.tier2_toxicity import tier2_toxicity
 from controlplane.gateway.config import (
     TaintedDataError,
     load_gateway_config,
@@ -53,6 +56,8 @@ from eval.policy_matrix import (
     reconcile,
     render_matrix,
 )
+from eval.host_load import code_commit_cell, git_stamp
+from eval.suggest_thresholds import CALIBRATION_FRACTION, RESHUFFLE_SEEDS, calibrate
 from eval.validate_dataset import (
     DATASET_DIR,
     FROZEN_COMMIT,
@@ -93,7 +98,15 @@ class DetectorUnderTest:
 
 @dataclass
 class SkippedDetector:
-    """A 04 §2 row with no implementation. Reported, never scored (rule 1)."""
+    """A 04 §2 row that is reported but never scored (rule 1).
+
+    Three distinct reasons reach this type, and the `reason` string is the only place the
+    difference survives into the table: **no implementation** (a stub), **implemented but
+    unloadable on this host** (ADR-033 state (c), built by `_demote_unloadable`), and
+    **implemented and loadable but unreachable by any corpus case** (`entity_enricher` —
+    its host-signal producer is absent). Scoring any of the three would publish a
+    precision/recall of 0.0 for a detector that was never asked a question.
+    """
 
     name: str
     labels: tuple[str, ...]
@@ -141,6 +154,33 @@ IMPLEMENTED: tuple[DetectorUnderTest, ...] = (
             "v1 or v2 (06 §3.2) — see *Disclosed revision* below."
         ),
     ),
+    DetectorUnderTest(
+        name="tier2_injection",
+        detector=tier2_injection,
+        scope=frozenset({"security.prompt_injection"}),
+        # INPUT only, per 04 §2. Scoring it at `output_sentence` would ask a question the
+        # registry does not put to it and count every output case as a non-answer.
+        stages=frozenset({Stage.INPUT}),
+        note=(
+            "**Blind first contact** (AGENTS.md §11.1 item 3): measured here for the first "
+            "time, against ADR-031's checkpoint and ADR-032's windowing. Nothing was tuned "
+            "toward a target and the figures are whatever the detector produced on the frozen "
+            "corpus. `variant` is `v2` for the `tier1_blocklist` reason — never revised, so a "
+            "v1 column would restate this one and imply a comparison nobody made."
+        ),
+    ),
+    DetectorUnderTest(
+        name="tier2_toxicity",
+        detector=tier2_toxicity,
+        scope=frozenset({"toxicity.high", "toxicity.moderate"}),
+        stages=frozenset({Stage.OUTPUT_SENTENCE}),
+        note=(
+            "**Blind first contact** (AGENTS.md §11.1 item 3), same terms as "
+            "`tier2_injection`. The two labels are one model's two cutoffs (04 §2, defaults "
+            "0.5/0.8), so a `moderate`/`high` confusion is a threshold placement question "
+            "rather than a detection miss — the per-label rows below separate them."
+        ),
+    ),
 )
 
 #: The frozen v1 detectors, re-scored every run so the permanent v1 numbers stay
@@ -173,24 +213,204 @@ V1_BASELINE: tuple[DetectorUnderTest, ...] = (
 )
 
 
+#: 04 §2 registry name of the enrichment stage, from the module that implements it.
+ENRICHER_NAME = entity_enricher.NAME
+
+
+def _enricher_reason() -> str:
+    """Why `entity_enricher` is reported and not scored — read from this host, not typed.
+
+    Two host configurations give two true answers, and the earlier single hand-written
+    string ("not implemented — stub") went false the moment the stage landed while still
+    rendering into `reports/eval_report.md`. That is the M-42/M-43 class — a claim
+    described by a premise it no longer comes from — in a judge-facing generator, so the
+    string is derived from the same probe every other row's comes from.
+
+    Carries no figures deliberately. The count of unscored positives is computed by the
+    report itself from `label_counts`; a number written into this sentence would be a
+    second, unverifiable copy of it (AGENTS.md §7).
+    """
+    missing = probe_availability([ENRICHER_NAME])
+    if missing:
+        return (
+            f"**implemented but unloadable on this host** — missing "
+            f"`{missing[0].missing}` (ADR-033 state (c)). Not scored: a stage that could "
+            f"not load answers no question"
+        )
+    return (
+        "**implemented and loadable; not reachable by any corpus case** — 04 §2.2 appends "
+        "`privacy.person` to a span-bearing `hallucination.*` host signal, and every "
+        "corpus case carrying that label expects `hallucination.ungrounded_claim`, whose "
+        "only producer (`rag_grounding`) is absent. Landing this stage therefore widens "
+        "the end-to-end scorable set by nothing, and it emits on no scorable case — both "
+        "measured, not assumed (M-44)"
+    )
+
+
+def _cost_reason(name: str) -> str:
+    """Why a cost detector is reported and not scored — derived, for the M-42/M-43 reason.
+
+    Both rows said "not implemented — stub" while rendering into `reports/eval_report.md`,
+    and both went false the moment the detectors landed. That is a claim described by a
+    premise it no longer comes from, in a judge-facing generator — so the string is read
+    from the registry and the corpus rather than typed.
+
+    **The unscorability is structural, not a gap waiting to be filled.** These two are
+    deterministic emitters over `ctx.cost` — a spend ledger, a token estimate, a turn count.
+    None of that is a property of the *text* a labelled corpus case carries, so no amount of
+    corpus authoring makes P/R/F1 meaningful for them: the same sentence fires or does not
+    fire depending on ledger state the corpus cannot express. Their verification lives where
+    the quantity does — `tests/test_cost_plane.py` for the contract and both boundaries,
+    demo beat 7b for the end-to-end block, `reports/cost_report.md` for the cascade
+    arithmetic. Carries no figures: a count written here would be a second, unverifiable copy
+    of one the report computes (AGENTS.md §7).
+    """
+    from controlplane.gateway.pipeline import LIVE
+
+    live = name in LIVE
+    labelled = _corpus_label_count(_COST_LABELS.get(name, ()))
+    if not live:
+        return "not implemented — absent from the LIVE registry"
+    if labelled:
+        # Reachable only after a new freeze cycle adds cost-labelled cases. Says so rather
+        # than silently keeping the "no cases" reading, which would then be the false one.
+        return (
+            f"**implemented and live**, and the corpus now carries {labelled} case(s) with "
+            "its labels — scoring it is a harness change this row does not claim to have made"
+        )
+    return (
+        "**implemented and live in the gateway; not scorable by this harness** — it fires on "
+        "ledger spend, an estimated token count and a turn rate, none of which is a property "
+        "of a corpus case's text, and no frozen case carries a `cost.*` label. P/R/F1 here "
+        "would be a ratio over an empty denominator. Verified instead by "
+        "`tests/test_cost_plane.py` (both boundary rules, NFR-SEC-001, the 1 ms budget), demo "
+        "beat 7b (pre-dispatch block, 0 upstream dispatches) and `reports/cost_report.md`"
+    )
+
+
+#: The labels each cost detector emits, so `_cost_reason` asks the corpus about the right ones.
+_COST_LABELS: dict[str, tuple[str, ...]] = {
+    "cost_budget": ("cost.budget_exceeded", "cost.request_too_large"),
+    "loop_guard": ("cost.loop_detected",),
+}
+
+
+def _corpus_label_count(labels: Sequence[str]) -> int:
+    """How many frozen cases carry any of `labels`. Zero on an unreadable dataset.
+
+    Tolerant by design: this feeds a *reason string*, and a harness that refused to start
+    because it could not count would replace a prose defect with an outage. The freeze gate is
+    what asserts the dataset is present and intact.
+    """
+    if not labels:
+        return 0
+    wanted = set(labels)
+    count = 0
+    try:
+        for path in sorted(DATASET_DIR.glob("*.jsonl")):
+            for line in path.read_text().splitlines():
+                if not line.strip():
+                    continue
+                case = json.loads(line)
+                if wanted & set(case.get("labels") or ()):
+                    count += 1
+    except (OSError, ValueError):
+        return 0
+    return count
+
+
 SKIPPED: tuple[SkippedDetector, ...] = (
-    SkippedDetector("tier2_injection", ("security.prompt_injection",),
-                    "not implemented — stub; Q-04 defers the checkpoint choice"),
-    SkippedDetector("tier2_toxicity", ("toxicity.high", "toxicity.moderate"),
-                    "not implemented — stub; Q-04 defers the checkpoint choice"),
     SkippedDetector("fast_consistency", ("hallucination.low_confidence",),
-                    "not implemented — stub; needs the 2nd-sample provider (Q-10)"),
+                    "CUT to roadmap (SL-6) — specified in 04 §2.3, never implemented. "
+                    "The 2nd-sample provider was bound (Q-10, 2026-08-28); the detector "
+                    "was not. UC-3's performance plane is covered by rag_grounding where "
+                    "context exists; the context-free case is what the cut gives up"),
     SkippedDetector("rag_grounding", ("hallucination.ungrounded_claim",),
-                    "not implemented — stub; needs sentence-transformers"),
-    SkippedDetector("entity_enricher", ("privacy.person",),
-                    "not implemented — stub; needs spaCy en_core_web_sm (ADR-011)"),
+                    "**implemented and live, and deliberately not scored here** — it is the "
+                    "only confidence-kind detector left (ADR-012; `fast_consistency` was cut "
+                    "by SL-6), and P/R/F1 over raw emissions would be meaningless for it: by "
+                    "contract it emits on EVERY scored sentence and lets the policy band "
+                    "decide, so it would post a false positive on every well-grounded case "
+                    "and a precision figure that measures the corpus's grounded fraction "
+                    "rather than the detector. Scoring it post-band needs tau, and 06 §3 bars "
+                    "a seed-derived number from any report — including this one, whose "
+                    "matrices are tau-invariant by "
+                    "`tests/test_policy_matrix.py::test_matrix_is_invariant_to_the_seed_tau_values`. "
+                    "Its measurement is the calibration section below, which is where 06 §3 "
+                    "puts a confidence-kind detector"),
+    # Reason deferred to `_enricher_reason()`: the row was "not implemented — stub" until
+    # the stage landed, and a hand-typed string cannot be right on both an ml-bearing and
+    # an ml-less host. It stays in SKIPPED rather than becoming a `DetectorUnderTest`
+    # because `_run` calls `detect(ctx)` and enrichment's entry point is
+    # `enrich(signals, text, ...)` — giving it a `detect` to be scorable would be a type
+    # lie, and it would still score 0.0 over an empty denominator.
+    SkippedDetector("entity_enricher", ("privacy.person",), _enricher_reason()),
     SkippedDetector("conv_tracker", ("conversation.cumulative_risk",),
                     "not implemented — stub (ADR-021 scope is specified, code is not)"),
+    # Reasons deferred to `_cost_reason()` for the `_enricher_reason` reason, one class of rot
+    # later: both rows read "not implemented — stub" until the detectors landed, and a
+    # hand-typed string cannot be right on both sides of that event.
     SkippedDetector("cost_budget", ("cost.budget_exceeded", "cost.request_too_large"),
-                    "not implemented — stub; the cost plane needs a priced provider"),
+                    _cost_reason("cost_budget")),
     SkippedDetector("loop_guard", ("cost.loop_detected",),
-                    "not implemented — stub"),
+                    _cost_reason("loop_guard")),
 )
+
+
+#: `{detector: missing dependency}` on THIS host, from ADR-033's single declaration.
+#: Probed once per process: `find_spec` is deterministic, and re-probing per case would ask
+#: the same question a few thousand times.
+UNLOADABLE: dict[str, str] = {
+    entry.detector: entry.missing
+    for entry in probe_availability(
+        # `entity_enricher` is included although it is in neither list: 04 §2.2 makes
+        # enrichment its own stage, so it is not a `DetectorUnderTest` (it has no
+        # `detect`), yet its row still has to say whether *this* host could load it.
+        # Probing it here keeps that answer in the same single declaration as every
+        # other row's rather than hand-typing it beside a `REQUIREMENTS` entry.
+        [dut.name for dut in (*IMPLEMENTED, *V1_BASELINE)] + [ENRICHER_NAME]
+    )
+}
+
+
+def _demote_unloadable() -> tuple[
+    tuple[DetectorUnderTest, ...], tuple[DetectorUnderTest, ...], tuple[SkippedDetector, ...]
+]:
+    """Partition the implemented detectors by whether this host can load them (ADR-033).
+
+    This is rule 1 ("measured or absent") applied to a case it did not originally have a
+    word for. A detector whose dependency is absent produces no signals, so scoring it
+    would emit precision/recall of 0.0 — a **fabricated failing number** for a detector
+    that was never asked a question. Reporting it beside the stubs is the honest handling,
+    with one difference that has to survive into the table: its reason is a missing
+    dependency, not a missing implementation.
+
+    The reason string is built from the probe rather than typed, which is the "consumes the
+    same state" part of the ruling. A hand-written "needs sentence-transformers" beside a
+    `REQUIREMENTS` entry naming the same module is two declarations that can disagree, and
+    the one in prose is the one nobody updates.
+    """
+    scored, demoted = [], []
+    for dut in IMPLEMENTED:
+        if dut.name in UNLOADABLE:
+            demoted.append(dut)
+        else:
+            scored.append(dut)
+    baselines = tuple(d for d in V1_BASELINE if d.name not in UNLOADABLE)
+    rows = tuple(
+        SkippedDetector(
+            dut.name,
+            tuple(sorted(dut.scope)),
+            f"**implemented but unloadable on this host** — missing `{UNLOADABLE[dut.name]}` "
+            f"(ADR-033 state (c)). Not scored: a detector that could not load answers no "
+            f"question, and 0.0 would read as a failing detector",
+        )
+        for dut in demoted
+    )
+    return tuple(scored), baselines, rows
+
+
+SCORED, SCORED_V1, DEMOTED = _demote_unloadable()
 
 
 # --------------------------------------------------------------------------
@@ -290,8 +510,10 @@ async def _run(dut: DetectorUnderTest, case: dict[str, Any]) -> list[Signal]:
 #: Every label an implemented detector can emit — the coverage test for the end-to-end
 #: matrix. Derived from the `IMPLEMENTED` scopes rather than restated, so landing a detector
 #: widens the matrix automatically and cannot drift from what is actually scored.
+#: `SCORED`, not `IMPLEMENTED`: on a host missing a dependency the end-to-end matrix must
+#: not claim to cover labels no detector can emit this run (ADR-033).
 IMPLEMENTED_LABELS: frozenset[str] = frozenset(
-    label for dut in IMPLEMENTED for label in dut.scope
+    label for dut in SCORED for label in dut.scope
 )
 
 
@@ -306,7 +528,7 @@ def collect_emissions(cases: Sequence[dict[str, Any]]) -> dict[str, list[Signal]
     for case in cases:
         stage = _KIND_STAGE[case["kind"]]
         signals: list[Signal] = []
-        for dut in IMPLEMENTED:
+        for dut in SCORED:
             if stage not in dut.stages:
                 continue
             signals.extend(asyncio.run(_run(dut, case)))
@@ -344,7 +566,7 @@ def evaluate(cases: Sequence[dict[str, Any]]) -> tuple[list[DetectorResult], int
     excluded them by design. Which turn breached is not a field, so it cannot be recovered
     mechanically; the honest handling is to exclude and say so with the count.
     """
-    scored = (*IMPLEMENTED, *V1_BASELINE)
+    scored = (*SCORED, *SCORED_V1)
     results = [
         DetectorResult(name=d.name, note=d.note, variant=d.variant) for d in scored
     ]
@@ -382,19 +604,11 @@ def evaluate(cases: Sequence[dict[str, Any]]) -> tuple[list[DetectorResult], int
 # --------------------------------------------------------------------------
 
 
-def _git(*args: str) -> str:
-    try:
-        return subprocess.run(
-            ["git", *args], capture_output=True, text=True, timeout=5, check=True
-        ).stdout.strip()
-    except Exception:
-        return "unavailable"
-
-
 def _provenance(cases: Sequence[dict[str, Any]], dataset_dir: Path) -> list[str]:
     digest = dataset_digest(dataset_dir)
-    head = _git("rev-parse", "HEAD")
-    dirty = _git("status", "--porcelain")
+    # One definition in `eval/host_load.py`; this copy lacked `cwd`, so it read whichever
+    # directory the process started in rather than the repo.
+    code = git_stamp()
     return [
         "## Provenance",
         "",
@@ -406,7 +620,7 @@ def _provenance(cases: Sequence[dict[str, Any]], dataset_dir: Path) -> list[str]
         f"| Dataset digest | `{digest}` |",
         f"| Frozen at | `{FROZEN_COMMIT[:12]}` — {'MATCHES' if digest == dataset_digest(DATASET_DIR) and not check_freeze(dataset_dir) else 'MISMATCH'} |",
         f"| Cases loaded | {len(cases)} (derived from the files, never asserted) |",
-        f"| Code commit | `{head[:12]}`{' + uncommitted changes' if dirty else ''} |",
+        f"| Code commit | {code_commit_cell(code)} |",
         f"| Python | {platform.python_version()} |",
         f"| Platform | {platform.system()} {platform.release()} · {platform.machine()} |",
         f"| Command | `python -m eval.run_all` |",
@@ -725,13 +939,267 @@ def _policy_section(
         "**NFR-EVAL-002** asks for the per-use-case matrix to exist and sets no target — "
         "**met** by this section, with the coverage limit above stated rather than implied.",
         "",
-        "## Threshold calibration (06 §3) — NOT COMPUTED",
+    ]
+    return out
+
+
+def _median_order_verdict(cal: Any) -> str:
+    """State what the medians actually did. Never assert the failure unconditionally.
+
+    Written as a derivation because the alternative — hardcoding "they do not" — would keep
+    printing a finding after the finding stopped being true, which is precisely the defect
+    class this repo keeps catching in its own prose.
+    """
+    meds = [
+        (label, cal.score_summary.get(label, {}).get("median"))
+        for label in ("no", "borderline", "yes")
+    ]
+    if any(m is None for _, m in meds):
+        return "Not all three classes produced scores, so the ordering is not assessable."
+    vals = [m for _, m in meds]
+    if vals[0] <= vals[1] <= vals[2]:
+        return (
+            f"They do, in this run: `no` {vals[0]} ≤ `borderline` {vals[1]} ≤ `yes` "
+            f"{vals[2]}."
+        )
+    worst = max(meds[:2], key=lambda kv: kv[1]) if vals[1] > vals[2] else meds[1]
+    return (
+        f"They do not: `no` {vals[0]}, `borderline` {vals[1]}, `yes` {vals[2]} — "
+        f"`{worst[0]}` ({worst[1]}) sits out of order, so no pair of cut points can put the "
+        f"three classes in their documented bands."
+    )
+
+
+def _seed_inversion_verdict(cal: Any) -> str:
+    """Whether the inversion is one unlucky split — counted over the seeds, not asserted."""
+    if not cal.inverted_seeds:
+        return "."
+    bad, total = cal.inverted_seeds
+    if bad == 0:
+        return " — no seed inverted."
+    if bad == total:
+        return (
+            f" — the band inverted at **all {total}** seeds, so this is not one unlucky "
+            f"split."
+        )
+    return f" — inverted at **{bad} of {total}** seeds, so the result is split-sensitive."
+
+
+def _overlap_bullets(cal: Any) -> list[str]:
+    """The tail-overlap figures — the measured mechanism behind an inversion."""
+    o = cal.overlap
+    if not o:
+        return []
+    return [
+        f"- **The tails overlap.** `yes` reaches down to **{o['yes_min']}** and `no` up to "
+        f"**{o['no_max']}**. Demanding {(1 - cal.alpha) * 100:.0f}% coverage on *each* edge "
+        f"therefore drives τ_high below τ_low: the two quantiles are computed from opposite "
+        f"tails of distributions that interpenetrate.",
+        f"- At the proposed band, **{o['no_at_or_above_tau_high']} of {o['no_n']}** `no` cases "
+        f"sit at or above τ_high and **{o['yes_below_tau_low']} of {o['yes_n']}** `yes` cases "
+        f"below τ_low — the overlap counted at the edges that matter.",
+    ]
+
+
+def _alpha_sweep_block(cal: Any) -> list[str]:
+    """α-dependence, swept and reported — NOT a menu the run selects from.
+
+    Included because the honest answer to "would a different target rate have worked?" is a
+    measurement, and because the answer here is partly yes: the band order does recover at
+    larger α. Saying so and then *not* moving α is the point — α was fixed blind by M-52, and
+    re-picking it because this one failed is tuning a parameter toward a desired outcome
+    (AGENTS.md §7, §11.1 item 3).
+    """
+    if not cal.alpha_sweep:
+        return []
+    ok, tot = cal.oracle
+    valid = [row for row in cal.alpha_sweep if not row[3]]
+    out = [
+        "### Would another target rate have worked? (swept, not selected)",
         "",
-        "Calibration quantiles need non-conformity scores from the confidence-kind detectors "
-        "(`fast_consistency`, `rag_grounding` — ADR-012), both stubs. The tau values in "
-        "`policies/*.yaml` therefore remain `# SEED(pre-calibration)` (ADR-016), and per 06 "
-        "§3 **a seed value is never judge-facing**: no number in this report derives from one "
-        "— including the matrices above, whose τ-invariance is pinned by a test.",
+        "| α | τ_low | τ_high | band order | in-band |",
+        "|---:|---:|---:|:--|---:|",
+    ]
+    for a, tl, th, inv, hits, n in cal.alpha_sweep:
+        mark = " ← **in force** (M-52)" if abs(a - cal.alpha) < 1e-9 else ""
+        # `†` on an inverted row: its count is not comparable to the ceiling (M-56).
+        out.append(
+            f"| {a:.2f} | {tl} | {th} | {'**INVERTED**' if inv else 'valid'} | "
+            f"{hits}/{n} = {hits / n:.3f}{'&nbsp;†' if inv else ''}{mark} |"
+        )
+    # Scoped to VALID rows on purpose (M-56). An inverted band's in-band count is inflated by
+    # the inversion itself — `_in_band`'s borderline arm goes unsatisfiable while the outer arms
+    # overlap — and the oracle ceiling is fitted over valid bands only, so `max` over all rows
+    # produced a published sentence that contradicted its own arithmetic: "no α clears the
+    # 56/78 = 0.718 ceiling — the best row here reaches 59/78 = 0.756".
+    best = max(valid, key=lambda r: r[4]) if valid else None
+    if valid:
+        lo = min(row[0] for row in valid)
+        out += [
+            "",
+            f"**Partly yes, and it changes nothing.** Band *order* recovers at α ≥ {lo:.2f}. "
+            f"But no **schema-valid** α clears the {ok}/{tot} = {ok / tot:.3f} oracle ceiling "
+            f"— the best valid row reaches {best[4]}/{best[5]} = {best[4] / best[5]:.3f} at "
+            f"α={best[0]:.2f}. So a valid-looking band is available and would still be a bad "
+            f"one, which is the substantive finding rather than the inversion itself.",
+            "",
+            "**The inverted rows' in-band counts are marked `†` and are NOT comparable to the "
+            "ceiling** (M-56). An inverted band does not partition the line: the `borderline` "
+            "arm `τ_low ≤ s < τ_high` is unsatisfiable, so it places nothing, while the outer "
+            "arms overlap on `[τ_high, τ_low)` and each grade against a looser threshold than "
+            "any valid band could use. The count therefore *inflates* with inversion depth — "
+            "which is why the most inverted row scores highest — and the oracle is fitted over "
+            "valid bands only. Published rather than suppressed, because the number is a real "
+            "computation and the inflation is the point; comparing it to the ceiling is what "
+            "was wrong.",
+            "",
+            f"**α stays at {cal.alpha}.** It was fixed blind by M-52 before any score was "
+            f"seen, and re-picking it *because* that value failed would be tuning a parameter "
+            f"toward a desired outcome (AGENTS.md §7; §11.1 item 3 keeps first-contact "
+            f"discipline unchanged in endgame mode). Whether ~{(1 - ok / tot) * 100:.0f}% "
+            f"unplaceable points could ever be acceptable is a policy question, and it is not "
+            f"resolved by moving α.",
+            "",
+        ]
+    else:
+        out += [
+            "",
+            f"**No — every α swept inverts, so the sweep offers no schema-valid band at "
+            f"all.** No in-band count below is comparable to the {ok}/{tot} = {ok / tot:.3f} "
+            f"oracle ceiling (M-56): an inverted band leaves the `borderline` arm "
+            f"unsatisfiable and lets the outer arms overlap, so the counts inflate with "
+            f"inversion depth instead of degrading. The ceiling stands unbeaten because "
+            f"nothing valid was produced to test it. α stays at {cal.alpha} per M-52.",
+            "",
+        ]
+    return out
+
+
+def _calibration_section(cal: Any) -> list[str]:
+    """06 §3 threshold calibration, measured. SL-7 rests on this section.
+
+    Every verdict here is derived from `cal`, never written as prose. That is deliberate and
+    was learned the hard way: an earlier draft of this section asserted a mechanism
+    ("`borderline` sits above `yes`") that the measurement contradicted — the class medians
+    ascend correctly and the inversion comes from the OUTER classes' tails. Hardcoded findings
+    outlive the runs that produced them, which is the defect class this repo keeps catching in
+    its own prose, so the diagnosis is computed alongside the numbers it explains.
+    """
+    if cal is None:
+        verdict = "NOT COMPUTED IN THIS RUN"
+    elif cal.band is None:
+        verdict = "NOT COMPUTED"
+    elif cal.band.inverted:
+        verdict = "MEASURED, AND THE BAND INVERTS (SL-7)"
+    else:
+        verdict = "MEASURED"
+    out = [f"## Threshold calibration (06 §3) — {verdict}", ""]
+    if cal is None:
+        return out + [
+            "**Not computed in this run** — `calibrate()` was not invoked. The τ values in "
+            "`policies/*.yaml` are therefore still `# SEED(pre-calibration)` (ADR-016) and 06 "
+            "§3's rule stands unchanged: **no figure in this report derives from a seeded τ**. "
+            "Reproduce with `python -m eval.suggest_thresholds`.",
+            "",
+        ]
+    if cal.band is None:
+        return out + [
+            f"**NOT COMPUTED** — {cal.unavailable}. The τ values in `policies/*.yaml` stay "
+            "`# SEED(pre-calibration)` (ADR-016) and 06 §3's rule stands: no figure in this "
+            "report derives from a seeded τ.",
+            "",
+        ]
+
+    b = cal.band
+    out += [
+        f"Procedure per 06 §3 on the `rag_grounding` confidence score: non-conformity "
+        f"quantiles at target rate **α = {cal.alpha}** (M-52 — 04 §7 step 3 says \"the "
+        f"policy's target rate\" and no such field exists, so the conformal default is used "
+        f"and named), over a {int(CALIBRATION_FRACTION * 100)}/"
+        f"{100 - int(CALIBRATION_FRACTION * 100)} split stratified by the `grounded` label, "
+        f"with the finite-sample index `ceil((n+1)·rate) − 1` rather than a plain empirical "
+        f"quantile — at n≈40 those differ by a whole order statistic.",
+        "",
+        "### Scores by expected band (06 line 85)",
+        "",
+        "| `grounded` | n | min | median | max |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for label in ("no", "borderline", "yes"):
+        s = cal.score_summary.get(label)
+        if s:
+            out.append(
+                f"| `{label}` | {s['n']} | {s['min']} | {s['median']} | {s['max']} |"
+            )
+    out += [
+        "",
+        "06 line 85 defines the bands as `no` < τ_low ≤ `borderline` < τ_high ≤ `yes`, so the "
+        "three medians must ascend for a band to exist. " + _median_order_verdict(cal),
+        "",
+        "**The min/max columns are where the finding is.** Class *order* is a necessary "
+        "condition for a band, not a sufficient one: the edges are placed by quantiles deep in "
+        "the tails, so two correctly-ranked classes whose tails reach into each other still "
+        "admit no band. That is the case here, and it is quantified two subsections down.",
+        "",
+        "### The band",
+        "",
+        f"- τ_low = **{b.tau_low}**, τ_high = **{b.tau_high}** "
+        f"(n_calibration={b.n_calibration}, n_eval={b.n_eval})",
+        (
+            "- **INVERTED: τ_low ≥ τ_high.** `Thresholds._check_band_order` rejects this, so "
+            "it is reported and **not clamped** — clamping would manufacture a "
+            "shippable-looking number out of a failed calibration (AGENTS.md §5.4, §7)."
+            if b.inverted
+            else "- Band order valid (τ_low < τ_high), so the schema would accept it."
+        ),
+        f"- Reshuffle spread over {len(RESHUFFLE_SEEDS)} seeds: "
+        + ", ".join(f"{k} {lo}–{hi}" for k, (lo, hi) in cal.spread.items())
+        + _seed_inversion_verdict(cal),
+        "",
+        "### Why: informative score, overlapping tails",
+        "",
+    ]
+    auc = "not computable" if cal.auc is None else f"**{round(cal.auc, 4)}**"
+    ok, tot = cal.oracle
+    out += [
+        f"- **AUC(`yes` vs `no`) = {auc}** — the score separates the two *outer* classes "
+        "well, so the proxy is not noise and the inversion is not a failure to discriminate.",
+        *_overlap_bullets(cal),
+        f"- **Oracle ceiling = {ok}/{tot} = {ok / tot:.4f}** — the best band obtainable by "
+        "exhaustive search *with every label visible*, fitted on the same points it scores. "
+        "It cheats, so it is not a proposal; it is an upper bound **no calibration at any α "
+        "can beat**, and it is what separates \"the quantiles were placed badly\" from "
+        "\"no quantile works\". Roughly one point in four cannot be placed by any band.",
+        f"- Achieved rates for the proposed band on its held-out split: "
+        + ", ".join(f"`{k}` {h}/{t}" for k, (h, t) in sorted(b.achieved.items()))
+        + (
+            f" (overall {b.achieved_overall:.4f})"
+            if b.achieved_overall is not None
+            else ""
+        )
+        + ". Published as the evidence for SL-7 and **explicitly not a detector accuracy "
+        "claim** — the band being measured is schema-invalid and ships in nothing.",
+        "",
+        "",
+        *_alpha_sweep_block(cal),
+        "**Root cause.** 04 §2 calls this detector an entailment *proxy*, and a cosine between "
+        "sentence and context embeddings cannot see hedging: a sentence can restate its source "
+        "almost verbatim and still overclaim (`BRD-01` — \"refunds usually complete within "
+        "about a week\" against context \"processed within 5 business days\"), while a "
+        "faithful sentence can paraphrase so freely that it scores low. Those two failure "
+        "directions are exactly the `no` high tail and the `yes` low tail measured above. The "
+        "inversion is also invariant under any monotone transform of the score — pinned by "
+        "`tests/test_suggest_thresholds.py::test_the_inversion_survives_every_monotone_"
+        "transform` — so it is not an artifact of how non-conformity was defined. Closing it "
+        "needs a real entailment model: a **detector** change, not a τ change.",
+        "",
+        "**Consequence, per 06 §3.** The τ values in `policies/*.yaml` remain "
+        "`# SEED(pre-calibration)` (ADR-016), and **no figure in this report derives from a "
+        "seeded τ** — including both matrices above, whose τ-invariance is pinned by "
+        "`tests/test_policy_matrix.py::test_matrix_is_invariant_to_the_seed_tau_values`. "
+        "Filed as **SL-7** in `docs/08-open-questions.md`.",
+        "",
+        "Reproduce: `python -m eval.suggest_thresholds` (exits nonzero on the inversion).",
         "",
     ]
     return out
@@ -747,6 +1215,8 @@ def build_report(
     end_to_end: dict[str, ConfusionMatrix],
     recon: Any,
     coverage: tuple[int, int, int],
+    *,
+    calibration: Any = None,
 ) -> str:
     label_counts = Counter(
         label for case in cases for label in case["labels_expected"]
@@ -765,12 +1235,12 @@ def build_report(
     ]
 
     lines += _skipped_section()
-    for skipped in SKIPPED:
+    for skipped in (*SKIPPED, *DEMOTED):
         unscored = sum(label_counts.get(label, 0) for label in skipped.labels)
         labels = " · ".join(f"`{label}`" for label in skipped.labels)
         lines.append(f"| `{skipped.name}` | {labels} | {unscored} | {skipped.reason} |")
     total_unscored = sum(
-        label_counts.get(label, 0) for s in SKIPPED for label in s.labels
+        label_counts.get(label, 0) for s in (*SKIPPED, *DEMOTED) for label in s.labels
     )
     lines += [
         "",
@@ -791,6 +1261,7 @@ def build_report(
         conversation=conversation_n,
         total=len(cases),
     )
+    lines += _calibration_section(calibration)
 
     # NFR-EVAL-001 verdict last: it is the one row with a documented target, so it must be
     # impossible to skim past.
@@ -864,8 +1335,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Gate 2 — upstream provenance (ADR-018).
     #
     # Scoped, and the scope is stated in the report rather than hidden here. Every detector
-    # implemented today is a local deterministic matcher: no upstream call, no token
-    # accounting, so no figure below rests on the provider's usage reporting. Failing the
+    # scored today runs LOCALLY — three deterministic matchers plus two ONNX classifiers, and
+    # the calibration step loads a local embedding model. None makes an upstream call or reads
+    # token accounting, so no figure below rests on the provider's usage reporting. Failing the
     # run — or stamping DEV-TAINTED onto a filename whose numbers are provider-independent —
     # would teach a reader that the taint marker is noise, which is worse than not having it.
     # The gate is still evaluated and its result recorded, and it becomes binding the moment
@@ -888,9 +1360,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"output (ADR-018).\n"
             f">\n"
             f"> **This report is unaffected, and here is why rather than a bare assertion.** "
-            f"Every detector scored below (`tier1_pii`, `tier1_blocklist`, `numeric_claims`) "
-            f"is a local deterministic matcher: it makes no upstream call, consumes no "
-            f"tokens, and reads no usage accounting. No figure here derives from the "
+            f"Every detector scored below runs **locally**: `tier1_pii`, `tier1_blocklist` "
+            f"and `numeric_claims` are deterministic matchers, `tier2_injection` and "
+            f"`tier2_toxicity` are local ONNX classifiers, and the calibration section loads "
+            f"a local embedding model. Not one makes an upstream call, consumes a token, or "
+            f"reads usage accounting — so the reasoning is *provider independence*, not "
+            f"determinism, and it still holds now that model-backed detectors are scored. "
+            f"No figure here derives from the "
             f"provider, so the gate is **evaluated and non-binding for this section set**. "
             f"It becomes binding the moment cost, end-to-end latency, or consistency "
             f"sampling is reported — none of which this run produces.\n"
@@ -918,6 +1394,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     missed_ids, fp_ids = detection_failure_case_ids(results)
     recon = reconcile(missed_ids & scorable_ids, fp_ids & scorable_ids, end_to_end)
 
+    # 06 §3 calibration. Last, and never fatal: `calibrate()` reports an unloadable host as
+    # `unavailable` rather than raising, so a machine without the model stack still gets every
+    # accuracy figure above instead of an empty report.
+    print("calibrating tau (06 §3) — loads the grounding model...", file=sys.stderr)
+    calibration = calibrate(dataset_dir=args.dataset_dir)
+
     report = build_report(
         results,
         cases,
@@ -928,6 +1410,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         end_to_end,
         recon,
         (len(scorable), uncovered_n, conversation_n),
+        calibration=calibration,
     )
 
     out_path = taint_output_path(args.out, tainted=tainted)
@@ -945,8 +1428,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     recall = pii_v2.recall if pii_v2 else None
     print(f"wrote {out_path}")
     print(f"  cases loaded      : {len(cases)}")
-    print(f"  detectors scored  : {len(IMPLEMENTED)} of {len(IMPLEMENTED) + len(SKIPPED)}"
-          f" (+{len(V1_BASELINE)} frozen v1 baselines)")
+    print(f"  detectors scored  : {len(SCORED)} of"
+          f" {len(SCORED) + len(SKIPPED) + len(DEMOTED)}"
+          f" (+{len(SCORED_V1)} frozen v1 baselines)")
+    for name, missing in sorted(UNLOADABLE.items()):
+        print(f"  UNLOADABLE        : {name} (missing {missing}) — reported, not scored")
     print(f"  tier1_pii recall  : v1 {_fmt(pii_v1.recall if pii_v1 else None, digits=4)}"
           f" -> v2 {_fmt(recall, digits=4)} (NFR-EVAL-001 target 0.95)")
     print(f"  tier1_pii prec.   : v1 {_fmt(pii_v1.precision if pii_v1 else None, digits=4)}"

@@ -702,6 +702,8 @@ The shipped ratio is **2.0×**, and it is **exactly** 2.0× on input *and* on ou
 
 **Docs touched:** this ADR, ADR-018 (dated note appended, original preserved), ADR-022 + 05 §6.1 (the inherited ~12× rationale corrected to ratio-parametric), 05 §3/§4 (example record's `model_used`), 06 §6 (ratio-parametric reporting rules), `config/gateway.yaml` (tiers, prices, provenance, `price_table_version`), `controlplane/gateway/config.py` + `sse_proxy.py` (docstrings asserting ~12×), README (price-provenance bullet), `docs/08` (deviation closed, **SL-3 downgraded**, M-13 logged), `tests/test_gateway_config.py` (constants, production-id test, cascade test amended + blend-independence test added), `tests/test_sse_proxy.py`, `tests/test_canary.py`, `tests/test_audit_records.py` (fixture ids rebound).
 
+**Post-hoc note (2026-08-30, live measurement — no rebinding).** Both qwen ids were re-probed live on the shipped key while verifying the console chat path. The option-(a) rejection above is **independently confirmed**: `qwen/qwen3.6-27b` still emits reasoning scaffolding (`<think>`) into message `content`, which would push it through the sentence buffer into every output-lane detector and into `audit_records`. `qwen/qwen3.8-27b` — not among the ids probed when this ADR was written — answers cleanly (HTTP 200, usage present, no trace leakage) and is therefore the **future frontier candidate, pending a first-party `pricing.models` entry**: verified this session, the config validator refuses an unpriced binding on a routing path, because a model that would answer requests that can never be costed violates ADR-022 / 05 §6.1. **Nothing rebinds. The gateway stays on the priced gpt-oss pair, and this ADR's ruling is unchanged** — the note records a measurement that agreed with it, not a reason to revisit it.
+
 ## Minor resolutions log (review findings 6–8 — doc edits, no ADR needed)
 
 - **F6:** Cost plane gets a live enforcement moment — demo beat 7b added (budget-exhaustion BLOCK, SC-2 now covered live).
@@ -745,7 +747,9 @@ It breached under **both** readings, so the finding never rested on the sequenti
    publication by this ADR.**
 3. **`added_time_to_last_byte_ms` is added as a measured, untargeted row** — the honest
    end-to-end quantity, and the one a user's stopwatch would agree with. Untargeted because it
-   contains upstream token cadence, which the gateway does not control.
+   contains upstream token cadence, which the gateway does not control. *(Amendment 1 keeps this
+   row and moves where it is measured: 06 §4's benchmark client, not `latency_json`. The
+   gateway has no client vantage, which this item assumed without checking.)*
 4. **The per-sentence lane goes parallel when Tier-2 lands** (below), not before.
 
 ### Derivation of the targets — from the documented budgets, not from convenience
@@ -765,12 +769,15 @@ written; both are now ruled and are carried in the arithmetic rather than absorb
 | Input lane | `max(tier1_pii 2, tier1_blocklist 2, tier2_injection 25, cost_budget 1, loop_guard 1)` + engine 5 | **30 ms** |
 | Per-sentence, typical | `max(tier1_pii 2, tier1_blocklist 2, tier2_toxicity 25, numeric_claims 5)` + engine 5 — `rag_grounding` skipped without context docs | **30 ms** |
 | Per-sentence, typical, enriched | `+ entity_enricher 10` (**aggregate per sentence**, 04 §2.2) | **40 ms** |
-| Per-sentence, with context docs | `max(30, rag_grounding 30)` + enrichment 10 + engine 5 | **45 ms** |
-| Per-sentence, `on_sampled` boundary compare | `max(30, fast_consistency 60)` + enrichment 10 + engine 5 | **75 ms** |
+| Per-sentence, with context docs | `max(30, rag_grounding 30)` + enrichment 10 + engine 5 | **45 ms** → **70 ms** (Amendment 3) |
+| Per-sentence, `on_sampled` boundary compare | `max(30, fast_consistency 60)` + enrichment 10 + engine 5 | **75 ms** → **100 ms**, untargeted (Amendment 3) |
 
 The enrichment term is now **flat, not `10k`** — that is the whole effect of the 04 §2.2 cap. The
 input lane carries no enrichment term at all: enrichment is conditional on a span-bearing
 `hallucination.*` signal (04 §2.2) and no input-lane detector emits one.
+
+**Superseded by Amendment 3 — pool users serialize, so two of these rows were wrong.** The
+paragraph below is kept as ruled; read it with the amendment's table beside it.
 
 **Every row fits, and one adjacency is stated rather than glossed.** Worst cases 30 / 40 / 45 / 75
 against P50 < 40 and P99 < 100: the input lane clears its P50 by 10 ms and its P99 by 20; the
@@ -782,7 +789,10 @@ of all traffic would be hallucination-flagged). But it is the first place this d
 break under a budget change, so it is written down where a future budget edit will hit it.
 
 **Targets:** input-lane hold **P50 < 40 ms, P99 < 50 ms**; per-sentence hold **P50 < 40 ms,
-P99 < 100 ms**. Streaming pipelines only, as before.
+P99 < 100 ms**. Streaming pipelines only, as before. *(Amendment 2 scopes the input-lane
+target to single-window inputs. Amendment 3 scopes the per-sentence P99 to holds with at most
+one pool user besides enrichment and `rag_grounding`: the two `on_sampled` compositions it
+re-derives, at 100 and 130 ms, are published **untargeted**.)*
 
 Why these and not others. The input lane's *detector* composition is 25 ms and `tier2_injection`
 runs on *every* request, so its P50 cannot be set below 25 — 30 ms once the engine step is
@@ -841,7 +851,7 @@ non-streaming pipeline that NFR-P-001 never covered.
 
 02 §3 has always said per-sentence detectors run concurrently (`asyncio.gather`).
 `pipeline.run_lane` is sequential, and that was a *measurement* decision documented at
-`pipeline.py:212`: with three regex detectors at ~0.2 ms each, `gather` cannot overlap CPU-bound
+`run_lane`'s docstring records why: with three regex detectors at ~0.2 ms each, `gather` cannot overlap CPU-bound
 work on one event loop and would only make each detector's recorded `latency_ms` include the
 others'.
 
@@ -885,13 +895,26 @@ non-streaming pipeline one entry for the buffered response, which M-11 makes the
 population is **holds, not requests** — a 10-segment response contributes 10 samples, which is
 what a per-hold target means.
 
-Still not emitted, and tracked as the remainder of **M-20**: the **rename**
-(`app.py` writes `gateway_overhead_ms`, not `total_attributable_overhead_ms` — the code's enforced
-vocabulary in `spans.py` still carries the old name) and **`added_time_to_last_byte_ms`**. Both
-are untargeted publication rows, so neither blocks NFR-P-001; the divergence is between this ADR's
-documented vocabulary and `check_latency_keys`' enforced one, and it is not caught by a test —
-`tests/test_telemetry.py` parses the 05 §5 **span** and **metric** tables from the doc, but the
-`latency_json` key names are not doc-parsed.
+**Updated 2026-08-28 — the rename landed; one untargeted row remains.** `app.py`, `spans.py`'s
+enforced vocabulary and the single 06 §4 formula implementation all carry
+`total_attributable_overhead_ms`, and `pipeline.gateway_overhead_ms` was renamed **with** the key:
+a helper still bearing the old name while writing the new one is precisely the drift **M-20**
+records. The metric `cp_gateway_overhead_ms` is deliberately **not** renamed (05 §5) — renaming it
+would orphan history for a figure whose definition did not change.
+
+**Updated 2026-08-28 — M-20's remainder closes by re-siting, not by emission.** See
+**Amendment 1**: `added_time_to_last_byte_ms` is not a `latency_json` key, because the gateway
+cannot occupy the vantage its definition names. It stays published, from the benchmark client.
+
+The gap that let the rename sit undetected is closed rather than noted: `latency_json` key names
+are still not doc-parsed (`tests/test_telemetry.py` parses the 05 §5 **span** and **metric**
+tables, and these keys are neither), so
+`tests/review/test_checkpoint3_latency_keys.py` now asserts the doc and the enforced vocabulary
+agree **in both directions** for the remaining key — re-pointed by Amendment 1 onto the re-siting,
+since "documented but not yet emitted" stopped being a state that key can be in. That test is what fired on
+this rename instead of letting the code drift from the persisted rows — the outcome a tripwire
+exists for — and it was re-pointed rather than deleted (ADR-031 consequence 5's rule, applied to a
+different tripwire for the same reason).
 
 What the original caveat here said, kept because it is the reasoning the fix had to satisfy:
 NFR-P-001 was `not measured` from this ADR until the instrumentation landed — the old per-request
@@ -912,3 +935,1268 @@ percentile far from the cause.
 **Docs touched:** 01 (NFR-P-001 row), 02 §3 (parallel-at-Tier-2 trigger), 05 §3/§5 (`latency_json`
 vocabulary: the rename plus the two new series), 06 §4 (formula gains the per-hold series and the
 last-byte row; the sum retained under its new name), 08 (deviation closed; M-18/M-19 logged).
+
+### Amendment 1 — 2026-08-28: `added_time_to_last_byte_ms` is a benchmark-client quantity, not a `latency_json` key (resolves `[D1-added-time-to-last-byte-has-no-server-side-vantage]`)
+
+Item 3 above added this row and sited it in `latency_json`, a column the **gateway** writes. Its
+own definition opens "client-observed". The gateway is not a client, and the deviation that found
+this closed all four ways it might still have been reachable:
+
+1. **A completed ASGI `send()` is handed-to-transport, not client-received.** Whatever the
+   streaming generator measures after its final `yield` is a handoff delta. Publishing that under
+   a name promising a client stopwatch overstates what was measured (AGENTS.md §7) — and it would
+   overstate it *invisibly*, since the number is plausible either way.
+2. **The buffered path writes the record before the response exists.** `app.py`'s audit write
+   precedes `return JSONResponse(...)`, an ordering **M-13** established deliberately so a crash
+   after content release still leaves a row.
+3. **Deferring the write to obtain the figure reopens M-13.** The gap that ordering closed is
+   exactly a request whose record is written after delivery and therefore not at all.
+4. **The table is insert-only.** No `UPDATE audit_records` exists in `controlplane/`, and
+   `record_status` is a crash marker, not a second phase — so there is no later moment in which a
+   post-delivery figure could arrive.
+
+**Ruling.** The figure is **re-sited, not withdrawn.** Nothing leaves publication:
+
+1. **06 §4 becomes its normative home**, defined as a quantity of the benchmark client — the one
+   process in this repo that genuinely holds the vantage. **Withdrawn from 05 §3/§5**, whose
+   vocabulary is enforced at the write path, so the withdrawal is mechanical rather than editorial:
+   `check_latency_keys` refuses the key.
+2. **It aliases and absorbs `reference_delta_ms`**, the `wall − upstream` row `eval/bench_latency.py`
+   already computed, rather than joining it as a second series. One subtraction under two names
+   invites the reading that one of them is the uncontaminated version. Both of that row's caveats
+   travel with the name and are non-negotiable: it is an **upper bound** (it carries `TestClient`
+   ASGI transport cost a real client would not pay) and it is **never the headline number**.
+3. **M-20's remainder closes here.** The rename landed in `ab06917`; this was the rest, and it
+   closes as a specification correction rather than as an emission — which is the honest outcome,
+   since the emission was never constructible.
+
+**Why an amendment and not a new ADR.** It reverses no decision of ADR-030 — the row is still
+published, still untargeted, still the end-to-end figure the trade-off paragraph leans on. What
+moves is *which process measures it*, which ADR-030 assumed rather than chose. Recording that as a
+separate ADR would leave item 3 reading correct in isolation.
+
+**Not a target movement (ADR-026 §5).** This row never had a target. NFR-P-001's verdict is
+untouched, and SL-1 stays unmet and unmoved.
+
+**Consequence — the tripwire fired and was re-pointed for the second time.**
+`tests/review/test_checkpoint3_latency_keys.py` asserted "05 §5 says not-yet-emitted" against
+"absent from the enforced vocabulary". This amendment voids that premise rather than satisfying it,
+so the test now pins the re-siting in both directions: the enforced vocabulary must not grow the key
+back, **and** 06 §4 must keep defining it. Re-pointed rather than deleted, per ADR-031
+consequence 5's rule — a tripwire's job outlives the transition it caught.
+
+**Docs touched:** 05 §3/§4/§5 (key withdrawn from `latency_json`, the DDL comment and the record
+example), 06 §4 (normative home; absorbs the reference row), 01 (NFR-P-001 row notes the vantage),
+08 (deviation closed; M-20 closed).
+
+---
+
+### Amendment 2 — 2026-08-28: the input-hold target is scoped to single-window inputs; multi-window holds are an untargeted bucketed series (resolves `[D1-input-hold-target-cannot-survive-multi-window-injection]`)
+
+**Status:** Accepted 2026-08-28. Recommendation A of the filed report, approved.
+
+**This amendment formalizes a clause that was issued and then lost in transcription.** The
+adjudication that produced **ADR-032** carried, as its item 3, the same scoping this amendment now
+records — and it is absent from ADR-032's committed text. Verified rather than asserted: ADR-032
+mentions `NFR-P-001` nowhere, and the strings `input_hold`, `input hold` and `input-lane` appear in
+it only once, incidentally, inside its pre-dispatch clause ("the cost is therefore paid on the input
+lane"). Its "Docs touched" line names 01's **NFR-P-002** row, 04 §2, 06 §4 and 08 — the input-hold
+*target* is untouched. So the deviation this amendment closes was a real doc-versus-doc
+contradiction in the committed record, not a re-litigation: what the ruling decided and what the
+repo said had come apart.
+
+**Process note, recorded because it generalises.** When an issued adjudication clause is absent from
+the ADR transcribed from it, that is **drift**, and it is the same class of defect as a stale number
+in a report: the decision of record and the decision actually taken disagree, and only one of them
+is enforceable. Diff the issued ruling against the transcribed ADR **before** closing the deviation
+it resolves. The cost of not doing so is exactly what happened here — a scoping decision that had
+already been made was re-derived from scratch one detector later, by a reader who could only see the
+committed text.
+
+### The scoping
+
+- **NFR-P-001's input-lane hold (P50 < 40 ms, P99 < 50 ms) is scoped to single-window inputs**
+  (≤ 104 tokens, the ADR-032 window). There it is the derivation ADR-030 built: a 30 ms worst case
+  whose dominant term is `tier2_injection`, measured at **12.59 ms P99** for one window — the
+  worst of both columns at the 1-window rung (sequential 11.87), re-derived from the clean artifact
+  by ADR-032 Correction 1; the withdrawn run read 13.01.
+- **Multi-window input holds are published as an untargeted, window-count-bucketed series.** This is
+  the **third use** of the per-request-sum precedent — `total_attributable_overhead_ms` was the
+  first, ADR-032's NFR-P-002 window series the second — and the shape is deliberately identical, so
+  a reader meets one convention rather than three.
+- **`eval/bench_latency --check` gates only the single-window population.** The bucketed series is
+  reported beside it with no verdict attached. A gate that stayed red on every long prompt would be
+  indistinguishable from a broken gate, which is the failure mode the filed report's option B names.
+
+### Anti-laundering record
+
+This scopes a target, so it carries the same record ADR-030 did, and for the same reason.
+
+**Filed and ruled from a projection over ADR-032's measured table, BEFORE the detector exists.**
+That is the fact that distinguishes it from the laundering **ADR-026 §5** bars. §5 forbids moving a
+target so that a measurement which *missed* it passes. Nothing has missed this target: `tier2_injection`
+is not written, so no measurement of it exists to be rescued. What is projected is the
+**composition** — that a multi-window scan lands inside `input_hold_ms` by 06 §4's own definition —
+and the cost is not projected at all, it is ADR-032's measured series.
+
+This is the precedent `[D1-tier2-budgets-cannot-coexist-with-nfr-p-001]` established and ADR-030
+recorded: a specification decision taken before the code can embarrass it is a front-door
+respecification, and the same decision taken afterwards is a moved goalpost. Ruling it now is the
+last moment that distinction is available.
+
+**SL-1 remains unmet and unmoved**, and ADR-026 §5's single re-measurement stays consumed. Nothing
+in this amendment touches `tier1_pii`'s recall target or any figure already published.
+
+### Consequences
+
+1. `01 §5`'s NFR-P-001 row gains the single-window scope on its input-lane figure, worded to match
+   the scope ADR-032 gave NFR-P-002 so the two read as one convention.
+2. `06 §4` gains the window-count-bucketed `input_hold_ms` series beside the targeted one, and
+   states that `--check` gates the single-window population only.
+3. `eval/bench_latency.py` emits the bucketed series and narrows its NFR-P-001 assertion to
+   single-window holds.
+4. The deviation closes citing this amendment.
+
+**Docs touched:** 01 §5 (NFR-P-001 input-lane scope), 06 §4 (the bucketed series + the `--check`
+narrowing), 08 (deviation closed).
+
+### Amendment 3 — 2026-08-30: pool users **serialize**, so a hold composes as `max(Σ pool, max(non-pool)) + engine` (resolves `[D1-per-hold-derivation-maxes-detectors-that-share-one-worker]`)
+
+**Status:** Accepted 2026-08-30. Recommendation **A** of the filed report, approved: re-derive the
+table with pool users composed as `sum`, keep `max_workers=1`, correct the `~max` prose.
+
+**Context.** ADR-030's derivation composes every hold as `max(...)` over its lane. ADR-034 Part A,
+ruled one day later, binds five *named* model detectors — `tier2_injection`, `tier2_toxicity`,
+`rag_grounding`, `fast_consistency`'s embedding comparison, `entity_enricher` — to one shared
+`max_workers=1` pool, and calls that setting load-bearing because it preserves the
+one-inference-at-a-time conditions **SL-5** was measured under. Both cannot hold on a lane carrying
+two pool users, and `LANES[output_sentence]` already names two of the five.
+
+### Decision — one composition rule, stated as arithmetic
+
+A hold is **`max(Σ pool users, max(non-pool detectors)) + engine 5`**.
+
+Pool users **sum** because one worker serializes them. Non-pool detectors **overlap** the pool work
+rather than adding to it: a forward pass in a worker thread releases the event loop, so the regex
+emitters run inside the model's wall time. Enrichment carries no separate term in this rule — it is
+a pool user (04 §2.2's 10 ms aggregate) and enters the Σ, which is why the rows that already
+treated it additively do not move.
+
+| Hold | Pool users (serialize) | Non-pool (overlap) | Worst case | Against the target |
+|---|---|---|---|---|
+| Input lane † | `tier2_injection` 25 | 2 | **30 ms** | P99 < 50 — fits |
+| Per-sentence, typical | `tier2_toxicity` 25 | 5 | **30 ms** | P50 < 40 — fits |
+| Per-sentence, typical, enriched | 25 + `entity_enricher` 10 = 35 | 5 | **40 ms** | P50 < 40 — **zero margin, unchanged** |
+| Per-sentence, with context docs | 25 + `rag_grounding` 30 + `entity_enricher` 10 = 65 | 5 | **70 ms** *(was 45)* | P99 < 100 — fits, 30 ms margin |
+| Per-sentence, `on_sampled`, no context | 25 + `fast_consistency` 60 + `entity_enricher` 10 = 95 | 5 | **100 ms** *(was 75)* | **untargeted** (below) |
+| Per-sentence, `on_sampled` + context | 25 + 30 + 60 + 10 = 125 | 5 | **130 ms** *(newly tabulated)* | **untargeted** (below) |
+
+Three rows are unchanged, which is not a coincidence and is the reason the fix is narrow: a hold
+with **one** pool user has nothing to serialize against, so `Σ` and `max` agree. Only rows 4-6
+carry two or more.
+
+† **This row composes from the *declared* 25 ms budget, and that budget is now measurably missed.** `tier2_injection` measures an attributable P99 of **25.348 ms** ([[SL-8]]), so the composed 30 ms is optimistic by ~0.35 ms against roughly 20 ms of margin to the P99 < 50 target — the row does not flip, and no other row in this table contains this detector. **Deliberately not re-derived:** substituting a measured figure for a declared budget would make the published table move with every re-run and would no longer be the specification arithmetic `eval.check_derivations` verifies. See [[M-59]]; the optimism is stated here rather than left to be discovered.
+
+**Row 6 was never tabulated.** ADR-030's table had no `on_sampled`-with-context-docs row at all, so
+the worst case it published (75 ms) was not the worst case its own budgets allow. It is tabulated
+here rather than left implicit — an omitted row is how a derivation stays fitting.
+
+### Target disposition — the reachable rows fit, and the two that do not lose their target
+
+1. **No target moves.** Input-lane P50 < 40 / P99 < 50 and per-sentence P50 < 40 / P99 < 100 all
+   stand at their ADR-030 values. This was not the expected outcome when the ruling was issued, and
+   it is stated plainly rather than dressed as a vindication: it holds only because the rows that
+   breach are the two `fast_consistency` rows, and item 3 below makes them unreachable.
+2. **The per-sentence P99's *scope* narrows.** It covers holds composed of at most one pool user
+   plus enrichment plus `rag_grounding` — i.e. the reachable set. The two `on_sampled` rows
+   (100 ms, 130 ms) are **published untargeted**, on the per-request-sum precedent this ADR
+   established: a quantity that cannot honestly carry a target keeps its visibility and loses its
+   target, rather than the target being loosened to admit it.
+3. **`fast_consistency` is cut to roadmap** (same sweep, 2026-08-30), so rows 5-6 describe no
+   shipped path today. **This is not what resolves them.** The cut is a scope decision and the
+   untargeted publication is a specification one; landing `fast_consistency` later re-arms both
+   rows at 100 and 130 ms against P99 < 100. Recording the untargeted status now is what keeps that
+   from arriving as a surprise, so the rows stay in the table with their arithmetic intact.
+4. **The enriched-typical row's zero margin is untouched** — still exactly 40.0 against a strict
+   `< 40`, still argued not to be a P50 breach on the grounds that a median sentence is unenriched.
+   Amendment 3 neither improves nor worsens it; it is repeated here only so a reader of the new
+   table does not think the adjacency was resolved.
+
+### Anti-laundering record
+
+This amendment changes the scope of a target, so the same record ADR-030 and Amendment 2 carried:
+
+- **It lands BEFORE any measurement of the affected rows exists.** `tier2_toxicity`,
+  `rag_grounding` and `fast_consistency` are all unimplemented at the moment of ruling; nothing has
+  been run against the old figures and missed them. The re-derivation is arithmetic over 04 §2
+  budgets, exactly as ADR-030's original was.
+- **The correction was found by reading the contracts, not by a measurement that failed.** It was
+  filed while checking whether ADR-030's table survived ADR-034 — which is the honest order.
+- **Every affected row keeps being published, including the two that lose targeting and the one
+  that was never tabulated.** Nothing is withdrawn from publication.
+- **Distinct from ADR-026 §5**, which bars moving a target a measurement has already missed. That
+  bar is untouched: SL-1 (`tier1_pii` recall 0.8852 vs 0.95) remains unmet and unmoved, and ADR-026
+  §5's single re-measurement stays consumed.
+- **The old figures are not quietly overwritten.** 45 and 75 appear above as *(was 45)* / *(was 75)*
+  so the movement is legible in the table itself.
+
+### The `~max` prose is corrected where it lives
+
+02 §4 promised that at Tier-2 "lane composition becomes `~max` rather than `sum`". That is true only
+of the lane shape the trigger was written for — one pool user plus regex emitters. Both sites (02 §4
+and this ADR's concurrency-trigger ruling) now state the two-part rule. The trigger itself is
+**unchanged and still correct**: it fires on the first Tier-2 detector, and the concurrency it buys
+is real for non-pool detectors.
+
+The D1 report's `gather` diagnostics (model + 2 regex at 1.04x; model + model at 0.98x) are
+**NOT citable** — `load1` 2.39 against `QUIET_LOAD1_MAX` 1.0 (06 §8) — and this amendment does not
+rest on them. It rests on `max_workers=1`, which ADR-034 Part A rules load-bearing.
+
+### Consequence — the derivation gains the guard it never had
+
+The report's second finding was that **nothing in the repo detects this**: ADR-030's table had no
+source artifact and no test, so two rows were arithmetically wrong against a later ADR while CI was
+green. `eval.check_derivations` now re-derives this table from `BUDGETS_MS` and the pool-user set,
+which makes the composition rule executable rather than prose. A future budget edit or a sixth pool
+user moves the table or fails the gate.
+
+**Docs touched:** 03 (this amendment), 02 §4 (the `~max` sentence), 04 §2 rule (a) (the composition
+rule stated where the budgets live), 08 (deviation closed), README (NFR-P-001 projection row),
+`eval/bench_latency.py` (the projection caveat now names the ruling instead of the open deviation).
+
+---
+
+## ADR-031 — Tier-2 checkpoints: `madhurjindal/Jailbreak-Detector` + `martin-ha/toxic-comment-model`, on ONNX Runtime (resolves Q-04)
+
+**Status:** Accepted 2026-08-28. Closes **Q-04**, deferred 2026-08-24 pending an NFR-P-002 latency
+spike. Q-04's own doc-rot note directs the result to "the next free ADR number" — ADR-011 was
+already taken by the `privacy.person` producer decision — which is this one.
+
+**Context.** 04 §2 gives both Tier-2 detectors a **<25 ms** budget (NFR-P-002) and specifies the
+implementation as "small transformer, **CPU/ONNX**". No checkpoint was named. `eval/spike_tier2_models.py`
+measures six published candidates — three per role — across three backends, five lengths and two
+thread settings, on this hardware, and reports P50/P95/P99/max per cell.
+
+**Selection is on latency only.** The spike never reads a corpus *label*, and no candidate was
+scored for accuracy. That is deliberate: the eval corpus is frozen (06 §1) and choosing a model by
+its performance on the same fixtures that later measure it is harness-fitting. Accuracy is measured
+once, blind, by 06 §3 — on whichever checkpoint this ADR binds.
+
+### Decision
+
+| Role | Checkpoint | Params | Backend |
+|---|---|---|---|
+| `tier2_injection` | `madhurjindal/Jailbreak-Detector` | 65.8 M | ONNX Runtime, dynamic int8 |
+| `tier2_toxicity` | `martin-ha/toxic-comment-model` | 67.0 M | ONNX Runtime, dynamic int8 |
+
+Both emit a two-class probability, which is what 04 §2's `score = model prob` and
+`score_kind="detection"` (ADR-012) require. `martin-ha` is `{non-toxic, toxic}`, so the
+moderate/high split comes from the 04 §2 internal cutoffs (0.5/0.8, overridable via
+`detector_params`) rather than from model classes — `unitary/toxic-bert`'s six-way head would have
+supplied its own taxonomy and 04 §2 does not ask for one.
+
+### Measurements
+
+Ryzen 5 5600H (12 logical CPUs), Linux 7.1.2, Python 3.14.6, torch 2.13.0+cpu,
+onnxruntime 1.29.0. `n=50` per cell (`n=30` crossover, `n=20` truncation probe). Raw:
+`reports/spike_tier2_models.json`, `reports/spike_tier2_crossover.json`,
+`reports/spike_tier2_crossover_runnerup.json`.
+
+**1. Eager PyTorch never satisfies the budget across the reachable range** — at 6 threads, every
+candidate breaches at the segmenter cap, and four breach at corpus-median length. This is **not a
+D3**: eager was never the specified backend. 02 §8 names "one small **ONNX**/transformers
+classifier" and 04 §2 says "CPU/ONNX", so measuring eager and finding it short measures something
+the docs never claimed.
+
+**2. Under ONNX Runtime the budget holds, with margin, at every length each stage can deliver**
+(6 threads, int8, P50 / P99 ms):
+
+| Role | Checkpoint | corpus P50 | corpus max | segmenter cap (240 ch) |
+|---|---|---|---|---|
+| injection | **madhurjindal** 65.8 M | 4.51 / 5.21 | 4.96 / 5.32 | 7.13 / 7.60 |
+| injection | jackhhao 109.5 M | 7.32 / 8.17 | 9.20 / 10.55 | 13.34 / 15.48 |
+| injection | protectai/deberta 184.4 M | 13.14 / 14.53 | 15.05 / 15.65 | 20.40 / 21.31 |
+| toxicity | **martin-ha** 67.0 M | 2.74 / 2.91 | 4.07 / 4.92 | 9.04 / 9.93 |
+| toxicity | unitary 109.5 M | 5.85 / 6.74 | 8.35 / 9.10 | 18.32 / 19.28 |
+| toxicity | s-nlp 124.6 M | 6.89 / 13.91 | 10.26 / 12.82 | 20.41 / **28.31** |
+
+fp32 also fits for both picks at output lengths (madhurjindal 13.84/14.45 at the cap; martin-ha
+17.22/17.99), so int8 is chosen for **headroom**, not necessity — see the disclosure below.
+
+**3. `protectai/deberta-v3-base-prompt-injection-v2` is rejected despite a FITS row.** It is the
+only purpose-built injection model in the set, so it was probed a second time on the crossover
+ladder: at 240 characters it measured **27.08 / 36.69 ms — BREACH**, against 20.40 / 21.31 FITS in
+the sweep. The two runs compose 240 characters differently (whole corpus units vs hard-truncated
+cycling), yielding 50 vs 61 tokens, and at 184 M parameters that 11-token difference crosses the
+budget. A checkpoint whose verdict flips on tokenizer detail is **at** the line, not inside it.
+Recorded rather than averaged away: the disagreement is the finding.
+
+**4. Population correctness — a methodology error caught and corrected before any number here.**
+The first sweep bucketed lengths over the *pooled* corpus (n=280), which put a 348-character
+`kind:"conversation"` text in the longest bucket. No Tier-2 detector can receive it: the
+conversation stage runs only `conv_tracker`. Every breach verdict on the surviving candidates came
+from a length the architecture cannot deliver. Buckets are now **stage-scoped** to the 04 §2 Stage
+column — `input` texts for injection, `output` texts segmented by the gateway's own `Segmentation`
+for toxicity (imported, not reimplemented: two definitions of "one sentence" would eventually
+disagree). Correcting it flipped `madhurjindal` from FITS to BREACH on eager, because the median
+`input` case tokenizes at **1.94 chars/token** against **4.19** for the median output sentence —
+62 characters becoming 32 tokens where 67 characters of prose become 16. Letter-spacing *is* the
+evasion, so bucketing injection payloads by character count understates their cost. The density is
+not uniform across the lane (1.94–4.31 ch/tok over the reachable input buckets), which is the
+reason the buckets carry a measured `tokens` field rather than a conversion factor.
+
+**5. Thread sensitivity is a real exposure, not a footnote.** At **1 thread** both picks breach at
+the segmenter cap — madhurjindal **25.90 P50 / 26.20 P99**, martin-ha **34.48 / 35.50** — while
+still fitting at corpus-typical lengths (17.81 / 10.62 P50). The budgets above are measured with 6 threads available to one inference. Under concurrent
+load, per-request parallelism falls, and NFR-P-002 has no stated concurrency assumption. Logged as
+**SL-5**; not tuned away and not treated as a passing figure.
+
+**6. Int8 accuracy disclosure.** Dynamic quantization perturbs logits — ONNX fp32 reproduces torch
+exactly, int8 differs in the third significant digit (3.002 vs 2.974 on a probe input). So a
+shipped int8 detector's accuracy is **not** the published checkpoint's reported accuracy, and no
+number from a model card may be presented as ours. 06 §3's blind eval measures what actually ships.
+
+### Consequences
+
+1. `controlplane/detectors/tier2_classifiers.py` loses its `STUB(phase-1-scaffold, Q-04 deferred)`
+   and binds these two ids.
+2. **Dependencies** (02 §8 "New deps require an ADR note"): the `ml` extra gains
+   `onnxruntime==1.29.0` and an explicit `transformers==4.57.6` pin — transitive through
+   `sentence-transformers` today, but a direct import once these detectors exist, and an unpinned
+   direct dependency is how 4.57.6 silently became 4.53.3 once already this phase. Export tooling
+   (`onnx`, `onnxscript`) is **dev-only**: it builds the graph, it does not serve it.
+   `optimum` is deliberately **absent** — `optimum[onnxruntime]==1.27.0` fails on torch 2.13
+   (`_attention_scale` import) and downgrades transformers as a side effect. `torch.onnx.export`
+   plus `onnxruntime.quantization` covers the same ground with no version conflict.
+3. Where the served graph comes from — exported on first use and cached, versus checked in — is an
+   **implementation** decision inside this contract, not an ADR: a committed binary graph has
+   provenance nobody can audit, so first-use export is the default unless startup cost forbids it.
+4. **The budget does not hold across the full input range**, and the input stage applies no length
+   cap. Filed as `[D3-tier2-injection-budget-cannot-hold-on-unbounded-input]` — this ADR binds the
+   checkpoints, that deviation decides the input bound, and the pick does not depend on the ruling
+   (`madhurjindal` is fastest at every length measured).
+5. `tests/test_gateway_app.py::test_ovlp01_is_not_yet_wired` and
+   `tests/test_fault_injection.py::test_tier2_is_not_yet_injectable` are both tripwires that fire
+   when a Tier-2 detector lands. Landing these detectors must re-point them in the same commit, not
+   delete them.
+
+**Docs touched:** 08 (Q-04 closed with the pick; SL-5 added; the deviation filed), `pyproject.toml`
+(the §2 dependency note), 04 §2 unchanged — the registry rows already say CPU/ONNX and this ADR
+fills in which checkpoint.
+
+---
+
+## ADR-032 — `tier2_injection` scores the whole input as strided windows; the multi-window cost is published, not truncated away (resolves `[D3-tier2-injection-budget-cannot-hold-on-unbounded-input]` and `[D3-full-coverage-windows-cost-600ms-at-the-policy-bound]`)
+
+**Status:** Accepted 2026-08-28.
+**Context.** Two deviations, one subject. The first measured `tier2_injection`'s <25 ms budget
+(04 §2, NFR-P-002) breaching between 400 and 600 characters, with nothing in the gateway bounding
+input length and the tokenizer silently truncating at 512 tokens — so an injection payload past
+token 512 was never scored at all. Prefix truncation (its option A, the recommendation) was
+**overruled**: a documented "we score the first N tokens" is an evasion recipe, and the
+interception guarantee is the product. Full coverage via strided windows was ruled instead, with
+an explicit stop condition: *measure batched inference at the policy bound before concluding
+anything, and if full coverage lands in the >500 ms class, stop and report rather than truncate
+silently.* It did land there, which produced the second deviation. This ADR is that ruling
+completed, with the measured cost accepted.
+
+### Decision
+
+1. **Window geometry: 104 tokens, overlap 26, step 76.** Every window is scored; no input is
+   skipped and no prefix is privileged. 104 is the largest window that fits the budget as a
+   single call, and small windows are *more* token-efficient than large ones — measured cost per
+   content token is **0.111 ms** at 104 tokens against **0.187 ms** at 512, because attention is
+   quadratic in sequence length. So no window geometry rescues the bound: full coverage of 4000
+   tokens is inherently ~53 × ~12 ms. The overlap exists so a payload straddling a boundary is
+   whole in some window.
+2. **Aggregation is MAX over windows**, with `window_count` and the index of the max-scoring
+   window in the signal meta. MAX and not mean: a mean over 53 windows dilutes a single malicious
+   window below any threshold, which is padding-as-evasion by arithmetic.
+3. **The position is pre-dispatch, and that is not negotiable.** Optimistic dispatch — call the
+   provider while scoring — would deliver the payload upstream, which is the exact event the gate
+   exists to prevent. The cost is therefore paid on the input lane, buffered, before the provider
+   is called.
+4. **`budget.per_request_max_tokens` is the escape valve, in policy rather than code.** A pipeline
+   needing a hard input-latency ceiling lowers its own value; one needing 4000-token prompts
+   raises it and accepts the published latency. 04 §9 puts thresholds in per-use-case config, and
+   this is one.
+
+### Measurement outcome — the ~600 ms bound case is accepted and published
+
+`eval/spike_window_latency.py`, raw in `reports/spike_window_latency.json`. Ryzen 5 5600H
+(12 logical CPUs), Linux 7.1.2, Python 3.14.6, onnxruntime 1.29.0, `madhurjindal/Jailbreak-Detector`
+65.8 M on ONNX Runtime **int8**, synthetic deterministic filler (no corpus text), window 104/26/76,
+**53** windows at the `per_request_max_tokens: 4000` bound (Correction 1 below). Every coverage label
+is **derived** from the window geometry, never read off a filler token count. Measured at code
+`445ca31dd087` (clean) on a host stamped **0.6 / 0.94 / 0.98 QUIET**, n=40 per ladder point, 0
+contamination signals in either thread phase. P50 / P99 ms, 6 threads:
+
+| windows | input tokens | sequential | batched (all in one call) |
+|---|---|---|---|
+| 1 | 102 | 10.92 / 11.87 | 11.27 / 12.59 |
+| 2 | 178 | 22.81 / 24.76 | 21.21 / 22.53 |
+| 4 | 330 | 45.98 / 48.77 | 43.09 / 46.71 |
+| 8 | 634 | 94.00 / 96.99 | 91.03 / 97.42 |
+| 16 | 1242 | 191.74 / 229.64 | 200.38 / 208.58 |
+| 32 | 2458 | 391.66 / 401.56 | 450.09 / 506.82 |
+| **53** | **4054** | **655.50 / 686.25** | **794.18 / 865.42** |
+
+**The cost is accepted, with the reason recorded rather than left to inference.** It scales with
+window count, and window count scales with input length — so the guard's cost concentrates
+precisely on long inputs, which is where pad-then-inject attacks live. A typical single-window
+prompt pays **10.92 ms P50 / 11.87 ms P99**. The pathological 4000-token prompt pays ~0.6 s, and it
+is the shape an attacker uses to dilute or outrun a scanner. Spending the most time on the most
+suspicious inputs is the correct allocation, not an unfortunate one.
+
+**Relative context, stated once and not leaned on.** A 4000-token prompt takes an LLM multiple
+seconds to answer; ~0.6 s of pre-dispatch scoring is a fraction of a wait the user already has.
+This is context for the magnitude, **not** a target and not a claim the cost is negligible — the
+figure is published in full and untargeted so a reader can judge it themselves.
+
+**Hardware, stated once.** All figures are CPU int8 with **6 threads** available to one inference.
+**SL-5's caveat applies in full**: at **1 thread** a *single* window costs **49.77 / 50.76 ms** —
+NFR-P-002 breaches even single-window — and the bound case costs **2541.99 ms**. GPU or dedicated
+serving hardware is roadmap, not claimed anywhere in this repo.
+
+**Batching does not amortise, and past a small batch it hurts.** Measured at the bound
+(6 threads, 53 windows, n=40 with percentiles resolved): batch **2 → 593.60 ms P50 / 615.79 ms
+P99** (the minimum in *both* statistics), batch 4 → 599.28 / 685.98, batch 8 → 625.92 / 659.89,
+batch 16 → 671.86 / 729.98, batch 32 → 728.96 / 783.58, all-53-in-one-call → **793.86 / 834.28** —
+*worse* than 53 separate calls at 634.76 / 687.31. The cause is measurable rather than speculative:
+one window costs 49.77 ms at 1 thread and 10.92 ms at 6, a **4.56×** speedup, so ONNX Runtime
+already spreads a single window across the cores. There is no idle parallelism for a batch to
+exploit; a larger tensor only queues more work at a saturated pipeline. **Bound batch size: 2** —
+the measured minimum, in both statistics and at both thread settings (Correction 2 below records
+the decision rule and the full curve).
+
+#### Correction 2 — 2026-08-29: the batch size is 2, decided on a curve that can resolve a P99
+
+Resolves `[D1-batch-4-justification-falsified-at-the-corrected-bound]` (MAJOR, filed 2026-08-29 by
+Correction 1's own re-measurement). The ruling approved the harness change the filing named, fixed
+the decision rule in advance, and delegated only the data: **lowest bound-case P99 among b2/b4/b8
+wins; ties within 5% break toward the smaller batch** (memory and latency granularity).
+
+**Withdrawn justification, preserved.** Until this Correction the paragraph above read:
+
+> *"Measured at the bound (6 threads, 52 windows, P50): batch **2 → 599.20 ms** (the minimum),
+> batch 4 → 602.66, batch 8 → 631.45, batch 16 → 667.03, batch 32 → 727.18, all-52-in-one-call →
+> **800.58** — worse than 52 separate calls at 653.65. … **Bound batch size: 4.** Not 2, though 2
+> is the nominal minimum: 599.20 and 602.66 differ by 0.6%, which is inside this harness's own
+> run-to-run spread, so picking the minimum over-fits one run. Batch 4 sits in the same flat basin
+> with half the call count, and costs ~0.6% at 1 thread where the curve is monotonically worse."*
+
+**The re-measured curve** (`reports/spike_batch_curve.json`, commit `960a236fefca` clean, host load
+**0.96 QUIET**, `curve_reps=40`, percentiles resolved at every point, 0 contamination signals):
+
+| batch | calls | 6thr P50 | 6thr P99 | 6thr max/P50 | 1thr P50 | 1thr P99 |
+|---|---|---|---|---|---|---|
+| 1 | 53 | 634.76 | 687.31 | 1.084 | 2581.78 | 2619.06 |
+| **2** | **27** | **593.60** | **615.79** | **1.054** | **2566.23** | **2577.48** |
+| 4 | 14 | 599.28 | 685.98 | **1.200** | 2573.76 | 2761.72 |
+| 8 | 7 | 625.92 | 659.89 | 1.096 | 2606.84 | 2641.12 |
+| 16 | 4 | 671.86 | 729.98 | 1.185 | 2610.19 | 2642.64 |
+| 32 | 2 | 728.96 | 783.58 | 1.128 | 2690.30 | 2728.35 |
+| 53 | 1 | 793.86 | 834.28 | 1.146 | 2780.62 | 2801.15 |
+
+**Applying the rule.** At 6 threads b2 is lowest and nothing is within the 5% tie band (b8 +7.2%,
+b4 +11.4%), so the pick is b2. At 1 thread b2 is lowest, b8 is inside the band at +2.5% and b4 is
+outside at +7.1%; the tie-break toward the smaller batch also picks b2. **The two columns agree**,
+so the decision did not require choosing a column — worth stating, because the column choice is
+itself a documented judgement call elsewhere in this ADR (M-30).
+
+**Why the original reasoning failed, precisely.** Not because 0.6% was fabricated — at n=40 the
+b2→b4 **P50** gap is **+0.96%**, close to what was claimed. The flat basin is real *in medians* and
+absent *in tails*: the same pair differs by **+11.4% at P99**. The old paragraph read medians
+because the curve could publish nothing else — every point was n=10, where
+`_percentiles_are_distinct` is False and a "p99" is `samples[8]`. So a decision about a **tail**
+was taken on the only statistic the instrument could resolve, and the batch size that looked
+equivalent on medians is the curve's **least stable point** (max/P50 = 1.200, the worst of seven,
+reproduced from the pre-correction run's 1.135). The filing's own diagnosis — *"the instrument
+cannot settle it, and that is stated rather than worked around"* — was correct, and it is also why
+the interim figure that filing reported (a ~6% P50 gap, from n=10) does not reproduce at n=40:
+**an n=10 median was itself too noisy to quote**, in the direction that made the case look worse
+rather than better. Both are now superseded by the resolved measurement.
+
+**No contract moves.** ADR-034's ceiling is defined as *measured envelope × 2*, so it re-derives
+from whichever batch is bound; `per_unit_ms` is grounded on the **ladder's** worst per-window P99
+across both columns (52.78 ms), which this correction does not touch. Verified rather than assumed:
+`ceiling_ms("tier2_injection", 53)` = 5611.32 ms clears the winning envelope by **9.11×** at 6
+threads and **2.18×** at 1. `tier2_injection` builds on batch 2.
+
+**Why the ladder was not re-rolled.** Only the curve was re-measured (`--no-ladder`). Re-rolling
+the ladder would have invalidated the 33 figures Correction 1 had just re-derived against it,
+forcing a second full re-cite of numbers that were not in question — and each re-cite is an
+opportunity for exactly the transcription defect these corrections exist to remove. The curve is
+therefore its **own artifact** with its own provenance stamp: one artifact carries one
+`code.commit` and one `load_at_process_start`, so splicing two runs into one file would make that
+stamp certify a moment that never happened (M-33). The cost is stated rather than hidden: with no
+ladder, `contamination_signals`' **LOCAL SPIKE** and **CROSS-MEASUREMENT** checks have no input and
+are recorded as `contamination_checks_inapplicable` — *unmeasurable*, not passing. TAIL DISPERSION
+and COLD RATIO ran and returned clean.
+
+#### Correction — the deviation's cross-validation note is wrong in both directions
+
+`[D3-full-coverage-windows-cost-600ms-at-the-policy-bound]` states: *"ADR-031's crossover measured
+this checkpoint on 104 tokens of real, ragged text at 14.27 ms; this harness measures 104 tokens of
+synthetic, padded text at 11.30 ms — same order, and the padded figure is the conservative one per
+window."* Two errors, corrected here rather than by rewriting a filed report:
+
+- **11.30 is not the conservative figure**; it is the *faster* of the two, so it understates
+  per-window cost.
+- **The gap is not a synthetic-vs-real content effect.** Both harnesses time `sess.run` only, with
+  tokenization outside the clock (`spike_window_latency._time_calls`, and the `t0` immediately before `sess.run` in `spike_tier2_models`), and
+  at a fixed 104-token tensor shape a BERT-class encoder's FLOPs do not depend on which tokens
+  fill it. Identical work measured at 11.30 and 14.27 ms in two separate runs is **run-to-run
+  variance (~26%)** — thermal state, background load, a separate quantization pass — and is
+  disclosed as a measurement band, not explained away as content.
+
+Consequently the single-window figure this ADR treats as authoritative for the budget decision is
+the **higher** one where they disagree, and the ~26% band applies to every figure in the table.
+The conclusions are unchanged: 1 window fits with margin on either figure, 2 windows breach on
+either, and the bound case is in the >500 ms class on either.
+
+#### Correction 1 — 2026-08-29: the coverage labels were observed, not derived, and the bound case undercovered the bound (resolves `[D3-bound-case-window-count-undercovers-the-policy-bound]`)
+
+**Status:** Accepted 2026-08-29. Option A of the filed report, approved. (Numbered "1" although this
+ADR's other correction — the cross-validation note above — is unnumbered. That one predates the
+numbering convention and is left as-is rather than renumbered, since it is cited by heading text
+elsewhere; the format precedent it follows is the `eyJ` correction in ADR-026.)
+
+**The withdrawn table, preserved rather than deleted:**
+
+> | windows | input tokens | sequential | batched (all in one call) |
+> |---|---|---|---|
+> | 1 | 102 | 11.30 / 13.01 | 11.62 / 12.90 |
+> | 2 | ~178 | 23.28 / **25.13** | 21.45 / **26.10** |
+> | 4 | 330 | 47.20 / 51.40 | 43.52 / 54.13 |
+> | 8 | 634 | 96.52 / 99.50 | 91.99 / 98.42 |
+> | 16 | 1546 | 196.19 / 201.91 | 203.88 / 235.27 |
+> | 32 | ~3100 | 397.39 / 409.54 | 457.89 / 474.63 |
+> | **52** | **4082** | **651.41 / 657.04** | **800.75 / 819.96** |
+
+(Blockquoted deliberately, and not struck: `eval/check_derivations.py` locates a table by its header
+line and takes the **first** match, so a withdrawn table left as live markdown would be the one the
+re-derivation check reads. A quoted table is invisible to it. The mechanical guard shapes how the
+withdrawn evidence is preserved — which is the correct direction of influence.)
+
+**The off-by-one, stated plainly.** The bound-case row claimed **4082 tokens** of coverage at **52
+windows**. The geometry is `coverage_tokens(n) = 102 + (n-1)·76`, so 52 windows span **3978** tokens —
+**22 short of the 4000-token bound**, and 4082 is not a figure 52 windows can produce at all. The row
+therefore contradicted the ADR's own headline guarantee, *full coverage, no unscanned tail*, in the
+one row where the guarantee matters most. `windows_for_tokens(4000) = 53`, spanning 4054.
+
+**Where 4082 came from, and why the whole column was wrong in kind.** The labels were **observed**
+rather than **derived**: the harness reported the token count of the *whole synthetic filler string*,
+which overshoots the target by construction (it appends until it is at least long enough — 4082 for a
+4000-token request). The 52-window row was then labelled with the filler's length rather than with
+what 52 windows cover. Rungs 1/2/4/8 happened to agree with the geometry, which is exactly why the
+defect survived review; **16 and 32 did not** — published as 1546 and ~3100 against a derived 1242 and
+2458. Those two are not merely mislabelled but **underivable**: no combination of the harness's
+geometry and filler produces them, and the ruling explicitly declined to reconstruct their provenance.
+One sentence is the whole record: they were wrong, their origin is not recoverable from the artifact,
+and they are replaced by derived values.
+
+**Every label in the re-published table is now computed from the geometry**, in the artifact and in
+the harness, and `filler_tokens` is recorded beside them **explicitly marked provenance, not a label**.
+
+**This is a label correction plus a re-measurement — not a re-roll.** The same precedent the `eyJ`
+correction set: *the decision stands; only its stated reason was wrong.* Every conclusion ADR-032
+reached survives — the bound case is in the >500 ms class, cost concentrates on long inputs, the
+512-token blind spot closes, single-window inputs fit NFR-P-002 with margin. What changed is that the
+bound case is now measured **at** the bound (53 windows, 4054 tokens) instead of 22 tokens short of
+it, and every label is derived. The re-measurement was required because the row's *subject* changed:
+a corrected label on a 52-window measurement would still not be a measurement of the bound.
+
+**Why the re-measured figures differ slightly from the withdrawn ones.** They are a different run on
+the same host: ~2-4% lower across the ladder, within the ~26% run-to-run band the correction above
+already discloses. The new run also carries provenance the old one could not: a clean code stamp
+(`445ca31dd087`), a certified-quiet host stamp (**0.6 / 0.94 / 0.98**, `QUIET`), **0 contamination
+signals** from `spike_window_latency.contamination_signals`, and **n=40 at every ladder rung** — the
+last of which matters more than it looks. The old artifact ran reduced reps at its four largest rungs,
+where `_percentiles_are_distinct(10)` is False: `int(0.95·9)` and `int(0.99·9)` are both 8, so those
+rows' "P99" was `samples[8]`, the second-worst of ten, wearing a P99 label. The figures were real; the
+**percentile they claimed was not**. The symptom was visible and had been dismissed — a bound-case
+"P99" that moved 10.9% between two runs whose P50s agreed to 1.2%.
+
+**Guards, so the harness cannot reproduce the defect.** (1) `spike_window_latency` refuses to run if
+`coverage_tokens(max(WINDOW_COUNTS)) < POLICY_BOUND_TOKENS` — an import-time assertion, so an
+under-covering ladder cannot be measured, let alone published. (2) `tests/test_window_coverage.py`
+asserts every published label equals the formula's output, and that the artifact's top rung is 53 and
+not 52. (3) ADR-034 Part C's exact-count rule is pinned by a test that the detector's window count at
+the policy bound covers every token, leaving no unscanned tail. (4) `eval/check_derivations.py`
+re-derives every derivation-claiming figure in ADR-032/034 from the artifact and is a pytest gate, so
+CI fails on a figure whose stated derivation does not produce it.
+
+**M-31 is vindicated, and the vindication is the point.** M-31 recorded that Part C's original
+character-upper-bound clause was *"never checked against real text before being written down."* The
+same sentence describes this defect exactly: a coverage label never checked against the geometry it
+claimed to express. Both were sound-looking arithmetic that no one evaluated at the bound.
+
+**Pattern observation, recorded because it has now happened twice in two sessions.** In both cases the
+*measurement* falsified the *written text*, not the reverse — and in both cases the written text was
+internally plausible and had survived review. The defect class is **"a figure described by a
+derivation it doesn't come from"**, and its instances here are: coverage labels sourced from filler
+token counts; unresolved percentiles published as P99; Part B's tokenization table, which no script in
+this repo measured when it was published; `4080` labelled "bound" when it is 54 windows; and a ratio
+re-derived from a different rung than the two cells beside it. The lesson is not "review harder" — all
+of these passed review. It is that a derivation claim must be **executable**, which is why the guard
+this correction lands is a script and not a convention. A third instance was found by the correction's
+own re-measurement and is filed as
+`[D1-batch-4-justification-falsified-at-the-corrected-bound]` (MAJOR, open).
+
+### Budget respecification (04 §2 / NFR-P-002)
+
+- **NFR-P-002's <25 ms is scoped to single-window inputs** (≤104 tokens), and the scope rests on
+  **principle, not on a measured miss** — corrected below, resolving `[D1-two-window-budget-breach-not-reproduced-on-the-clean-artifact]` (MAJOR, filed
+  2026-08-29, **ruled and closed 2026-08-29**, Option A). A per-detector budget is a
+  **per-inference** quantity; multi-window cost is **length-parametric by construction**
+  (ADR-034), so no flat per-call figure can describe it at *any* window count. That argument holds
+  whichever side of 25 ms the two-window measurement happens to land on, which is exactly why it is
+  now the stated ground and the measurement is not.
+  Measured, for the record: one window **12.59 ms P99**; two windows **24.76 ms P99** — *inside*
+  the 25 ms budget by **0.24 ms**. That margin is **smaller than this ADR's own disclosed
+  run-to-run band** (~26%: identical single-window work measured 11.30 and 14.27 ms in two separate
+  runs), so two windows is **indistinguishable from the budget line** rather than safely inside it.
+  The first rung that breaches at 6 threads is **4** windows.
+
+> **Withdrawn wording, preserved.** Until Correction 1 this bullet read:
+>
+> > *"**NFR-P-002's <25 ms is scoped to single-window inputs** (≤104 tokens), where it is measured
+> > to hold at 13.01 ms P99. The boundary is not a conservative choice — it is exactly where the
+> > measurement puts it: two windows measure **25.13 ms P99** against a 25 ms budget, so the target
+> > fails at the first multi-window input."*
+>
+> Both figures came from the withdrawn 52-window run and **the conclusion was false**, not merely
+> imprecise: on the clean artifact two windows pass in *both* columns (sequential 24.76, batched
+> 22.53). This is the one direction §7's anti-laundering rule does not cover — not a target moved
+> to hide a miss, but a **claimed miss that did not happen**, which had made the scope look
+> compelled by measurement when it was in fact the more conservative choice. The scope did not
+> move; only its reason did.
+>
+> **Re-scoping to ≤2 windows was considered and rejected.** Verbatim, as ratified: *B would widen a
+> target on less evidence than the ADR already disclosed as insufficient, and in the
+> self-flattering direction.* A boundary that flips on 0.24 ms should not be re-drawn on 0.24 ms —
+> and a third run could flip it back, since the gap is between-run drift that no number of reps
+> inside one run reduces.
+- **Multi-window cost is published as a window-count-bucketed, length-parametric, untargeted
+  series** — the table above is its shape — with the bound case stated as a figure, not a range.
+- **Anti-laundering record.** This scopes a target *after* a measurement missed it, which is what
+  ADR-026 §5 bars, so the distinction is recorded explicitly rather than asserted. What §5 forbids
+  is moving a target so a missed measurement passes; NFR-P-002 is **not** moved: <25 ms stays
+  exactly where it was for the inputs it was measured against, and every input that breached it
+  still breaches it. What changes is that the breaching class is **published with its own figures
+  instead of being hidden by truncation** — the alternative on offer was to make the number look
+  better by scoring less, which is the laundering §5 exists to prevent. SL-1 remains unmet and
+  unmoved; ADR-026 §5's single re-measurement stays consumed.
+
+### Consequences
+
+1. `tier2_injection` is unblocked and implementable: windowed 104/26/76, MAX aggregation, batch 2
+   (Correction 2),
+   `window_count` + max-window index in signal meta.
+2. **The 512-token blind spot closes.** Full coverage is the point: an injection at token 3000 is
+   now scored, where before it was outside the tokenizer's reach entirely.
+3. `cost.request_too_large` remains unmapped in all three shipped policies. That is a **cost-plane
+   gap (Phase 6)**, not this ADR's business — item 4 makes `per_request_max_tokens` the latency
+   control, and a policy that lowers it needs the signal mapped to see a rejection. Logged as an
+   M-row, not left implicit.
+4. Both injection D3s close citing this ADR.
+5. ADR-031 consequence 5 still binds: `test_ovlp01_is_not_yet_wired` and
+   `test_tier2_is_not_yet_injectable` must be **re-pointed in the commit that lands these
+   detectors, not deleted**.
+
+**Docs touched:** 01 (NFR-P-002 gains the single-window scope), 04 §2 (`tier2_injection` row),
+06 §4 (the untargeted window-count series joins the reported set), 08 (both D3s closed; the
+`cost.request_too_large` M-row).
+
+---
+
+## ADR-033 — A detector has three lifecycle states, not two: "registered but unloadable" is a boot-time condition (resolves `[D1-not-run-vocabulary-cannot-say-dependency-absent]`)
+
+**Status:** Accepted 2026-08-28.
+**Context.** 05 §4 fixed `not_run[].reason` to a closed vocabulary with one member,
+`not_implemented`, defined as *"the detector has no live implementation in this phase"*. That was
+true while every model-backed detector was a stub. The moment one gains an implementation, a host
+without the `[ml]` extra has **no truthful value to record**: the detector exists, so
+`not_implemented` is a false statement, and it was the only member admitted. The host is not
+hypothetical — `.github/workflows/ci.yml` installs `.[dev]` only and says the model stack is
+*deliberately* absent. Worse, because 05 §4 states that a not-run entry is **not** a
+`DetectorFailureRecord` ("no attempt was made, so there is no fault"), `finance_advisor`'s
+`tier2: fail_closed` was **silently not honoured** on such a host: the request passed with a
+coverage note and nothing resolved a fail mode. The gap is generic — `rag_grounding`
+(sentence-transformers), `entity_enricher` (spaCy) and the Tier-2 pair (onnxruntime/transformers)
+reach it identically.
+
+### Decision — three states, each with its own record
+
+| # | State | Record |
+|---|---|---|
+| (a) | **Not registered** for this stage or switched off by policy | absent from `ran`; absent from `not_run` — it was never expected (existing 05 §4 semantics) |
+| (b) | **Loaded and ran** | `Signal`s, or a `DetectorFailureRecord` on runtime fault (existing 04 §5) |
+| (c) | **Registered but unloadable** — dependency absent at load | **NEW**: boot manifest + `detectors.unavailable[]` on every affected record |
+
+State (c) is a **boot-time condition**, and that is the whole of why it needs its own
+representation. It is never a per-request `DetectorFailureRecord` — nothing ran, so there is no
+fault, no `error_class` and no timestamp that means anything. And it is never a silent not-run,
+because coverage **was** promised: a policy names the detector's class and a use case expects it.
+
+### Semantics
+
+1. **Boot-time load probe.** At startup each registered detector that declares a loader attempts
+   it. Failures do not raise; they enter a **boot manifest** naming the detector and the missing
+   dependency. A detector with no loader (every deterministic Tier-1 emitter) is trivially
+   available.
+2. **Enforcement mirrors FR-GW-006's canary**, which is the precedent for "a boot may refuse":
+   - If **any active policy** maps an unavailable detector's class to **`fail_closed`** →
+     **BOOT FAILS** with an error naming the detector, the missing dependency, and the policies
+     that require it. You cannot promise fail-closed protection with the protector absent; a
+     gateway that boots into that state is asserting a guarantee it structurally cannot keep.
+   - If **every** policy using it is **`fail_open`** → boot proceeds with a **loud warning**;
+     every affected request's audit record carries the detector in `detectors.unavailable[]`
+     (distinct from `ran`, from `not_run`, and from `detector_failures`), and
+     `cp_detector_unavailable_total{detector}` counts it.
+3. **`eval/run_all` consumes the same state** rather than keeping a parallel notion of "skipped".
+   Its skip-and-report already exists; what changes is that "no implementation" and "dependency
+   absent" stop sharing one label.
+4. **Test environments without the `[ml]` extra run via `fail_open`-configured policies or
+   explicit registration stubs — never by faking a load.** A stubbed detector that reports itself
+   loaded would make the boot check pass by lying, which is the failure this ADR exists to
+   prevent, reintroduced one layer down.
+
+### Consequences
+
+1. **CI cannot boot the gateway against the shipped policies once the Tier-2 pair lands, and that
+   is correct.** `finance_advisor.yaml` sets `tier2: fail_closed`; CI has no `onnxruntime`. Per
+   rule 2 that boot must fail. Tests that boot against the real `policies/` directory are
+   re-pointed at fail-open fixtures per rule 4 — **not** by installing a fake loader and **not**
+   by relaxing `finance_advisor`. The alternative, a green CI booting a gateway whose fail-closed
+   promise is void, is exactly the silent non-enforcement this deviation reported.
+2. `05 §3`/`§4` gain `detectors.unavailable[]` (entries `{detector, missing}`); the write-path
+   validator enforces it, and a detector may appear in **at most one** of `ran`, `not_run`,
+   `unavailable` — the same trustworthiness rule the existing `ran`/`not_run` overlap check
+   enforces, extended to three lists.
+3. `05 §5` gains `cp_detector_unavailable_total{detector}`.
+4. `04 §5` gains state (c) beside the fail-open/fail-closed resolution table, since a reader of the
+   failure semantics needs to know that one case never reaches them.
+5. **`not_implemented` keeps its exact meaning** and its place in the vocabulary. This ADR does not
+   redefine it; it stops it being asked to carry a second meaning. `dependency_unavailable` is
+   deliberately **not** added as a `not_run` reason — that would put a boot-time environment fact
+   in a per-request coverage field, where every request restates it and no reader can tell whether
+   the promise was ever keepable.
+6. `entity_enricher` is the one detector with no `fail_mode` class at all (04 §2.2: enrichment
+   failure skips and logs and never blocks, and `DETECTOR_FAIL_CLASS` omits it deliberately). It
+   therefore can **never** trigger a boot failure — there is no class to map to `fail_closed` —
+   and its unavailability is a warning plus a record entry, always. Stated because "no class"
+   reads like an oversight until it is written down.
+
+**Docs touched:** 04 §5 (state (c)), 05 §3 (the DDL comment), 05 §4 (the coverage contract and the
+JSON view), 05 §5 (the metric), 08 (deviation closed).
+
+---
+
+## ADR-034 — CPU-bound model detectors run on a dedicated single-worker executor, and `tier2_injection`'s runner ceiling is length-parametric (resolves `[D1-windowed-injection-cannot-be-enforced-by-a-per-call-budget]`)
+
+**Status:** Accepted 2026-08-28. Recommendation A of the filed report, approved and **extended** with
+an execution-vehicle ruling that is deliberately generic rather than injection-specific.
+
+**Context.** The deviation found that 04 §2 budgets `tier2_injection` **per 104-token window** while
+`BUDGETS_MS` is a flat per-call scalar which `run_lane` then handed straight to
+`asyncio.wait_for` (it now resolves a ceiling through `ceiling_ms`, which is what Part C below
+rules) — so a detector *specified* to take ~651 ms at the
+`per_request_max_tokens: 4000` bound is *enforced* at 25 ms. It further measured that the two viable
+detector shapes fail in opposite directions: a loop-yielding implementation is cancelled at 25 ms,
+while a loop-blocking one passes by stalling the event loop for the full duration. There is no third
+shape **at that level of the design** — which is what this ADR changes, by ruling on the vehicle
+rather than only on the number.
+
+### Part A — Execution vehicle (generic: governs every CPU-bound model detector)
+
+**Model inference runs on a dedicated single-worker `ThreadPoolExecutor`, awaited from the detector.
+Never inline on the event loop.** This binds `tier2_injection`, `tier2_toxicity`, `rag_grounding`,
+`fast_consistency`'s embedding comparison, `entity_enricher`, and any future CPU-bound model
+detector. It is ruled once, generically, because three ad-hoc choices is how the same trap gets
+re-entered per detector.
+
+Two reasons, both recorded:
+
+1. **ONNX Runtime releases the GIL during `sess.run`**, so the event loop stays live for concurrent
+   requests while inference proceeds. The deviation's "sync shape stalls everything" is otherwise not
+   a hypothetical — it is the production behaviour of the only shape that survives a flat `wait_for`.
+2. **An awaited executor future is what makes `asyncio.wait_for` a real enforcement point** rather
+   than a dead letter. Against inline CPU work the wrapper cannot interrupt anything and the timeout
+   fires only once control returns, which `run_with_budget`'s own docstring already states. The
+   budget mechanism only means something if the thing it wraps can actually yield.
+
+**`max_workers=1` is load-bearing, not a default.** It serializes inference across concurrent
+requests, which preserves the one-inference-at-a-time conditions **SL-5** measured under: a pool that
+let four requests infer simultaneously would push per-request parallelism toward the 1-thread column
+without any figure in this repo describing it. ~~**Queue wait counts inside the ceiling** — a request
+that waits behind two others has genuinely waited, and a budget that excluded queueing would measure
+the detector rather than the hold NFR-P-001 is about.~~ **SUPERSEDED by ADR-036 (front door).** The
+first half is true and survives: a request that waits behind two others has genuinely waited. The
+inference from it does not. Queue wait is real wait, but it is not *this detector's* wait, and
+charging it to an NFR-P-002 budget made a detector's own figure depend on what else shared its lane.
+The dichotomy in the last clause was false — excluding queueing does not leave the hold unmeasured,
+because the **hold series measures it directly** and ADR-030 Amendment 3 already sums pool users to
+do so. ADR-036 splits the two: the budget binds detector-attributable time, the hold keeps
+wall-clock. Nothing is hidden by the change; one cost is charged once instead of twice.
+
+**Caveat, recorded honestly because it is a real limitation and not a detail.** A timed-out executor
+task is **abandoned, not killed**: Python cannot preempt a running thread, so `wait_for` stops
+*waiting* for the future while the thread finishes its current `sess.run`. The request proceeds under
+policy `fail_mode` immediately, and the orphaned thread's completion is discarded. The practical
+consequence is that the worker may be busy for a short period after a timeout, which — with
+`max_workers=1` — is itself queue wait for the next request, counted as above. Each abandonment
+increments **`cp_detector_timeout_abandoned_total{detector}`**, so the condition is countable rather
+than inferred from a latency histogram.
+
+### Part B — `tier2_injection`'s runner ceiling is length-parametric
+
+The ceiling the runner enforces is derived from ADR-032's measured series rather than chosen:
+
+```
+ceiling_ms(n_windows) = max(25.0, envelope_ms(n_windows) x 2.0)
+```
+
+floored at the flat **25 ms** for single-window inputs, where NFR-P-002 is scoped and measured to
+hold (**12.59 ms P99**, worst of both columns at the 1-window rung — Correction 1; the withdrawn run
+read 13.01). The ceiling's meaning changes with its shape: it now says **"materially slower
+than its own measured envelope"** — a genuine anomaly worth a `DetectorTimeout` — instead of
+"longer than one window's budget", which was a statement about input length wearing a budget's
+clothes.
+
+**This dissolves the fail-mode pathology the deviation identified.** `finance_advisor`'s
+`tier2: fail_closed` no longer blocks every multi-window input, and `support_bot` / `hr_copilot`'s
+`fail_open` no longer silently skips them — because a correctly-behaving detector never trips the
+ceiling **by length alone**. That, and not the number, is the property being bought.
+
+#### Which measured column grounds the envelope (resolved in place, logged as a MINOR resolution)
+
+ADR-032 publishes **two** thread settings and SL-5 stands on the gap between them, so "the measured
+series x 2" does not name a unique number until the column is chosen. The choice has consequences,
+so it is recorded rather than left to the implementation:
+
+| basis | per-window P99 | ceiling at 2 windows | actual cost at 1 thread | verdict |
+|---|---|---|---|---|
+| 6 threads (optimistic) | 12.38 ms | ~50 ms | 102.09 ms | **trips by contention alone** |
+| 1 thread (pessimistic) | 51.05 ms | ~204 ms | 102.09 ms | holds |
+
+Both per-window figures are the **P99 at the 2-window rung**, halved — same rung, same percentile, so
+the two cells are comparable and the ratio below is derivable *from them*. Stating the rung is the
+point: the withdrawn version of this paragraph quoted a ratio taken from the **1-window** rung while
+displaying the 2-window cells (50.55 / 13.01 = 3.89), which is exactly the defect class Correction 1
+exists to remove — a figure described by a derivation it does not come from.
+
+**The envelope is grounded on the 1-thread column.** A ceiling built on the 6-thread figures is
+*below* the 1-thread cost at every window count — the ratio is **4.12x** (51.05 / 12.38, both the P99 at the 2-window rung), not within a 2x safety
+factor — so it would re-introduce the exact pathology this ADR exists to remove, merely relocated
+from "any long input" to "any long input on a contended host". A gateway is a concurrent server, so
+that is the normal operating case and not an edge. Choosing the conservative column is also the
+low-risk direction in the only sense that matters here: a loose ceiling can fail to catch a mildly
+slow detector, while a tight one causes false blocks and false skips on live traffic. The per-window
+budget of 04 §2 is unchanged and unmoved — **NFR-P-002 is not restated by this ADR**, and SL-5's
+disclosure that Tier-2 figures are low-concurrency figures is unchanged.
+
+#### Tokenization is inside the ceiling, and it is not inside ADR-032's table
+
+**ADR-032's entire published series times `sess.run` only** — tokenization sits outside the clock at
+`eval.spike_window_latency._time_calls`, whose timed `one_pass` calls `sess.run` and nothing else, as its own
+Correction section states. A detector pays both. The
+envelope therefore carries a tokenization term. **When this table was first published, no script in this repo
+measured it** — the figures were asserted, and they were wrong by ~3x. `eval/spike_window_latency.py`
+now times the windowing pass (`_time_tokenize`, wrapping the same `_tokenize_windows` call the ladder
+feeds from, so the figure covers the code a detector actually runs), and the table below is re-cited
+from `reports/spike_window_latency.json` — measured on this host with the spike's own synthetic
+filler and the same tokenizer (`madhurjindal/Jailbreak-Detector`, `AutoTokenizer`, window 104 /
+overlap 26 / `padding="max_length"`, n=40, 6 threads, code `445ca31dd087` on a `QUIET` host):
+
+| input | windows | tokenize + window P50 / P99 |
+|---|---|---|
+| 178 tokens | 2 | 0.37 / 0.41 ms |
+| 634 tokens | 8 | 1.49 / 1.83 ms |
+| 4000 tokens | 53 | 7.65 / 8.22 ms |
+
+The bottom row **is** the policy bound: 4000 tokens is `per_request_max_tokens` and 53 windows is what
+covers it (Correction 1). The withdrawn version of this table labelled its bottom row
+**"4080 tokens | bound"**, wrong twice over — 4080 tokens needs **54** windows, so that row was neither
+the bound nor labelled with a window count at all. The 1-thread column is within noise of this one
+(0.38 / 1.50 / 7.83 P50), as expected: the windowing pass is single-threaded Python either way.
+
+This is **not** a contradiction of ADR-032: no doc claims the two spans are equal, and 06 §4 defines
+`input_hold_ms` as "ingress + input-lane time", which includes tokenization by construction. It is a
+disclosure, and it is stated here because a reader comparing this repo's published window series
+against ADR-032's table would otherwise conclude one of them is wrong. **Every `tier2_injection`
+figure this repo publishes states which spans it covers.**
+
+### Part C — `BUDGETS_MS` grows a shape for parametric entries
+
+`BUDGETS_MS` values become `float | ParametricBudget`, where a parametric entry resolves a ceiling
+from a window count. `run_lane` consumes the resolved value via `ceiling_ms(name, units)`; every other entry stays a flat
+float and every existing call site is unchanged. **04 §2 records both halves** — the per-window
+budget the detector enforces internally, and the parametric runner ceiling — because the deviation's
+central finding was that a doc stating one of them while the code enforced the other is how the
+contradiction stayed invisible.
+
+**The cost is real and is stated rather than discovered later:** `run_with_budget`'s guarantee is now
+explicitly **two-tier**. For flat-budget detectors it is unchanged. For a parametric one, the outer
+wrapper enforces the envelope while the per-window budget is enforced inside the detector — so
+"`BUDGETS_MS[name]` is the number `wait_for` gets" stops being universally true, and that is the
+trade-off Recommendation A named when it was filed.
+
+#### Where the window count comes from — corrected against measurement
+
+This clause first specified the runner deriving its window count from a **cheap character upper
+bound**, on the reasoning that the runner must not pay the tokenizer twice. The bound is *sound* for
+a WordPiece tokenizer (`n_tokens <= n_chars`) but was measured to be far too loose to carry the
+meaning Part B gives the ceiling, so it is **replaced here rather than left to be discovered in
+implementation**. Measured chars-per-token on this tokenizer:
+
+| population | chars/token | implied over-provision |
+|---|---|---|
+| frozen corpus, median (n=280) | 4.29 | ~4.3x |
+| frozen corpus, minimum (base64/JWT-dense) | 1.42 | ~1.4x |
+| punctuation run / CJK | 1.00 | ~1.0x (bound is tight) |
+| unspaced letters, digits, emoji, combining marks | 400-800 | **~400-800x** |
+
+At the 4000-token bound a 4.3x over-provision turns a ~5.5 s envelope into a ~24 s ceiling on
+*typical* text, and the adversarial column is far worse. A ceiling that loose still catches a hung
+detector but no longer catches "materially slower than its own measured envelope", which is the
+condition Part B exists to detect. The bound also rests on the tokenizer being WordPiece: under
+byte-level BPE a single character can yield several tokens and `n_tokens <= n_chars` fails outright,
+so the guard would be silently unsound on a checkpoint swap.
+
+**Ruled instead: the exact count is used, and tokenization is paid once.** `tier2_injection`
+tokenizes its input **once**, obtains the true `window_count`, and enforces **both** its per-window
+budget and its own total envelope from that exact figure — raising `DetectorTimeout` itself. The
+runner's outer `wait_for` keeps a **backstop** ceiling derived from the policy's
+`per_request_max_tokens`, which is a genuine hard bound the gateway can enforce and needs no
+tokenization to read. So the two tiers become: an **exact** envelope check inside the detector, and a
+**coarse** liveness backstop outside it. Nothing tokenizes twice, and the meaningful guard is exact
+rather than approximate.
+
+This keeps the ruling's stated shape intact — `BUDGETS_MS` values are `flat float | parametric on
+window_count`, consumed by `run_lane` through `ceiling_ms` — and changes only *who* supplies the count. Logged as a
+MINOR resolution in `08` per AGENTS.md §11.1, since it is an implementation-level correction inside a
+contract this ADR itself settles.
+
+### Consequences
+
+1. `tier2_injection` is implementable as ADR-032 specifies — full-coverage windows, MAX aggregation,
+   batch 2 (ADR-032 Correction 2) — without either stalling the event loop or being cancelled by
+   its own runner.
+2. **The execution-vehicle rule binds four further detectors** (`tier2_toxicity`, `rag_grounding`,
+   `fast_consistency`, `entity_enricher`). None may run model inference inline on the loop, whatever
+   its budget, and a flat 25 ms budget is not a licence to do so.
+3. `05 §5` gains `cp_detector_timeout_abandoned_total{detector}`.
+4. `04 §2` records the per-window budget and the parametric runner ceiling as two distinct
+   mechanisms, with the tokenization-span disclosure attached to the published series.
+5. The MINOR resolution above (envelope column) is logged in `08`'s MINOR-resolutions register, per
+   AGENTS.md §11.1 — the count stays honest rather than merely low.
+6. The deviation closes citing this ADR.
+
+**Docs touched:** 04 §2 (both budget halves + the span disclosure), 05 §5 (the new counter), 08
+(deviation closed; MINOR resolution logged).
+
+---
+
+## ADR-035 — The `ml` extra must build the graph it serves: `onnx` is a serve-path dependency, not a build-only one (resolves `[D2-tier2-served-graph-is-unbuildable-on-the-ml-extra]`)
+
+**Status:** Accepted 2026-08-28. Option A of the filed report, approved and **extended** with a
+testable invariant so the trap cannot be re-opened by a later edit.
+
+**Context.** ADR-031 serves both Tier-2 checkpoints from ONNX Runtime int8, and deliberately checks
+**no graph into the repo** — *"a checked-in graph would be a binary artifact whose provenance nobody
+could check"*. ADR-033 then declared tier-2's dependency set as exactly `("onnxruntime",
+"transformers")`, and `pyproject.toml` kept `onnx`/`onnxscript` in the `dev` extra on the reasoning
+that they *build* the graph rather than serve it.
+
+Three statements that cannot all hold, because **with no checked-in artifact, serving builds.** The
+export and int8 quantization happen at first use, on the serving host, so the build toolchain sits on
+the serve path by construction. `import onnxruntime` genuinely does not pull `onnx` — which is why
+the `dev`-only comment read correctly in isolation and was still wrong in composition.
+
+The failure lands **past ADR-033's stated boundary**, and that is where the harm is. ADR-033 says a
+*"present package whose model graph fails to build at first use is a runtime fault (state (b)),
+resolved by `fail_mode` like any other."* So an `.[ml]` host passes the `find_spec` probe for both
+declared names, **boots clean**, and then converts a structurally unkeepable promise into a
+per-request fault: under `finance_advisor` (`tier2: fail_closed`) a **BLOCK on every request**, under
+`support_bot` / `hr_copilot` (`fail_open`) a **silent non-scan of every request**. ADR-033's boot
+refusal — the mechanism that exists precisely so a fail-closed promise is never broken silently —
+cannot fire, because the missing name is one nobody declared. It is invisible on the dev machine,
+which is the reason it was ruled before an `.[ml]` host existed rather than after.
+
+### Decision
+
+1. **`onnx` moves from `dev` into `ml`, and both tier-2 `REQUIREMENTS` rows grow it.** The addition
+   is **measured, not inferred from a dependency graph**: an interpreter was masked down to `.[ml]`'s
+   declared closure and the real build was attempted (method and its two false starts below). `onnx`
+   is the *only* addition needed — `ml_dtypes` arrives as `onnx`'s own requirement, so declaring it
+   would be redundant, and `onnxscript` is not imported at all on this path.
+2. **The invariant becomes a permanent test** — `tests/test_ml_extra_closure.py`. It derives both
+   dependency closures **from `pyproject.toml` at run time** (never a hand-maintained copy, which
+   would drift silently and test a stale set), masks the difference, and builds **both** checkpoints
+   for real. This is what makes ADR-033's probe truthful *by construction*: move a build dependency
+   out of `ml` and this fails in CI, before any `.[ml]` host boots into the per-request-fault trap.
+   The test asserts its **own masking** first — a harness that quietly stopped masking would make the
+   build pass for the wrong reason, on a full `.[dev,ml]` host.
+3. **Resolution verified on both CI interpreters, py3.12 and py3.14** — identical resolved version
+   sets, and adding `onnx` changes **no other pin**. This was checked rather than assumed because the
+   `optimum` episode is exactly this failure mode: it resolved `transformers` *downward* as a side
+   effect. Ruled in advance that a resolution failure would be a finding, not a pin to force; none
+   occurred.
+4. **Build-at-boot is kept; the cost is logged rather than cached.** Option B (build once into a
+   cache directory outside the repo) is **declined for now**: build-at-boot is provenance-pure per
+   ADR-031, and the boot cost is immaterial against a hackathon prototype's startup. The measured
+   duration is logged at startup as one line beside the FR-GW-006 canary result, so the cost is
+   *visible* rather than folded into an unexplained pause. B is recorded here as available, unchanged,
+   if boot economics ever change — it is strictly an optimization on top of this ADR and answers no
+   part of the deviation on its own.
+5. **`onnxscript` stays in `dev`, and that is now an empirical claim rather than a guess.**
+   `torch.onnx.export(..., dynamo=False)` uses the legacy TorchScript exporter, which does not import
+   it; masking it out builds both checkpoints successfully. It is retained in `dev` as the escape
+   hatch if that call ever moves to the dynamo exporter. Logged as **M-32** so the reason survives
+   next to the pin.
+
+### How the import set was measured — including two ways of faking absence that give wrong answers
+
+Recorded because the permanent test rests on this method, and both mistakes produced a **confident,
+plausible, wrong dependency list** before being caught:
+
+1. **Raising from `find_spec` is wrong.** `transformers.utils.import_utils._is_package_available`
+   *probes* for optional packages and expects `None` when absent
+   (`import_utils.py:205`: `_pytest_available = _is_package_available("pytest")`). A finder that
+   raises converts a graceful capability check into a hard failure — which reported **`pytest` as a
+   tier-2 build dependency**. Absence means: `find_spec` returns `None`, and `import` raises from the
+   import machinery itself.
+2. **Wrapping finders without delegating `find_distributions` is wrong.** That hook is how
+   `importlib.metadata` enumerates installed distributions, so wrapping without it broke metadata
+   lookup for *every* package and reported **`tqdm`** — installed and unmasked — as missing.
+
+A masked distribution must therefore be invisible in **both** channels: no importable module and no
+metadata. The test asserts exactly that before trusting its own result.
+
+### Measurement outcome
+
+`madhurjindal/Jailbreak-Detector` and `martin-ha/toxic-comment-model`, Ryzen 5 5600H, Linux 7.1.2,
+Python 3.14.6, onnxruntime 1.29.0, warm HuggingFace cache:
+
+| host configuration | ADR-033 probe | actual graph build |
+|---|---|---|
+| `.[dev,ml]` | available | succeeds |
+| `.[ml]` **before** this ADR | **available** | **`ModuleNotFoundError: No module named 'onnx'`** (requested 5×) |
+| `.[ml]` **after** this ADR | available | **succeeds, both checkpoints** (66.2 MB / 67.3 MB int8) |
+
+**Boot cost, corrected.** The deviation report cited *"~4.6 s (1.76 export + 2.85 quantize)"*. That is
+the export-plus-quantize span only; the figure a booting host actually pays also includes
+`from_pretrained` and opening the ORT session. Measured end-to-end per checkpoint: **9.6–10.1 s**
+(export 1.86–1.95 s, quantize 2.98–3.10 s, remainder model load and session open), so **~20 s for
+both** — roughly 4× the number quoted when Option B was declined. The ruling's conclusion is
+unchanged and stands: ~20 s of prototype startup is still immaterial, and provenance purity is worth
+it. The corrected figure is published here rather than left at the flattering one (AGENTS.md §7), and
+it is the number item 4's startup log will print. A cold host additionally downloads the checkpoints.
+
+### Consequences
+
+1. `REQUIREMENTS` is a true statement about what tier-2 needs, so ADR-033's boot refusal works as
+   designed on an `.[ml]` host — the D7 edge it closed at boot stays closed.
+2. The `ml` extra now carries graph-build tooling on serving hosts. That is the accepted cost of
+   ADR-031's no-artifact stance, stated plainly rather than discovered by a deployer.
+3. **A new CI job installing `.[dev,ml]` is required for the guard in item 2 to have teeth** — the
+   test skips where the model stack is absent, and a permanently-skipped invariant is not one. This
+   settles the optional M-row left to discretion in the Phase-5 sweep: the second CI job is no longer
+   an economics question, it is what makes this ADR enforceable.
+4. `05 §6` / AGENTS.md §10 install guidance is unchanged: `.[dev,ml]` was already the documented
+   full-stack line, and it still installs everything.
+5. The provisioning seam the detectors were built around — one shared helper obtaining the int8
+   session — is now fully ruled, and the ruling changed **one function** rather than two detectors.
+6. The deviation closes citing this ADR. `onnxscript`'s retention is logged as M-32.
+
+**Docs touched:** `pyproject.toml` (both extras, with the superseded comment preserved quoted),
+`controlplane/detectors/availability.py` (`REQUIREMENTS`), `tests/test_ml_extra_closure.py` (new),
+`08` (deviation closed; M-32 logged), CI workflow (the `.[dev,ml]` job).
+
+---
+
+## ADR-036 — An NFR-P-002 budget binds detector-**attributable** time; wall-clock keeps a hang backstop (resolves `[D3-toxicity-wallclock-vs-25ms]`)
+
+**Status:** Accepted 2026-08-30. The filed report's Option A, approved with an attribution fix that
+the report itself did not propose — the ruling is that the 2/30 spurious-fault rate was a
+**misattribution defect, not a detector defect**, so the answer is to fix what the budget clocks
+rather than to ship the noise or revert the detector.
+
+**Context.** Wiring `tier2_toxicity` into `OUTPUT_SENTENCE` made 2 of 30 *control* fault-injection
+probes — no fault injected — record `DetectorTimeout` for it. The detector was not slow: the model
+measured **11.92 ms** p50 against a 25 ms budget. Enforcement was reading **wall-clock through the
+event loop**, which for a pool detector includes pool queue wait, GIL contention with the three
+asyncio detectors sharing its lane, and loop scheduling. The gap was ~8.5 ms and it was not the
+detector's work. **SL-5's logged exposure materialized exactly as predicted** — it warned that the
+Tier-2 <25 ms budget was measured with 6 threads free for one inference while NFR-P-002 states no
+thread count — and that is worth recording as a hit for the practice of writing exposures down:
+this arrived as a known risk with a name, not as a surprise.
+
+**Ruling.**
+
+1. **NFR-P-002 budgets bind detector-attributable time.** For a pool detector, enforcement clocks
+   **in-thread execution**, measured inside the executor task around the model call. Scheduling,
+   GIL contention and pool-queue wait belong to the **HOLD** series, where ADR-030 Amendment 3
+   already sums pool users — they are lane-composition costs, and charging them to a detector made
+   its budget depend on what else happened to share its lane.
+2. **This supersedes ADR-034's "queue wait counts inside the ceiling" sentence, by the front door.**
+   The sentence is struck in place, at its own site, with the reasoning preserved and marked rather
+   than deleted. **Anti-laundering note, stated because the timing invites the suspicion:** this was
+   ruled from a **diagnostic** that showed spurious *attribution*, before any citable bench existed,
+   and the direction of the change is what distinguishes it from target-chasing. No published number
+   is being pursued green. A budget was not widened — 25 ms is untouched, and item 3 adds a *new*
+   wall-clock guard where there was one before. What changed is which of two clocks the word
+   "budget" names, decided on the evidence that one of them was measuring other detectors' work.
+   The honest tell: this ruling makes the *hold* rows harder to satisfy, not easier, because they
+   still carry every cost the budget now excludes (item 5).
+3. **Wall-clock does not go unguarded.** `run_with_budget` keeps `asyncio.wait_for`, retargeted from
+   the budget to **`HANG_BACKSTOP_FACTOR = 2.0` x the (parametric) ceiling**, and firing it raises a
+   distinct `DetectorHang` — never `DetectorTimeout`. The two are different findings and 04 §5 now
+   records them as different `error_class` values: a budget breach says "this detector executed too
+   long", a hang says "this call did not come back". Collapsing them would rebuild the exact
+   misattribution this ADR removes, and would do it invisibly. 2x is deliberately loose: anything
+   near 1x re-enforces the budget on wall-clock through the back door. This is ADR-034 Part B's own
+   genuine-anomaly framing, applied to the failure vocabulary.
+4. **Failure records carry the measured duration.** `DetectorFailureRecord` /
+   `FailureOutcome.audit_entry()` gain **`attributable_ms`** — the in-thread figure when something
+   measured it, `null` when nothing did (the normal case for a hang, whose worker never returned).
+   The six-key shape 04 §5 and 05 §3 documented becomes **seven**. This extends ADR-034's
+   abandoned-task caveat: a real breach and a scheduling artifact are now distinguishable in the
+   audit **forever**, where before both arrived as `DetectorTimeout` with nothing to separate them.
+   A duration is not content, so NFR-SEC-001 does not reach it.
+5. **The published holds are recomputed from the stamped bench, not from this diagnostic.** The
+   affected ADR-030 Amendment 3 rows are re-derived under corrected semantics from the quiet-host
+   `bench_latency` artifact. Any row that cannot fit **publishes untargeted**, per the standing
+   per-request-sum precedent. The hold series itself still measures **wall-clock**: nothing is
+   hidden by item 1, only correctly attributed.
+
+**The instrument is a PROVISIONAL departure from the ruling's own parenthetical — batch review at
+phase end.** The ruling names `perf_counter` inside the executor task. Implemented literally, it
+made the defect **worse**: `perf_counter` in a worker thread counts every microsecond that thread
+sits blocked on the GIL while the asyncio detectors in its lane run, so it relocates the clock
+without isolating anything.
+
+| enforcement clock | spurious control faults | in-thread p50, quiet loop | in-thread p50, lane contention |
+|---|---|---|---|
+| wall-clock through the loop (pre-ruling) | 2/30 | — | — |
+| `perf_counter` in-thread (ruling's parenthetical) | **18/30** | 12.04 ms | **229.26 ms** |
+| `thread_time` in-thread (shipped) | **0/30** | 11.98 ms | 26.04 ms |
+
+`attributable_ms` under `perf_counter` tracked wall-clock to within 0.3 ms in the gateway (31.02 vs
+31.3; 48.76 vs 49.1) — the two were the same number. `time.thread_time()` is per-thread CPU time and
+excludes GIL-wait, which is what the ruling's *intent* asks for in its own words: "scheduling, GIL
+contention, and pool-queue wait belong to the HOLD series". **Every figure in this table is
+DIAGNOSTIC** — ad-hoc script, n=30/40, host load1 above `QUIET_LOAD1_MAX` — and none of it is
+citable; the citable figures come from the stamped `bench_latency` run.
+
+**Caveat, recorded rather than smoothed.** ONNX Runtime's calling thread spin-waits on its intra-op
+pool, so `thread_time` still **rises under real CPU competition**: 11.98 ms quiet against 26.04 ms
+under lane contention. It is detector-attributable CPU, not a contention-free constant, and above
+25 ms it is an honest breach rather than a misattribution — which is precisely what
+`tier2_toxicity` does when the full test suite competes for the CPU, and why
+`test_faults_are_counted_and_absent_means_zero` was re-anchored on a fault-free detector instead of
+on an empty mapping (AGENTS.md §7: the harness is not made clean to satisfy a test).
+
+**Consequences for the failure vocabulary.** A detector that merely `await`s burns no thread CPU, so
+it **cannot** breach an NFR-P-002 budget — only the backstop can end it. Two liveness tests asserted
+`DetectorTimeout` on exactly that shape and were re-pointed to `DetectorHang`; calling an awaiting
+detector a budget breach *was* the misattribution. Because that narrows `DetectorTimeout` to a real
+window — attributable CPU over budget while wall-clock stays under 2x — a companion test
+(`test_run_with_budget_raises_detector_timeout_on_in_thread_overrun`) now pins it with CPU-bound
+executor work, so budget enforcement is not left untested by the re-point.
+
+**Also closed by this sweep.** SC-3's `performance`-for-`tier2` substitution is **retired**:
+`tier2_toxicity` sits in `OUTPUT_SENTENCE`, so `faultable()` derives tier2 coverage with no harness
+edit. 07 beat 7 needed no change — it always said `--inject-fault tier2`; the harness was the side
+that deviated. The tripwire that guarded the substitution is inverted to guard the opposite risk
+(tier2 silently *losing* its carrier), per its own docstring's instructions.
+
+**Docs touched:** `controlplane/detectors/base.py` (`DetectorHang`, `HANG_BACKSTOP_FACTOR`,
+`_ATTRIBUTABLE_MS`, in-thread clocking, the superseded queue-wait rationale),
+`controlplane/policy/engine.py` + `controlplane/gateway/pipeline.py` (`attributable_ms` threaded),
+`04` §5 and `05` §3/§4 (seven-key shape, `DetectorHang`), `03` (ADR-034 sentence struck in place;
+this ADR), `08` (deviation closed; M-50), and five test files re-pointed rather than relaxed.
+
+
+### Amendment 1 — 2026-08-30: the NFR-P-002 gate reads the **attributable** series, and the wall-clock series is partitioned by outcome (resolves `[D3-nfr-p002-gate-reads-the-clock-adr-036-rejected]`)
+
+ADR-036 ruled that an NFR-P-002 budget binds detector-**attributable** time and that wall-clock
+keeps only a hang backstop. The benchmark did not follow it. `bench_latency` went on rendering its
+per-detector budget verdict from `cp_detector_latency_ms` — the wall-clock series — so the two
+`VIOLATION` rows it published (`tier2_injection` P99 25.569 ms, `tier2_toxicity` P99 25.114 ms,
+both against a 25.0 ms budget) were **rendered on the clock this ADR rejected**. The gate was
+enforcing the quantity the ADR had just finished explaining does not bind.
+
+That is a measurement-integrity defect in an already-published number, which is why it stopped
+work rather than being resolved in passing.
+
+**1. The verdict is rendered against the attributable series.** `cp_detector_attributable_ms` is
+now emitted per detector call and is the *only* series `check_nfr_p002` reads. This is not a
+relabelling: it is the quantity `run_with_budget` actually enforces, measured with
+`time.thread_time()` inside the worker, so the figure the report grades and the figure the code
+gates are now the same number. A wall-clock P99 above budget renders **no** verdict — pinned by
+`test_a_wall_clock_breach_alone_renders_no_budget_verdict`, which asserts both halves: exit 0, and
+the 5000 ms overshoot still present in the report under `UNTARGETED`.
+
+The plumbing carries one departure worth recording. `run_with_budget` takes a keyword-only
+`attributable_out` list rather than calling the metrics registry itself, because the detector layer
+holds no telemetry dependency and the benchmark reads a *specific* registry instance rather than a
+global. The list is appended to, never assigned, so a detector that hangs contributes nothing —
+which is correct, since a hang produces no in-thread figure to attribute.
+
+**A breaching sample must reach the gated series.** The append happens *before* the budget raise.
+Without that ordering the gate would be structurally unfailable: a call that overran its budget
+would raise, never record, and NFR-P-002 could then only ever be met — the failure mode where a
+green gate means "nothing was measured" and reads identically to "nothing breached".
+
+**2. (A2) The wall-clock series is partitioned by outcome.** `cp_detector_latency_ms` gained an
+`outcome` label, `ok|fault`. The bench previously pooled faulted and successful attempts into one
+distribution, so a *fault* — an injected failure, or a budget overrun, which reaches the audit
+record as a detector failure and is indistinguishable from one — inflated the same percentile the
+budget verdict was read from. **A fault and a breach could be the same event counted twice.**
+Reports now select rather than merge (`detector_stats(batch, outcome=…)`): percentiles of a union
+are not recoverable from two P99s, so a row set is chosen, and the faulted wall-clock rows are
+published in their own table rather than folded away.
+
+`cp_detector_attributable_ms` deliberately carries **no** `outcome` label. An in-thread figure
+exists only where a worker measured one, so the partition would be vacuous — and worse than
+vacuous, it would invite the reading that an absent row means "no breach". Absence in that series
+means *nothing was measured* (a hang), while a breaching call **is** present. The two report
+sections say which, in the same wording `eval/host_load.py` uses for a load stamp that was never
+taken versus one taken and failed.
+
+**3. Anti-laundering — nothing is deleted.** A correction that removes the numbers it corrects is
+indistinguishable from a correction that improves them, and this repo has now twice found the
+defect class *a figure described by a derivation it does not come from*. So:
+
+- The **wall-clock series stays published**, untargeted, per ADR-036 item 5. It is the constituent
+  of the ADR-030 hold figures and remains the only thing that can catch a queue-wait or GIL
+  pathology; it simply carries no budget verdict.
+- The **two superseded `VIOLATION` rows are preserved verbatim**, blockquoted under
+  `### Superseded verdict — preserved, not deleted`, with the note that they were *rendered on the
+  rejected clock; superseded by the attributable verdict below*. A reader who cites the earlier
+  figure finds it, next to what replaced it and why.
+- **Whatever the attributable series shows is the verdict published** — including a genuine
+  `tier2_toxicity` breach under contention. This amendment changes *which clock is read*, and
+  changes it because ADR-036 already said so; it does not change what an honest result looks like.
+  AGENTS.md §7 is untouched: if the attributable P99 breaches, the honest measured number plus a
+  fresh D3 is the correct output.
+
+Both existing bench tripwires were **re-pointed** onto the attributable series rather than left in
+place. Left on wall-clock they would still have passed, while asserting a property nothing gates —
+a green test whose subject the ADR had removed.
+
+**4. What this unblocks.** The re-run is a single stamped, quiet-host measurement, and three things
+read from it: the OVLP-01 re-point (which cites the attributable bench verdict), the ADR-030
+Amendment-3 hold-row recompute, and `fault_injection`'s re-run — expected 39/39 now that a budget
+overrun is no longer counted where a fault is counted, and published as whatever it is. The
+deviation closes citing this amendment.
+
+**Docs touched:** `05` §5 (both series, the A2 partition, why attributable has no `outcome`
+label), `controlplane/telemetry/metrics.py` (REGISTRY), `controlplane/detectors/base.py`
+(`attributable_out`, and the ordering argument above), `controlplane/gateway/pipeline.py` (lane
+loop records both series), `eval/bench_latency.py` (`detector_attributable_stats`, the gate, four
+report sections), `08` (deviation closed; M-53/M-54 disposition), and three test files — two
+tripwires re-pointed, one negative control added, one mechanical label fix.

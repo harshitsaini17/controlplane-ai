@@ -1,218 +1,160 @@
 # ControlPlane.ai — Real-Time AI Oversight Gateway
 
-A reverse-proxy control plane that watches every LLM response across **Performance, Cost and
-Responsibility** — and decides **Pass / Edit / Block / Escalate** per use-case policy, before
-the user sees it.
+A reverse proxy that checks every LLM response across performance, cost, and responsibility before deciding whether to pass, edit, block, or escalate it.
 
-The headline feature is that the decision is **configuration, not code**: the same response
-passes on one use case, gets redacted on another, and is quarantined for human review on a
-third, with no Python changed between them.
+[![CI](https://github.com/harshitsaini17/controlplane-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/harshitsaini17/controlplane-ai/actions/workflows/ci.yml) ![Python 3.12 and 3.14](https://img.shields.io/badge/Python-3.12%20%7C%203.14-3776AB) ![README tests passing](https://img.shields.io/badge/README%20tests-passing-brightgreen) ![License not chosen](https://img.shields.io/badge/license-not%20chosen-lightgrey) ![Round 2 · AIC 2026](https://img.shields.io/badge/Round%202%20%C2%B7%20AIC-2026-6B46C1)
 
-Built for the Accenture Innovation Challenge 2026, Round 2 (Problem Track 1).
+Point an OpenAI-compatible client at one URL and select a policy with one header. The same response can be edited for support, blocked for HR, and escalated for finance: the difference is YAML configuration, not application code.
 
----
+## The 30-second demo
 
-## Status: spec-complete, implementation in progress
+These are the live one-URL integration calls. Live upstream text is nondeterministic; the expected lines are the replay-verified audit verdicts when the scripted demo returns frozen fixture PII-001 as the upstream response.
 
-This is a **hackathon prototype**, and this README will not pretend otherwise while it is one.
+~~~sh
+PROMPT='Confirm the record on file.'
 
-| Area | State |
+curl -sS http://localhost:8080/v1/chat/completions -H 'Content-Type: application/json' -H 'X-ControlPlane-Use-Case: support_bot' -d "{\"model\":\"small\",\"messages\":[{\"role\":\"user\",\"content\":\"$PROMPT\"}]}"
+# expected audit output: verdict=edit; SSN rendered as [REDACTED:ssn]
+
+curl -sS http://localhost:8080/v1/chat/completions -H 'Content-Type: application/json' -H 'X-ControlPlane-Use-Case: hr_copilot' -d "{\"model\":\"small\",\"messages\":[{\"role\":\"user\",\"content\":\"$PROMPT\"}]}"
+# expected audit output: verdict=block; personal data withheld under hr_copilot policy
+
+curl -sS http://localhost:8080/v1/chat/completions -H 'Content-Type: application/json' -H 'X-ControlPlane-Use-Case: finance_advisor' -d "{\"model\":\"small\",\"messages\":[{\"role\":\"user\",\"content\":\"$PROMPT\"}]}"
+# expected audit output: verdict=escalate; request routed for additional verification
+~~~
+
+Same content. Three policies. Zero code difference.
+
+<!-- SCREENSHOT: console verdict board -->
+<!-- SCREENSHOT: chat page EDIT verdict -->
+
+## Quick start
+
+~~~sh
+python -m venv .venv && .venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu && .venv/bin/pip install -e ".[dev,ml,dashboard]" && .venv/bin/python -m spacy download en_core_web_sm
+cp .env.example .env && set -a; . ./.env; set +a          # add provider values; never commit them
+.venv/bin/uvicorn --factory controlplane.gateway.app:create_live_app --port 8080
+xdg-open http://localhost:8080/console                     # in another terminal
+.venv/bin/python -m demo.run_script --replay               # in another terminal
+~~~
+
+The live factory requires a measured-class provider and its key. Replay remains the deterministic demo path.
+
+## What it does
+
+~~~text
+client → ingress → input lane → dispatch → sentence buffer → detectors
+                                                            ↓
+HITL ← review queue ← audit ← verdict ← policy engine ←─────┘
+                              performance · cost · responsibility
+~~~
+
+| Verdict | Effect |
 |---|---|
-| Specification (`docs/00`–`08`) | complete — 23 ADRs ruled |
-| Policy schema + 3 use-case policies | implemented, validated, tested |
-| Detector contract (`Signal`, budgets, failure vocabulary) | implemented, tested |
-| Deterministic detectors — `tier1_pii`, `tier1_blocklist`, `numeric_claims` | implemented, tested (3 of the 11 rows in `docs/04` §2) |
-| Labeled eval dataset (280 cases) | authored and **frozen**; passes the consistency gate, **label review pending** |
-| Audit DB schema | implemented |
-| Model-backed detectors — injection, toxicity, consistency, grounding, NER enrichment | **not yet implemented** |
-| Gateway hot path, policy engine, cost detectors | **not yet implemented** |
-| Detector eval harness (`eval/run_all.py`) | implemented, tested — **3 of 11 detectors scored** |
-| Latency / fault-injection / cost / leak-scan harnesses, dashboard, demo runner | **not yet implemented** |
+| Pass | Release unchanged content. |
+| Edit | Transform eligible spans, then release and audit. |
+| Block | Withhold content and return the configured fallback. |
+| Escalate | Quarantine content and place it in the human-review queue. |
 
-`python -m eval.validate_dataset` passes. `python -m pytest` passes (433 collected: 431
-pass, 2 `xfail`). Nothing in
-`docs/07-demo-script.md` runs end to end yet.
+| Pipeline | Posture | Signature verdict |
+|---|---|---|
+| support_bot | Redact-first, streaming | EDIT |
+| hr_copilot | Privacy-strict, streaming | BLOCK |
+| finance_advisor | Regulated, buffered, fail-closed | ESCALATE |
 
-**The three deterministic detectors were scored, two of them missed, and both were then
-revised under disclosure rather than silently.** They were built from the `docs/04` §2
-contracts and deliberately never iterated against the eval corpus, so the first scoring run was
-genuine first contact with the labelled cases — and it went badly in two places. Both were
-filed as deviations, ruled (ADR-025, ADR-026), revised from **named published specifications**,
-and re-measured **exactly once**.
+Deep contracts and lifecycle detail: [architecture](docs/02-architecture.md), [policy and detection specification](docs/04-policy-and-detection-spec.md), and [API/data contracts](docs/05-api-and-data-contracts.md).
 
-**The v1 figures are not overwritten and not deleted.** A detector revised *after* its failures
-were measured is weaker evidence than one measured blind, however carefully the revision was
-derived — so the report carries both columns, and the v1 baseline is **re-computed on every run**
-from frozen `_v1_*.py` modules rather than transcribed from an older report:
+## Key results
 
-| Detector | Metric | v1 (blind) | v2 (disclosed) | Status |
-|---|---|---:|---:|---|
-| `tier1_pii` | recall | 0.8361 | **0.8852** | target 0.95 **still MISSED** |
-| `tier1_pii` | precision | 1.000 | **1.000** | no over-firing, either version |
-| `numeric_claims` | precision | 0.2667 | **0.8571** | 33 false positives → 2 |
-| `numeric_claims` | recall | 0.750 | 0.750 | unchanged — the gain is all precision |
-
-- **`tier1_pii` still misses NFR-EVAL-001**, and the target was not moved to meet it.
-  **Residual misses: 7/7 are the documented bare-7-digit scope exclusion (ADR-026 §3), verified
-  programmatically — no unexplained failure.** That exclusion is a deliberate precision trade-off
-  (a bare `NNN-NNNN` is indistinguishable from an order or ticket id) and it **costs known
-  recall**, which is why it is named here and not only in the ADR. Tracked permanently under
-  *Standing Limitations* in `docs/08`.
-
-**The policy engine now produces verdicts, so the artifact judges actually ask for exists — as
-two matrices, not one.** They answer different questions and 06 §3.3 makes keeping them apart
-normative:
-
-| Matrix | Signals | Agreement | What it does **not** say |
-|---|---|---:|---|
-| **A. Engine conformance** | synthesized from ground truth | **1.000** over 280 × 3 | nothing about detection quality — it *assumes* perfect detection |
-| **B. End-to-end (partial)** | real detector emissions | **0.981** over 159 of 280 | nothing about the 8 absent detectors |
-
-Two things about those numbers are stated here rather than left for a reader to discover.
-
-**A's perfect diagonal is exactly the result our own evaluation plan warns about**, so it is
-falsified instead of asserted: `tests/test_policy_matrix.py` injects the defects the ADRs exist
-to prevent — ADR-012 band scoping, ADR-019 enriched-label handling, the ADR-015 span-less
-promotion, the 04 §4.2 severity order, 04 §4.3 step-1 resolution — and **requires** the matrix
-to disagree with each. All five are caught, and the two narrow ones land where the ADRs predict
-(ADR-019 only on `hr_copilot`, ADR-015 only on `support_bot`). Agreement is meaningful only
-because disagreement was reachable; a mutation the matrix could not see would forfeit the claim.
-
-**B's 0.981 flatters the system, and the report says so with the mechanism.** Of 8 scored cases
-carrying a detection failure only 3 produce a wrong verdict; the other 5 reach the right action
-anyway — 4 because another label on the same case maps to an equally severe action, 1 because
-most-severe convergence absorbed a false positive. Those failures are real and counted in the
-detector section. B measures the **policy layer** honestly and would **overstate detection** if
-read as a system score.
-- **`numeric_claims` precision rose because a rule was deleted, not tuned.** ADR-025 removed the
-  04 §2 "large-number" clause, which matched the digit runs inside SSNs, cards and phone numbers
-  — 30 of its 33 false positives were `PII-*` cases. It classified **identifiers as statistics**:
-  a flaw in the specified behaviour, not in the implementation of it, which is why it took a
-  ruling rather than a patch. Recall did not move, so nothing was traded away for the gain.
-- **`tier1_blocklist` reports every figure as `n/a`**, correctly: the shipped policies ship an
-  empty `blocklist_extra` (its only documented term source, Q-15) and the corpus has no
-  positives, so its recall is **undefined, not 1.0**.
-
-The `numeric_claims` citation-marker list is now **normative** in `docs/04` §2.4.2 (ADR-025
-closed Q-18; its Amendment 1 restricts `per` to attribution forms, so a rate like *"$4M per
-year"* is no longer mistaken for a citation). The publication gate that question carried is
-lifted: these figures are citable provided they are labelled v1 or v2.
-
-## Setup
-
-```sh
-python -m venv .venv
-.venv/bin/pip install -e ".[dev]"
-.venv/bin/python -m pytest -q                       # 433: 431 pass, 2 xfail
-.venv/bin/python -m eval.validate_dataset           # consistency gate (06 §2.4)
-.venv/bin/python -m eval.validate_dataset --freeze  # + assert the dataset is the frozen one
-```
-
-The full model stack (detectors, embeddings, NER) needs the CPU-only torch wheel installed
-**first**, or pip pulls a multi-GB CUDA stack for no benefit — the latency budgets in
-`docs/01` are CPU budgets. See AGENTS.md §10 for the exact sequence.
-
-Secrets live in `.env` (gitignored); copy `.env.example` to start. Env var *names* are
-normative in `docs/05` §6; values are never printed, logged, or committed.
-
-## Reproducing every number (NFR-INT-001)
-
-Each claim maps to one command that regenerates it. This is the project's integrity contract:
-per AGENTS.md §7, no latency, accuracy, or cost figure appears in this README, the dashboard,
-the business proposal, or the demo video unless it has a row here.
-
-| Claim | Command | Report | Status |
+| Metric | Measured | Target | Reproduce with |
 |---|---|---|---|
-| Gateway overhead P50/P95/P99 (`total_attributable_overhead_ms`) | `python -m eval.bench_latency` | `reports/latency_report.md` | **Measured, and deliberately not a verdict.** Streaming: P50 **0.25 ms** · P95 **0.48 ms** · P99 **1.46 ms** over 200 samples; non-streaming is a *different quantity*, tabulated apart at P99 **0.42 ms** (n=100). **ADR-030 withdrew this quantity's target**, so these figures carry no pass/fail — they are published exactly so a withdrawn target does not become a withdrawn number (the 06 §4 formula is unchanged, so they stay comparable to earlier runs). Client wall-clock − upstream (**4.14 ms** P99) is an upper bound only — it includes `TestClient` transport, which 06 §4 bars as the headline. **Measured with 3 of 11 detectors live** |
-| Per-sentence and input-lane hold vs NFR-P-001 | `python -m eval.bench_latency` | `reports/latency_report.md` | **Met.** `input_hold_ms` P50 **0.13** / P99 **0.26** ms against < 40 / < 50 (n=200); `sentence_holds_ms` P50 **0.14** / P99 **0.77** ms against < 40 / < 100 (**n=238 holds**, not requests — a 10-segment response contributes 10 samples). ADR-030 re-scoped NFR-P-001 onto these two series and *derived* the targets from the 04 §2 budgets rather than fitting them. The margin is large because **only the Tier-1 regex detectors exist**: the same table's forward projection is what the figure becomes when Tier-2 lands, and it is arithmetic, not a measurement |
-| Per-detector latency vs budget | `python -m eval.bench_latency` | `reports/latency_report.md` | **NFR-P-002 met for the 3 detectors that exist**, all with **0 timeout faults**: `tier1_pii` P99 **0.126 ms**/2 ms · `tier1_blocklist` **0.020 ms**/2 ms · `numeric_claims` **0.205 ms**/5 ms. The other **8 are not exercised** and their budgets are **untested, not met** — the report names them rather than showing zeros |
-| Tier-1 PII recall | `python -m eval.run_all` | `reports/eval_report.md` §NFR-EVAL-001 | v1 **0.8361** → v2 **0.8852** — target 0.95 **MISSED**, target unmoved (ADR-026 §5). Residual misses: 7/7 are the documented bare-7-digit scope exclusion (ADR-026 §3), verified programmatically — no unexplained failure. Standing Limitation, `docs/08` |
-| Per-detector precision / recall / F1 | `python -m eval.run_all` | `reports/eval_report.md` §Detectors | **measured for 3 of 11 detectors**; 8 absent, reported as skipped. 136 of 218 labelled positives are unscored because their detector does not exist yet |
-| Disclosed revision v1 → v2 (`tier1_pii`, `numeric_claims`) | `python -m eval.run_all` | `reports/eval_report.md` §Disclosed revision | `numeric_claims` precision **0.2667 → 0.8571** (recall flat at 0.750); `tier1_pii` recall **0.8361 → 0.8852** at precision 1.000 both. v1 columns are **re-computed every run** from frozen `_v1_*.py`, never transcribed |
-| Engine conformance matrix (**perfect detection assumed**) | `python -m eval.run_all` | `reports/eval_report.md` §Policy-level confusion matrices → A | **1.000** agreement on **280 cases × 3 use cases**. Measures the engine + policy layer *in isolation* — **not** a detection or end-to-end claim |
-| That matrix's discriminating power | `python -m pytest tests/test_policy_matrix.py` | console | 5 injected ADR violations (ADR-012/019/015, 04 §4.2, 04 §4.3) — **all 5 detected**. A perfect diagonal is only evidence if disagreement was reachable |
-| End-to-end matrix (**partial coverage**) | `python -m eval.run_all` | `reports/eval_report.md` §Policy-level confusion matrices → B | **0.981** (156/159) per use case, over the **159 of 280** cases whose every label a shipped detector can emit. **5 of 8 detection failures are masked** — invisible to the verdict, real in the detector section. NFR-EVAL-002 **met**, coverage limit stated |
-| Calibrated τ + achieved rate | `python -m eval.run_all` | `reports/eval_report.md` §Threshold calibration | **not computed** — needs the confidence-kind detectors; τ stays `# SEED`, and a seed is never judge-facing |
-| Fail-open / fail-closed behaviour | `python -m eval.fault_injection` | `reports/fault_injection_report.md` | **27/27 assertions passed.** SC-3 verified on a live class: one *identical* `numeric_claims` fault yields UC-1/UC-2 **pass** (`fail_open`, fault recorded but not verdict-driving) and UC-3 **escalate** (`fail_closed`) — the two facts stored separately per ADR-027 Amendment 1. No-fault controls included, so the escalation is falsifiable. **Coverage limit: 2 of 4 fault classes are exercisable** — `tier2` and `cost` have no live detector to carry a fault, so their configured modes are **untested, not met** |
-| Cost saving from cascade (simulated) | `python -m eval.cost_simulation` | `reports/cost_simulation.md` | not yet measured |
-| Feedback loop before/after | *(harness pending)* | `reports/feedback_loop_report.md` | not yet measured |
-| No raw PII in logs/DB/reports | `python -m eval.pii_leak_scan` | console | not yet measured |
+| Engine conformance | 840/840 decisions: 280 cases × 3 policies; perfect detection assumed | NFR-EVAL-002 ≥ 0.90 | .venv/bin/python -m eval.run_all |
+| Tier-1 PII precision | 1.000 | Report honestly | .venv/bin/python -m eval.run_all |
+| Tier-1 PII recall | 0.8852; 7/7 misses are the documented bare-7-digit exclusion | 0.95 — MISSED, target unmoved | .venv/bin/python -m eval.run_all |
+| Injection detector | Precision 1.000 / recall 0.150; blind first contact | No numeric target | .venv/bin/python -m eval.run_all |
+| End-to-end policy agreement | 0.851 / 0.851 / 0.825 over 194 of 280 cases; partial coverage and masked detector failures remain | ≥ 0.80 per pipeline — met | .venv/bin/python -m eval.run_all |
+| Input-lane hold | P99 27.49 ms, n=200 | P99 < 50 ms — met | .venv/bin/python -m eval.bench_latency |
+| Detector P99s | blocklist 0.020 ms; PII 0.133 ms; numeric 0.277 ms; toxicity 23.741 ms; injection 25.348 ms | Tier-1 < 1 ms; numeric < 5 ms; Tier-2 < 25 ms — injection MISSED | .venv/bin/python -m eval.bench_latency --check |
+| Fault injection | In-process 5/5 runs at 39/39; separate processes 3/5 clean and two at 38/39 | All 39 invariants per run | .venv/bin/python -m eval.fault_injection --reps 5 |
+| Cascade cost curve | +50% at f=0; +25% at f=0.25; break-even f=0.50; loss above it | No point target; f is NOT COMPUTED because the router does not ship | .venv/bin/python -m eval.cost_simulation |
 
-**The reports these rows cite are committed to this repository** (06 §8). A claims-table row
-pointing at a file you cannot open is unverifiable, which defeats the only thing NFR-INT-001
-promises — so a report travels in the same commit as the claim citing it. Reports are still
-never hand-edited: re-run the command. `reports/eval_report.md` stamps the dataset digest, the
-frozen-hash match, and the code commit that produced its numbers.
+Full claims table, derivations, historical columns, and sources: [engineering notes](docs/09-engineering-notes.md). Generated evidence: [evaluation](reports/eval_report.md), [latency](reports/latency_report.md), [fault injection](reports/fault_injection_report.md), and [cost](reports/cost_report.md).
 
-One report artifact is not a measurement: `reports/eval_report_prose_fix.diff` is the
-**figure-identity proof** required by ADR-026 Amendment 2 clause (b). A stale sentence in the
-report's own prose — claiming a publication gate that ADR-025 had already lifted — had to be
-corrected *after* the single permitted re-measurement. The proof enumerates every one of the 3
-differing lines out of 151 and shows all 276 numeric tokens on measurement-bearing lines
-identical, so a reader can verify no figure moved instead of taking it on trust.
+## Why this is different
 
-**10 of the 14 rows above carry a measured figure; the remaining 4 are blank on purpose, and
-they are blank for different reasons that this table keeps apart.** A placeholder number
-is worse than a blank, so a row flips only when a report actually produces it, carrying its
-method and sample size. `not yet measured` means the harness does not exist yet (3 rows);
-`not computed` means the inputs do not exist yet (τ needs the confidence-kind detectors).
+- One policy engine converges performance, cost, and responsibility signals into one verdict.
+- Uncertainty bands and detector-failure posture are both per-use-case policy, including fail-open and fail-closed behavior.
+- Signals are multi-label, so overlapping risks remain independent until convergence.
+- The OpenAI-compatible boundary is provider-neutral and supports cloud, local, and air-gapped deployment shapes; local fallback is verified only on the owner host.
+- Claims are auditable: the corpus is frozen, first contact is blind, revisions retain v1 columns, and misses remain published.
 
-The third state proper — `not measured`, where the harness **runs** and deliberately returns
-**no verdict** — currently occupies **no row**: NFR-P-001 vacated it when the per-hold series
-landed. It stays reachable rather than retired, which is the point of building it: a benchmark
-run carrying no streaming traffic still renders `not measured` for NFR-P-001 instead of
-reporting a pass over an empty population. Reading any blank as a pass is the specific failure
-this table is built to prevent.
+## What doesn't ship
 
-The detector rows above were produced against the frozen 280-case dataset at **freeze 2** —
-commit `f162959f7d29ead32342fd8744bd10ed244369af`, digest `6a3ecbbe75fd020b…` — whose hash
-`eval/run_all.py` verifies before it computes anything, so a number cannot be generated against
-a different corpus even by accident. Freeze 1 (`b37d1909f5fb…`, digest `3b3931365a3c2918…`) is
-**superseded** and is not what any figure here was computed against; it survives in 06 §2 as the
-origin of the v1 baseline, and the v1 columns are re-computed each run from frozen `_v1_*.py`
-against the *current* freeze rather than transcribed from that one. **Two of the three missed**, and they are reported as missed: see the paragraph
-above. Both were filed as deviations and are now **ruled and closed** (ADR-026) — closing them
-did not make the misses go away, it recorded them as **Standing Limitations** in `docs/08`,
-where `SL-1` is the PII recall target that remains unmet and, per ADR-026 §5, unmoved.
+This register makes prototype limits reviewable rather than presenting them as completed capability.
 
-Two provenance rules already constrain what may ever appear here:
+| ID | Limitation | Status / plan |
+|---|---|---|
+| SL-1 | PII recall is 0.8852 against 0.95. | Open; target unmoved. Seven known bare-7-digit misses trade recall for precision 1.000. |
+| SL-2 | Invalid NANP area codes can still fire under the v1-superset phone behavior. | Open; precision hardening requires a new freeze cycle. |
+| SL-3 | Price provenance requires submission-time re-verification. | Downgraded for the two bound Groq IDs; retired-model comparisons remain barred. |
+| SL-4 | A genuinely local fallback was previously absent. | Closed on the owner host with llama3.2:3b; no fallback latency/cost claim is made from the development host. |
+| SL-5 | Tier-2 latency evidence is low-concurrency. | Open; the published one-thread column shows breaches, and a proper load test is out of scope. |
+| SL-6 | fast_consistency is specified but not implemented. | Cut to roadmap; context-free performance checking is the missing case. |
+| SL-7 | The grounding band cannot be calibrated: tau_low 0.8365 ≥ tau_high 0.7157. | Open; the 56/78 oracle ceiling points to a detector-model change, not target tuning. |
+| SL-8 | Injection attributable P99 is 25.348 ms against 25 ms. | Open measured breach; target unmoved. ORT tuning or serving hardware is roadmap. |
+| SL-9 | The OVLP two-plane demo cut works for only 2 of 3 policies. | Cut from the demo path after 10 repetitions; PII-001 remains the deterministic signature beat. |
+| SL-10 | The two-tier cascade router is not built. | Budget gating ships, but f has no producer; cost saving remains a curve with break-even at f=0.50. |
 
-- **Upstream class** (ADR-018) — the local development gateway's token accounting carries a
-  fixed ~5000-token offset, so it is classed `dev` and `eval/` refuses to produce reports
-  from it unless run with `--allow-dev`, which stamps `DEV-TAINTED` into the filename.
-- **Price provenance** (ADR-022, amended by ADR-029) — the bound Groq models now carry
-  **first-party** per-1M figures on Groq's own models page, so absolute dollar figures are
-  publishable **for those two ids** (`openai/gpt-oss-20b`, `openai/gpt-oss-120b`) with their
-  `source_url` and retrieval date. Any comparison priced on the retired llama pair stays
-  barred — those figures were never first-party and the models no longer serve. Prices are
-  re-verified at submission packaging. See `docs/08` **SL-3**.
+Detailed rationale and the beat-by-beat cut record: [engineering notes](docs/09-engineering-notes.md). The authoritative register is [docs/08-open-questions.md](docs/08-open-questions.md).
 
-## Repository layout
+## Project structure
 
-```
-docs/          the specification — 00 charter … 08 open questions. Read 00, 02, then 04.
-controlplane/  gateway, detectors, policy engine, audit, telemetry
-policies/      one YAML per use case — the behaviour lives here, not in Python
-config/        upstream providers + price table (05 §6.1)
-eval/          labeled dataset + evaluation harness (06)
-tests/         433 tests, named against the requirement IDs they cover
-tests/review/  independent checkpoint-review tests; its 2 xfail cases are documented
-               limitations (Unicode homoglyph + zero-width email evasion), not
-               pending fixes. The third was the comma-grouped-card false positive,
-               which ADR-025 fixed — it is now a live regression assertion
-reports/       committed measurement evidence — generated, never hand-edited (06 §8)
-AGENTS.md      binding operating manual for coding agents on this repo
-```
+~~~text
+controlplane/  gateway, detector, policy, audit, cost, and telemetry code
+policies/      three validated per-use-case YAML policies
+eval/          frozen corpus, scoring, latency, fault, cost, and derivation harnesses
+demo/          headless scripted demo and replay fixtures
+dashboard/     same-origin console pages served by the gateway
+reports/       committed, reproducible evidence; not build output
+docs/          contracts, ADRs, ledgers, testing guide, and engineering notes
+tests/         contract, regression, evaluation, and demo-path gates
+~~~
 
-## Reading the specification
+## Development and testing
 
-`docs/` was written before the code, deliberately — the docs are the contract, and code that
-disagrees with them is presumed wrong until a human rules otherwise. Start with
-`docs/00-charter.md` (why), then `docs/02-architecture.md` (shape), then
-`docs/04-policy-and-detection-spec.md` (the core: detector contracts, policy schema, and the
-Pass/Edit/Block/Escalate state machine). `docs/03-decisions.md` records why each choice was
-made, including the ones that were overruled.
+~~~sh
+.venv/bin/python -m pytest -q
+.venv/bin/python -m eval.run_all
+.venv/bin/python -m eval.bench_latency --check
+.venv/bin/python -m eval.fault_injection --reps 5
+.venv/bin/python -m eval.validate_dataset --freeze
+.venv/bin/python -m eval.check_derivations
+~~~
 
-## License
+Do not run measurement harnesses beside tests, builds, or another spike. Evidence is citable only from a quiet host with the recorded start/end load inside the documented threshold. See [docs/TESTING.md](docs/TESTING.md). The suite count deliberately lives in [.github/workflows/ci.yml](.github/workflows/ci.yml), not in this README, so M-23 cannot make it stale.
 
-Not yet chosen — see `docs/08-open-questions.md`.
+## How it was built
+
+The repository was built spec-first: contracts preceded code, AI agents worked under the binding [AGENTS.md](AGENTS.md), an independent AI review challenged each checkpoint, and humans adjudicated contract changes. The current ledger records **36** ADRs ruled, 32 deviations all ruled and closed, 65 logged minor resolutions, and ten registered SL IDs—SL-4 is closed, leaving nine active limitations.
+
+- Requirements and schemas are the contract; code does not silently redefine them.
+- AI implementation agents must stop or log conflicts under the deviation protocol.
+- An independent reviewer produced adversarial findings before phase acceptance.
+- Human rulings changed contracts through dated ADRs, never by weakening a failing test.
+
+Read the [ADR log](docs/03-decisions.md), [public ledger](docs/08-open-questions.md), and [detailed engineering notes](docs/09-engineering-notes.md): the ledger is public; every ruling is dated.
+
+## Team and submission
+
+Team b24bb1029, Indian Institute of Technology Jodhpur.
+
+| Member | Roll number | Branch |
+|---|---|---|
+| Priyanshu Pandey, lead | B24BB1029 | Bioengineering, third year |
+| Harshit Saini | B24CS1031 | Computer Science, third year |
+| Jayant Soni | B24CM1033 | Artificial Intelligence & Data Science, third year |
+
+- [Business proposal PDF](b24bb1029_ControlPlane_Business_Proposal.pdf)
+- README PDF: not present in the repository yet.
+- Demo video: not present in the repository yet.
+- License: not yet chosen; tracked in [docs/08-open-questions.md](docs/08-open-questions.md).
