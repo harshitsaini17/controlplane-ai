@@ -1082,7 +1082,7 @@ treated it additively do not move.
 
 | Hold | Pool users (serialize) | Non-pool (overlap) | Worst case | Against the target |
 |---|---|---|---|---|
-| Input lane | `tier2_injection` 25 | 2 | **30 ms** | P99 < 50 — fits |
+| Input lane † | `tier2_injection` 25 | 2 | **30 ms** | P99 < 50 — fits |
 | Per-sentence, typical | `tier2_toxicity` 25 | 5 | **30 ms** | P50 < 40 — fits |
 | Per-sentence, typical, enriched | 25 + `entity_enricher` 10 = 35 | 5 | **40 ms** | P50 < 40 — **zero margin, unchanged** |
 | Per-sentence, with context docs | 25 + `rag_grounding` 30 + `entity_enricher` 10 = 65 | 5 | **70 ms** *(was 45)* | P99 < 100 — fits, 30 ms margin |
@@ -1092,6 +1092,8 @@ treated it additively do not move.
 Three rows are unchanged, which is not a coincidence and is the reason the fix is narrow: a hold
 with **one** pool user has nothing to serialize against, so `Σ` and `max` agree. Only rows 4-6
 carry two or more.
+
+† **This row composes from the *declared* 25 ms budget, and that budget is now measurably missed.** `tier2_injection` measures an attributable P99 of **25.348 ms** ([[SL-8]]), so the composed 30 ms is optimistic by ~0.35 ms against roughly 20 ms of margin to the P99 < 50 target — the row does not flip, and no other row in this table contains this detector. **Deliberately not re-derived:** substituting a measured figure for a declared budget would make the published table move with every re-run and would no longer be the specification arithmetic `eval.check_derivations` verifies. See [[M-59]]; the optimism is stated here rather than left to be discovered.
 
 **Row 6 was never tabulated.** ADR-030's table had no `on_sampled`-with-context-docs row at all, so
 the worst case it published (75 ms) was not the worst case its own budgets allow. It is tabulated

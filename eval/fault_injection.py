@@ -83,6 +83,7 @@ from controlplane.policy.engine import DETECTOR_FAIL_CLASS
 from controlplane.policy.store import PolicyStore
 from controlplane.telemetry.metrics import MetricsRegistry
 from eval.host_load import (
+    QUIET_LOAD1_MAX,
     code_commit_cell,
     git_stamp,
     load_stamp,
@@ -377,13 +378,26 @@ class RepOutcome:
     04 §5 control-probe assertions are load-sensitive by the [[M-53]]/[[M-60]] mechanism (a
     budget overrun reaches the audit record as a detector fault, so a contended pool can
     manufacture a fault on a probe where none was injected). A one-run report cannot express
-    that, and the first published one said `39/39` for a suite that reproduces it 3 times in 5.
+    that, and the first published one said `39/39` for a suite whose rate it never measured.
+
+    Load is carried at **both** ends of the repetition. Start alone is not enough: a rep that
+    begins quiet and ends contended was not measured on a quiet host, and `load1` rises during
+    a run of this harness (measured: 1.04 -> 1.24 across one rep).
     """
 
     passed: int
     total: int
     failures: tuple[str, ...]
     load1: float | None
+    load1_end: float | None = None
+
+    @property
+    def quiet(self) -> bool | None:
+        """Three-valued, like `host_load.is_quiet`: None when load was not recorded."""
+        seen = [v for v in (self.load1, self.load1_end) if v is not None]
+        if not seen:
+            return None
+        return max(seen) <= QUIET_LOAD1_MAX
 
 
 @dataclass(frozen=True)
@@ -558,62 +572,124 @@ def _provenance(
 def _reproducibility_section(reps: Sequence[RepOutcome]) -> list[str]:
     """The observed pass RATE, which replaces the single-run claim for a multi-rep run.
 
-    A reproducibility-honest number beats a clean one: the assertions here are documented
-    04 §5 invariants, so a run that passes them 3 times in 5 has not established them — it has
-    established that they hold on a quiet host *most of the time*, and named the mechanism that
-    takes the other two. That is a weaker claim than `39/39` and it is the true one.
+    A reproducibility-honest number beats a clean one. Every sentence here is derived from the
+    repetitions' own stamps rather than asserted: an earlier draft of this function hardcoded
+    "every repetition ran on a quiet host" and printed it beside an end-of-run stamp reading
+    NOT CITABLE, which is precisely the defect class this repo keeps catching — a claim
+    described by a premise it does not come from.
     """
     if len(reps) < 2:
         return []
     best = max(r.passed for r in reps)
     clean = [r for r in reps if not r.failures]
+    quiet_states = [r.quiet for r in reps]
+    all_quiet = all(q is True for q in quiet_states)
+    loud = [i for i, r in enumerate(reps, 1) if r.quiet is False]
+    unknown = [i for i, r in enumerate(reps, 1) if r.quiet is None]
+
+    if all_quiet:
+        host_line = (
+            f"All {len(reps)} repetitions stayed within the 06 §8 quiet threshold "
+            f"(`load1 <= {QUIET_LOAD1_MAX}`) at both ends, so the spread below is the "
+            "system's rather than the host's."
+        )
+    else:
+        parts = []
+        if loud:
+            parts.append(
+                "repetition" + ("s " if len(loud) > 1 else " ")
+                + ", ".join(str(i) for i in loud)
+                + f" exceeded the 06 §8 quiet threshold (`load1 <= {QUIET_LOAD1_MAX}`)"
+            )
+        if unknown:
+            parts.append(
+                "repetition" + ("s " if len(unknown) > 1 else " ")
+                + ", ".join(str(i) for i in unknown) + " recorded no load"
+            )
+        host_line = (
+            "**Not every repetition was measured on a quiet host**: " + "; ".join(parts)
+            + ". Those repetitions are **not citable** under 06 §8 and the rate below must be "
+            "read with them excluded — stated rather than smoothed over, because a rate whose "
+            "conditions differ per sample is not one number."
+        )
+
+    lines = [
+        "## Reproducibility across repetitions",
+        "",
+        f"**{len(clean)}/{len(reps)} repetitions reached {best}/{reps[0].total}.** "
+        + host_line,
+        "",
+        "| Rep | Passed | load1 start | load1 end | Quiet (06 §8) | Failing assertion |",
+        "|---:|---:|---:|---:|---|---|",
+    ]
+    for i, r in enumerate(reps, 1):
+        quiet_cell = {True: "yes", False: "**NO**", None: "not recorded"}[r.quiet]
+        lines.append(
+            f"| {i} | {r.passed}/{r.total} | {'—' if r.load1 is None else r.load1} "
+            f"| {'—' if r.load1_end is None else r.load1_end} | {quiet_cell} "
+            f"| {'none' if not r.failures else ', '.join(f'`{n}`' for n in r.failures)} |"
+        )
+
     flaky: dict[str, int] = {}
     for r in reps:
         for name in r.failures:
             flaky[name] = flaky.get(name, 0) + 1
-    lines = [
-        "## Reproducibility across repetitions",
-        "",
-        f"**{len(clean)}/{len(reps)} repetitions reached {best}/{reps[0].total}.** Every "
-        "repetition ran on a quiet host, one after another, with no code or policy change "
-        "between them — so the spread is the system's, not the configuration's.",
-        "",
-        "| Rep | Passed | load1 at start | Failing assertion |",
-        "|---:|---:|---:|---|",
-    ]
-    for i, r in enumerate(reps, 1):
-        lines.append(
-            f"| {i} | {r.passed}/{r.total} | {'—' if r.load1 is None else r.load1} "
-            f"| {'none' if not r.failures else ', '.join(f'`{n}`' for n in r.failures)} |"
-        )
-    lines += [
-        "",
-        "The assertions that did not hold every time, and how often they failed:",
-        "",
-    ]
-    for name, n in sorted(flaky.items(), key=lambda kv: -kv[1]):
-        lines.append(f"- `{name}` — failed **{n}/{len(reps)}**")
-    if not flaky:
+
+    lines += ["", "The assertions that did not hold in every repetition:", ""]
+    if flaky:
+        for name, n in sorted(flaky.items(), key=lambda kv: -kv[1]):
+            lines.append(f"- `{name}` — failed **{n}/{len(reps)}**")
+    else:
         lines.append("- none — every assertion held in every repetition")
+
     lines += [
         "",
+        "### What these repetitions do and do not establish",
+        "",
+        "**They share one process, and therefore one warmed model pool.** The first repetition "
+        "pays first-touch ONNX graph initialization; every later one runs against models already "
+        "resident. So this rate measures the **warmed steady state**, which is the demo's "
+        "condition but not the harness's cold one — a fresh process per repetition is a different "
+        "and slower measurement, and it is where the [[M-53]]/[[M-60]] flake was originally "
+        "observed. A clean rate here therefore does **not** retire that mechanism; it bounds it "
+        "to the cold path and to contention.",
+        "",
+    ]
+    if flaky:
+        lines += [
+            "**Mechanism, not noise.** A detector that overruns its budget is recorded in the "
+            "audit record as a *detector fault*, and the control probe asserts that a run with no "
+            "injected fault records none. So a pool-serialized model detector that runs slow "
+            "enough on one sentence manufactures a fault the harness reads as a broken "
+            "invariant. The assertion is **not relaxed** to absorb it (AGENTS.md §5.4) — it "
+            "fires on exactly the condition it exists to guard, and the guard is working.",
+            "",
+        ]
+    else:
+        lines += [
+            "**The load-sensitive failure did not reproduce in this run, which is not the same "
+            "as absent.** The mechanism is documented: a budget overrun is recorded as a "
+            "*detector fault*, so a pool-serialized detector running slow manufactures a fault "
+            "on a probe where none was injected, and the control assertion correctly reads that "
+            "as a broken invariant. It was observed on this host across **separate** harness "
+            "processes at `load1` below the quiet threshold ([[M-60]]). Reporting a clean "
+            "in-process rate as evidence that it is fixed would be the error; the assertion "
+            "stays unrelaxed (AGENTS.md §5.4) precisely so the next occurrence is visible.",
+            "",
+        ]
+
+    lines += [
         "### Superseded single-run claim — preserved, not deleted",
         "",
         "> The run of **2026-08-30** published this suite as **`39/39 passed`** from a single "
-        "> repetition, with no load stamp ([[M-54]]) and therefore no way for a reader to check "
-        "> the quiet-host condition the figure depended on. That number is a **real measurement "
-        "> of one run** and it is kept here for that reason; what was wrong was presenting it as "
-        "> the suite's result when the suite does not reproduce it. Superseded by the rate above. "
-        "> No figure in this blockquote is recomputed by this run.",
-        "",
-        "**Mechanism, not noise.** A detector that overruns its budget is recorded in the audit "
-        "record as a *detector fault*, and the control probe asserts that a run with no injected "
-        "fault records none. So a pool-serialized model detector that runs slow enough on one "
-        "sentence manufactures a fault the harness reads as a broken invariant. It is the same "
-        "mechanism [[M-53]] recorded under load; [[M-60]] extends it, because these repetitions "
-        "were quiet by 06 §8's own threshold and it still occurred. The assertion is **not "
-        "relaxed** to absorb it (AGENTS.md §5.4) — it fires on exactly the condition it exists "
-        "to guard, and the guard is working.",
+        "repetition, with no load stamp ([[M-54]]) and therefore no way for a reader to check the "
+        "quiet-host condition the figure depended on.",
+        ">",
+        "> That number is a real measurement of one run and is kept for that reason. What was "
+        "wrong was the **claim shape**: a single run cannot state a rate, and this suite's "
+        "control-probe assertions are load-sensitive, so one clean run and a reproducible "
+        "invariant are different facts. Superseded by the rate above; no figure in this "
+        "blockquote is recomputed by this run.",
         "",
     ]
     return lines
@@ -846,11 +922,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     for i in range(args.reps):
         rep_load = load_stamp()
         run = execute(args.dataset_dir)
+        rep_end = load_stamp()
         reps.append(RepOutcome(
             passed=sum(1 for a in run.assertions if a.passed),
             total=len(run.assertions),
             failures=tuple(a.name for a in run.failed),
             load1=rep_load.get("load1"),
+            load1_end=rep_end.get("load1"),
         ))
         if args.reps > 1:
             print(f"  rep {i + 1}/{args.reps}: {reps[-1].passed}/{reps[-1].total}"

@@ -149,8 +149,10 @@
         </tbody></table>
     </div>
     <p class="src">Source: <code class="mono">reports/fault_injection_report.md</code> · regenerate with
-    <code class="mono">python -m eval.fault_injection</code>. The suite is <strong>3 of 5 quiet-host runs at 39/39</strong>;
-    two runs recorded 38/39 on one control-probe assertion, cause recorded as M-60 rather than tuned away.</p>
+    <code class="mono">python -m eval.fault_injection --reps 5</code>. The suite is <strong>5 of 5 quiet-host
+    repetitions at 39/39</strong> &mdash; but all five share one warmed model pool. Across five <em>separate</em>
+    processes at comparable load, the same control-probe assertion failed twice (38/39). Both numbers are
+    published; the cause is recorded as M-60 rather than tuned away.</p>
   </section>
 </main>
 

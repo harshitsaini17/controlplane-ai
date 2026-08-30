@@ -6,15 +6,17 @@ FR-POL-006: a detector timeout or crash is resolved by the **policy's** `fail_mo
 
 | Field | Value |
 |---|---|
-| Generated (UTC) | 2026-08-30T06:26:05+00:00 |
+| Generated (UTC) | 2026-08-30T08:02:34+00:00 |
 | Dataset digest | `6a3ecbbe75fd020bf806bf647d572c85ee187198fb9828eaac5e1c6e00737fbd` |
 | Frozen at | `f162959f7d29` — MATCHES |
 | Probe case | `CLN-001` (frozen; prompt **and** stub response) |
 | Injected fault | `DetectorTimeout` (06 §5 "raise timeout") |
-| Code commit | `af86fe6e1c74` |
+| Code commit | `27f0c2f98cac` + uncommitted changes |
 | Python | 3.14.6 |
 | Platform | Linux 7.1.2-arch3-1 · x86_64 |
-| Command | `python -m eval.fault_injection` |
+| Command | `python -m eval.fault_injection --reps 5` |
+| Host load at start (1/5/15) | 0.52 / 0.93 / 1.0 · 12 CPUs — **QUIET** |
+| Host load at end (1/5/15) | 0.81 / 0.97 / 1.01 · 12 CPUs — **QUIET** |
 
 > **Upstream provenance:** the active provider `kiro-local` is **dev-class**, which `require_measured_upstream()` refuses for judge-facing output (ADR-018). **This report is unaffected:** the upstream is a stub, so no verdict below involves a provider call, a token count, or a price. Every result is produced by local detectors and the policy engine. The gate is therefore **evaluated and non-binding here**, and becomes binding the moment this harness reports anything upstream-derived.
 
@@ -70,7 +72,7 @@ Without these, "UC-3 escalates under fault" is unfalsifiable — a policy that e
 
 ## Assertions
 
-39/39 passed.
+39/39 passed in this repetition — the final one of 5. The rate across all repetitions is the citable figure; see *Reproducibility* below.
 
 | Result | Assertion | Evidence |
 |---|---|---|
@@ -78,7 +80,7 @@ Without these, "UC-3 escalates under fault" is unfalsifiable — a policy that e
 | PASS | support_bot/tier1: verdict is escalate | `verdict='escalate' (HTTP 200)` |
 | PASS | support_bot/tier1: fault present in detector_failures_json | `failures=['tier1_pii'] modes=['fail_closed']` |
 | PASS | support_bot/tier1: fail_mode_applied is fail_closed | `modes_applied=['fail_closed']` |
-| PASS | support_bot/tier1: fault stamped in failure_record_ids | `failure_record_ids=['37cf4e4d-475f-41b9-9cd8-172bf3ccc3f5']` |
+| PASS | support_bot/tier1: fault stamped in failure_record_ids | `failure_record_ids=['c01f9b7f-6bf6-4664-a185-fb340b8bbb00']` |
 | PASS | support_bot/tier2: verdict is pass | `verdict='pass' (HTTP 200)` |
 | PASS | support_bot/tier2: fault present in detector_failures_json | `failures=['tier2_toxicity'] modes=['fail_open']` |
 | PASS | support_bot/tier2: fail_mode_applied is fail_open | `modes_applied=['fail_open']` |
@@ -91,7 +93,7 @@ Without these, "UC-3 escalates under fault" is unfalsifiable — a policy that e
 | PASS | hr_copilot/tier1: verdict is escalate | `verdict='escalate' (HTTP 200)` |
 | PASS | hr_copilot/tier1: fault present in detector_failures_json | `failures=['tier1_pii'] modes=['fail_closed']` |
 | PASS | hr_copilot/tier1: fail_mode_applied is fail_closed | `modes_applied=['fail_closed']` |
-| PASS | hr_copilot/tier1: fault stamped in failure_record_ids | `failure_record_ids=['9a755a49-b187-498b-860c-78460c306aaa']` |
+| PASS | hr_copilot/tier1: fault stamped in failure_record_ids | `failure_record_ids=['36c105c1-6931-48ea-b63c-5bd7e1696753']` |
 | PASS | hr_copilot/tier2: verdict is pass | `verdict='pass' (HTTP 200)` |
 | PASS | hr_copilot/tier2: fault present in detector_failures_json | `failures=['tier2_toxicity'] modes=['fail_open']` |
 | PASS | hr_copilot/tier2: fail_mode_applied is fail_open | `modes_applied=['fail_open']` |
@@ -104,15 +106,44 @@ Without these, "UC-3 escalates under fault" is unfalsifiable — a policy that e
 | PASS | finance_advisor/tier1: verdict is escalate | `verdict='escalate' (HTTP 202)` |
 | PASS | finance_advisor/tier1: fault present in detector_failures_json | `failures=['tier1_pii'] modes=['fail_closed']` |
 | PASS | finance_advisor/tier1: fail_mode_applied is fail_closed | `modes_applied=['fail_closed']` |
-| PASS | finance_advisor/tier1: fault stamped in failure_record_ids | `failure_record_ids=['768733f8-8648-4caf-b834-38e5be3d5703']` |
+| PASS | finance_advisor/tier1: fault stamped in failure_record_ids | `failure_record_ids=['1c07daac-9beb-47f7-9255-4985194548c8']` |
 | PASS | finance_advisor/tier2: verdict is escalate | `verdict='escalate' (HTTP 202)` |
 | PASS | finance_advisor/tier2: fault present in detector_failures_json | `failures=['tier2_toxicity'] modes=['fail_closed']` |
 | PASS | finance_advisor/tier2: fail_mode_applied is fail_closed | `modes_applied=['fail_closed']` |
-| PASS | finance_advisor/tier2: fault stamped in failure_record_ids | `failure_record_ids=['43eab4a3-e429-4b4d-8bc7-0637bbc98151']` |
+| PASS | finance_advisor/tier2: fault stamped in failure_record_ids | `failure_record_ids=['fdd2314b-f828-435e-9d08-09ce26f94ba8']` |
 | PASS | finance_advisor/performance: verdict is escalate | `verdict='escalate' (HTTP 202)` |
 | PASS | finance_advisor/performance: fault present in detector_failures_json | `failures=['rag_grounding'] modes=['fail_closed']` |
 | PASS | finance_advisor/performance: fail_mode_applied is fail_closed | `modes_applied=['fail_closed']` |
-| PASS | finance_advisor/performance: fault stamped in failure_record_ids | `failure_record_ids=['f23899dc-10e5-40e5-b3df-a2a0591629cc']` |
+| PASS | finance_advisor/performance: fault stamped in failure_record_ids | `failure_record_ids=['558c4434-49fd-41ff-aa5e-03e2f8194887']` |
+
+## Reproducibility across repetitions
+
+**5/5 repetitions reached 39/39.** All 5 repetitions stayed within the 06 §8 quiet threshold (`load1 <= 1.0`) at both ends, so the spread below is the system's rather than the host's.
+
+| Rep | Passed | load1 start | load1 end | Quiet (06 §8) | Failing assertion |
+|---:|---:|---:|---:|---|---|
+| 1 | 39/39 | 0.52 | 0.81 | yes | none |
+| 2 | 39/39 | 0.81 | 0.81 | yes | none |
+| 3 | 39/39 | 0.81 | 0.81 | yes | none |
+| 4 | 39/39 | 0.81 | 0.81 | yes | none |
+| 5 | 39/39 | 0.81 | 0.81 | yes | none |
+
+The assertions that did not hold in every repetition:
+
+- none — every assertion held in every repetition
+
+### What these repetitions do and do not establish
+
+**They share one process, and therefore one warmed model pool.** The first repetition pays first-touch ONNX graph initialization; every later one runs against models already resident. So this rate measures the **warmed steady state**, which is the demo's condition but not the harness's cold one — a fresh process per repetition is a different and slower measurement, and it is where the [[M-53]]/[[M-60]] flake was originally observed. A clean rate here therefore does **not** retire that mechanism; it bounds it to the cold path and to contention.
+
+**The load-sensitive failure did not reproduce in this run, which is not the same as absent.** The mechanism is documented: a budget overrun is recorded as a *detector fault*, so a pool-serialized detector running slow manufactures a fault on a probe where none was injected, and the control assertion correctly reads that as a broken invariant. It was observed on this host across **separate** harness processes at `load1` below the quiet threshold ([[M-60]]). Reporting a clean in-process rate as evidence that it is fixed would be the error; the assertion stays unrelaxed (AGENTS.md §5.4) precisely so the next occurrence is visible.
+
+### Superseded single-run claim — preserved, not deleted
+
+> The run of **2026-08-30** published this suite as **`39/39 passed`** from a single repetition, with no load stamp ([[M-54]]) and therefore no way for a reader to check the quiet-host condition the figure depended on.
+>
+> That number is a real measurement of one run and is kept for that reason. What was wrong was the **claim shape**: a single run cannot state a rate, and this suite's control-probe assertions are load-sensitive, so one clean run and a reproducible invariant are different facts. Superseded by the rate above; no figure in this blockquote is recomputed by this run.
+
 
 ## Scope and limitations
 

@@ -370,3 +370,92 @@ def test_the_report_shows_configured_modes_for_unexercisable_classes(tmp_path, s
     body = out.read_text()
     for fail_class in fi.FAIL_CLASSES:
         assert f"`{fail_class}`" in body
+
+
+# --- M-60 / Branch-B remedy: the reproducibility section ------------------------------------
+#
+# These pin a *claim shape*, not a measurement. The first published version of this section
+# hardcoded "Every repetition ran on a quiet host" and printed it directly beside an end-of-run
+# stamp reading NOT CITABLE — a claim contradicted by a premise on the same page, which is the
+# defect class this repo keeps finding. Every assertion below exists so that one specific
+# sentence cannot come back.
+
+
+def _reps(*specs) -> tuple[fi.RepOutcome, ...]:
+    """(passed, load1, load1_end, *failures) → RepOutcomes, total fixed at 39."""
+    return tuple(
+        fi.RepOutcome(passed=p, total=39, failures=tuple(f), load1=lo, load1_end=hi)
+        for p, lo, hi, *f in specs
+    )
+
+
+def test_m60_the_quiet_host_claim_is_derived_from_the_stamps_not_asserted() -> None:
+    """A rep above the 06 §8 threshold must disqualify itself, whatever the pass count says."""
+    body = "\n".join(fi._reproducibility_section(_reps((39, 0.5, 0.6), (39, 0.9, 1.9))))
+    assert "Not every repetition was measured on a quiet host" in body
+    assert "**NO**" in body, "the loud repetition must be marked in the table"
+    assert "not citable" in body.lower()
+    assert "stayed within the 06 §8 quiet threshold" not in body, (
+        "a run containing a loud repetition must never claim all of them were quiet"
+    )
+
+
+def test_m60_an_all_quiet_run_says_so_and_attributes_the_spread_to_the_system() -> None:
+    body = "\n".join(fi._reproducibility_section(_reps((39, 0.5, 0.6), (39, 0.8, 0.9))))
+    assert "stayed within the 06 §8 quiet threshold" in body
+    assert "**NO**" not in body
+
+
+def test_m60_an_unrecorded_load_is_not_reported_as_quiet() -> None:
+    """Three-valued, like `host_load.is_quiet`: never-measured is not measured-and-passed."""
+    body = "\n".join(fi._reproducibility_section(_reps((39, None, None), (39, 0.8, 0.9))))
+    assert "not recorded" in body
+    assert "stayed within the 06 §8 quiet threshold" not in body
+
+
+def test_m60_a_clean_run_does_not_report_the_mechanism_as_gone() -> None:
+    """The whole point of the row: 5/5 clean in one process is not a fixed invariant."""
+    body = "\n".join(fi._reproducibility_section(_reps((39, 0.5, 0.6), (39, 0.8, 0.9))))
+    assert "not the same as absent" in body
+    assert "Mechanism, not noise" not in body, "no failure occurred; do not narrate one"
+
+
+def test_m60_a_failing_repetition_names_the_mechanism_instead_of_calling_it_flake() -> None:
+    body = "\n".join(fi._reproducibility_section(_reps((39, 0.5, 0.6), (38, 0.8, 0.9, "ctl"))))
+    assert "Mechanism, not noise" in body
+    assert "`ctl` — failed **1/2**" in body
+    assert "not relaxed" in body, "§5.4: the assertion absorbs nothing"
+
+
+def test_m60_the_in_process_warm_pool_limit_is_stated_not_omitted() -> None:
+    """Reps 2..N reuse warmed models, so the rate understates the cold-path flake."""
+    body = "\n".join(fi._reproducibility_section(_reps((39, 0.5, 0.6), (39, 0.8, 0.9))))
+    assert "warmed steady state" in body
+    assert "does **not** retire that mechanism" in body
+
+
+def test_m60_the_superseded_claim_renders_as_a_real_blockquote() -> None:
+    """It rendered as one line with inline `>` characters, which reads as a live claim."""
+    lines = fi._reproducibility_section(_reps((39, 0.5, 0.6), (39, 0.8, 0.9)))
+    i = lines.index("### Superseded single-run claim — preserved, not deleted")
+    quoted = [ln for ln in lines[i:] if ln.strip()][1:]
+    assert quoted, "the superseded claim must still be present"
+    assert all(ln.startswith(">") for ln in quoted), (
+        "every line of the preserved claim must carry its own `>` prefix"
+    )
+
+
+def test_m60_a_single_repetition_publishes_no_rate() -> None:
+    """One run cannot state a rate — that was the original defect, not the fix."""
+    assert fi._reproducibility_section(_reps((39, 0.5, 0.6))) == []
+
+
+def test_m60_the_rate_does_not_soften_the_exit_contract(tmp_path, monkeypatch) -> None:
+    """A failure in ANY repetition must still break the build (widened, not weakened)."""
+    real = fi.check
+
+    def sabotage(probe, expect_mode):
+        return [*real(probe, expect_mode), fi.Assertion("injected failure", False, "n/a")]
+
+    monkeypatch.setattr(fi, "check", sabotage)
+    assert fi.main(["--out", str(tmp_path / "f.md"), "--reps", "2"]) == 1
