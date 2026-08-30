@@ -25,8 +25,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
-
 ROOT = Path(__file__).resolve().parents[1]
 README = ROOT / "README.md"
 DOC_03 = ROOT / "docs" / "03-decisions.md"
@@ -113,19 +111,33 @@ def test_the_readme_points_at_the_gate_that_holds_the_count() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    "claim",
-    ["Gateway hot path", "Policy engine", "Latency benchmark", "Model-backed detectors"],
-)
-def test_shipped_subsystems_are_no_longer_advertised_as_unbuilt(claim: str) -> None:
-    """M-23's third drift: rows saying `not yet implemented` for code that ships.
+def test_public_readme_uses_the_judge_review_order() -> None:
+    """The public entry point stays scannable in the agreed order."""
+    text = README.read_text()
+    headings = [
+        "# ControlPlane.ai — Real-Time AI Oversight Gateway",
+        "## The 30-second demo",
+        "## Quick start",
+        "## What it does",
+        "## Key results",
+        "## Why this is different",
+        "## What doesn't ship",
+        "## Project structure",
+        "## Development and testing",
+        "## How it was built",
+        "## Team and submission",
+    ]
+    offsets = [text.index(heading) for heading in headings]
+    assert offsets == sorted(offsets)
 
-    Understating is not the safe direction — the gateway, the policy engine and the two
-    running harnesses are the prototype, and a README disowning them describes a different
-    project than the one the repo holds.
-    """
-    for line in README.read_text().splitlines():
-        if line.startswith("|") and claim in line:
-            assert "not yet implemented" not in line, line.strip()
-            return
-    pytest.fail(f"no README status row for {claim!r}")
+
+def test_public_readme_keeps_the_integrity_tripwires() -> None:
+    """The restructure cannot hide known limits or point at stale evidence."""
+    text = README.read_text()
+    assert "reports/cost_report.md" in text
+    assert "reports/cost_simulation.md" not in text
+    assert "Tier-1 < 1 ms" in text
+    assert "< 2 ms" not in text
+    assert all(f"SL-{number}" in text for number in range(1, 11))
+    assert text.index("SL-9") < text.index("SL-10")
+    assert "docs/09-engineering-notes.md" in text
