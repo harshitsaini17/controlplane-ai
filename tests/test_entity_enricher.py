@@ -32,6 +32,8 @@ from controlplane.gateway.ingress import ResolvedRequest
 from controlplane.policy.store import PolicyStore
 from controlplane.telemetry.metrics import MetricsRegistry
 
+from tests.ml_stack import requires_ml
+
 DATASET = pathlib.Path(__file__).resolve().parents[1] / "eval" / "dataset"
 
 #: The one frozen `person_present: true` case whose host signal is produced by an
@@ -79,6 +81,7 @@ def _host_signals(text: str) -> list[Signal]:
 # --------------------------------------------------------------------------
 
 
+@requires_ml
 def test_a_person_outside_the_span_but_inside_the_sentence_still_enriches():
     """04 §2.2 reads "NER over the span (± its sentence window)", and the window half of
     that is load-bearing rather than decorative.
@@ -102,6 +105,7 @@ def test_a_person_outside_the_span_but_inside_the_sentence_still_enriches():
     assert ee.APPENDED_LABEL in out[0].labels
 
 
+@requires_ml
 def test_enrichment_appends_to_the_same_signal_and_never_adds_one(request_obj):
     """FR-DET-005's one-signal rule, and the reason 04 §39 states it as a *shape*.
 
@@ -125,6 +129,7 @@ def test_enrichment_appends_to_the_same_signal_and_never_adds_one(request_obj):
     assert out[0].detector == before[0].detector
 
 
+@requires_ml
 def test_the_appended_label_is_recorded_because_adr_019_makes_it_a_contract():
     """ADR-019 / 04 §2.2: §4.3 step 2 partitions labels on `meta.enriched_labels`.
 
@@ -150,6 +155,7 @@ def test_the_appended_label_is_recorded_because_adr_019_makes_it_a_contract():
         )
 
 
+@requires_ml
 def test_re_enriching_an_enriched_signal_appends_nothing():
     """Idempotent, because the streaming path can re-present a segment and because
     `enrich_lane` is called per unit rather than per request. A second `privacy.person`
@@ -190,6 +196,7 @@ def test_signals_the_stage_does_not_visit_are_returned_untouched():
 # --------------------------------------------------------------------------
 
 
+@requires_ml
 def test_exhausting_the_aggregate_budget_skips_the_rest_and_counts_the_spans(monkeypatch):
     """M-18's ruling: 10 ms **per sentence**, however many spans it carries.
 
@@ -269,6 +276,7 @@ def test_no_checked_text_reaches_a_log_record(monkeypatch, caplog):
 # --------------------------------------------------------------------------
 
 
+@requires_ml
 def test_a_ran_enricher_is_recorded_as_ran(request_obj):
     case = _case("overlap", OVLP_04)
     text = case.get("response") or case["text"]

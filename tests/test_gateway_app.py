@@ -68,6 +68,8 @@ from controlplane.policy.store import PolicyStore
 from controlplane.gateway.sse_proxy import UpstreamResponse
 from controlplane.telemetry.metrics import MetricsRegistry
 
+from tests.ml_stack import requires_ml
+
 ROOT = Path(__file__).resolve().parents[1]
 DATASET = ROOT / "eval" / "dataset"
 
@@ -422,6 +424,7 @@ def test_rag_grounding_is_not_listed_when_no_context_docs_were_sent(make_client)
     assert "rag_grounding" not in names
 
 
+@requires_ml
 def test_rag_grounding_runs_when_context_docs_were_sent(make_client) -> None:
     """05 §4: expected AND implemented, so it reports as `ran` rather than as a gap.
 
@@ -1444,9 +1447,26 @@ def unloadable_tier2(monkeypatch):
     at a module that does not exist on any host, so `find_spec` reports a real absence.
     Nothing installs a stub loader: a probe satisfied by a fake would assert the opposite of
     the invariant.
+
+    **Both patches now PRESERVE the host's real requirements** rather than replacing them.
+    Replacing `REQUIREMENTS` wholesale, and narrowing `_probe_scope` to a single name, made the
+    boot manifest claim every other detector was loadable — including `entity_enricher` on a host
+    without spaCy. `warm_detector_models` trusts that manifest, so it called `warm()` and the
+    lifespan died with `ModuleNotFoundError` on any `.[dev]`-only host, which is precisely the
+    absence ADR-033 exists to have already handled. The fixture's job is to make ONE detector
+    unloadable, not to assert the rest are fine.
     """
-    monkeypatch.setattr(availability, "REQUIREMENTS", {"tier2_injection": (ABSENT_DEP,)})
-    monkeypatch.setattr(app_module, "_probe_scope", lambda: ("tier2_injection",))
+    monkeypatch.setattr(
+        availability,
+        "REQUIREMENTS",
+        {**availability.REQUIREMENTS, "tier2_injection": (ABSENT_DEP,)},
+    )
+    real_scope = app_module._probe_scope()
+    monkeypatch.setattr(
+        app_module,
+        "_probe_scope",
+        lambda: tuple(sorted(set(real_scope) | {"tier2_injection"})),
+    )
 
 
 def fail_open_policies(tmp_path):
@@ -1498,6 +1518,7 @@ def test_the_manifest_names_exactly_the_dependencies_this_host_is_missing(make_c
     assert {e.detector: e.missing for e in gateway.detector_manifest} == expected
 
 
+@requires_ml
 def test_a_fail_closed_policy_refuses_the_boot(unloadable_tier2, tmp_path) -> None:
     """★ ADR-033 rule 2: the shipped `finance_advisor` maps `tier2: fail_closed`.
 
@@ -1544,6 +1565,7 @@ def test_a_fail_open_policy_set_warns_loudly_and_still_serves(
             assert client.get("/metrics").status_code == 200
 
 
+@requires_ml
 def test_an_unloadable_detector_is_recorded_as_unavailable_not_not_run(
     unloadable_tier2, tmp_path
 ) -> None:
@@ -1580,6 +1602,7 @@ def test_an_unloadable_detector_is_recorded_as_unavailable_not_not_run(
     ) == 1.0
 
 
+@requires_ml
 def test_the_lane_never_calls_a_detector_the_boot_manifest_says_cannot_load(
     unloadable_tier2, tmp_path, monkeypatch
 ) -> None:
