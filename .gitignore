@@ -50,3 +50,8 @@ core.*
 # video reference them, and judges clone a public repo without a node toolchain.
 .tools/
 node_modules
+
+# Submission demo video. A 24 MB MP4 is media, not source: the video is a judged
+# deliverable submitted through the challenge portal, and committing it would more than
+# double clone size permanently. Everything else in submission/ IS committed.
+submission/demo/*.mp4

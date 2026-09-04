@@ -1,0 +1,27 @@
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Liberation Sans, Arial, sans-serif","fontSize":"17px","primaryTextColor":"#111827","lineColor":"#4b5563"},"flowchart":{"curve":"basis","nodeSpacing":26,"rankSpacing":30}}}%%
+flowchart TB
+  FAULT["<b>ONE IDENTICAL INJECTED FAULT</b> · tier2_toxicity raises DetectorTimeout"]
+  SYN["<b>the gateway records one failure event</b> · detector, error_class, fail_mode_applied<br/><i>an operational event — never a content Signal, so it cannot look like a risk finding</i>"]
+  LOOKUP{"<b>look up fail_mode for that detector class, in THIS use case's own policy</b>"}
+  O1["<b>support_bot — fail_open</b><br/>log and count the failure,<br/>then proceed without that detector's signals"]
+  C1["<b>finance_advisor — fail_closed</b><br/>the synthesized failure maps to ESCALATE,<br/><i>never a silent BLOCK — a human sees why</i>"]
+  O2["<b>RESPONSE PASSES</b><br/>failure recorded in the audit trail<br/><i>availability over strictness</i>"]
+  C2["<b>RESPONSE QUARANTINED</b><br/>review item labelled detector_failure<br/><i>caution over availability</i>"]
+  NOTE["<i>Same fault. Same code. Same engine. One different line of YAML.</i>"]
+
+  FAULT --> SYN --> LOOKUP
+  LOOKUP -->|"policies/support_bot.yaml"| O1 --> O2 --> NOTE
+  LOOKUP -->|"policies/finance_advisor.yaml"| C1 --> C2 --> NOTE
+
+  classDef fault fill:#fee2e2,stroke:#b91c1c,color:#111827
+  classDef syn fill:#f3f4f6,stroke:#4b5563,color:#111827
+  classDef gate fill:#eef2ff,stroke:#4338ca,color:#111827
+  classDef open fill:#ecfdf5,stroke:#047857,color:#111827
+  classDef closed fill:#ffedd5,stroke:#c2410c,color:#111827
+  classDef note fill:#ffffff,stroke:#ffffff,color:#4b5563
+  class FAULT fault
+  class SYN syn
+  class LOOKUP gate
+  class O1,O2 open
+  class C1,C2 closed
+  class NOTE note

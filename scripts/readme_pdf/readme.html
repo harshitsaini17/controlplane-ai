@@ -1,0 +1,954 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ControlPlane.ai — README</title>
+<style>
+  @page {
+    size: A4; margin: 20mm 18mm 18mm 18mm;
+    @top-left  { content: "ControlPlane.ai — Real-Time AI Oversight Gateway";
+                 font-family: "Liberation Sans", Arial, sans-serif; font-size: 7.5pt;
+                 color: #6b7280; padding-bottom: 2mm; }
+    @top-right { content: "Round 2 · AIC 2026"; font-family: "Liberation Sans", Arial, sans-serif;
+                 font-size: 7.5pt; color: #6b7280; padding-bottom: 2mm; }
+    @bottom-center { content: counter(page) " / " counter(pages);
+                 font-family: "Liberation Sans", Arial, sans-serif; font-size: 8pt; color: #6b7280; }
+  }
+  @page :first { margin: 0; @top-left { content: ""; } @top-right { content: ""; } @bottom-center { content: ""; } }
+
+  html { font-size: 10.5pt; }
+  body { font-family: "Charis SIL", "DejaVu Serif", Georgia, serif; color: #1f2937;
+         line-height: 1.48; margin: 0; hyphens: auto; text-align: justify; }
+
+  h1, h2, h3, h4 { font-family: "Liberation Sans", Arial, sans-serif; color: #312e81;
+                   line-height: 1.22; text-align: left; hyphens: none;
+                   break-after: avoid-page; }
+  h2 { font-size: 15pt; margin: 9mm 0 3mm; padding-bottom: 1.6mm;
+       border-bottom: 0.5pt solid #c7d2fe; break-before: page; }
+  h2.cont { break-before: auto; }
+  h3 { font-size: 11.5pt; margin: 6mm 0 2mm; color: #4338ca; }
+  h4 { font-size: 10pt; margin: 4.5mm 0 1.5mm; color: #4b5563;
+       text-transform: uppercase; letter-spacing: 0.5pt; }
+  p { margin: 0 0 2.4mm; orphans: 2; widows: 2; }
+
+  a { color: #4338ca; text-decoration: none; }
+  code, kbd { font-family: "Fira Code", "DejaVu Sans Mono", monospace; font-size: 8.6pt;
+              background: #f3f4f6; padding: 0.3mm 0.9mm; border-radius: 1pt; color: #3730a3; }
+  pre { font-family: "Fira Code", "DejaVu Sans Mono", monospace; font-size: 8.1pt;
+        background: #f9fafb; border: 0.4pt solid #e5e7eb; border-left: 2pt solid #4338ca;
+        padding: 2.6mm 3mm; margin: 0 0 3mm; line-height: 1.42; white-space: pre-wrap;
+        word-break: break-word; break-inside: avoid; text-align: left; }
+  pre code { background: none; padding: 0; font-size: inherit; color: #1f2937; }
+
+  table { width: 100%; border-collapse: collapse; margin: 0 0 3.5mm; font-size: 8.7pt;
+          font-family: "Liberation Sans", Arial, sans-serif; text-align: left; }
+  thead { display: table-header-group; }
+  tr { break-inside: avoid; }
+  th { background: #eef2ff; color: #312e81; font-weight: bold; text-align: left;
+       padding: 1.5mm 2mm; border-bottom: 0.7pt solid #a5b4fc; }
+  td { padding: 1.4mm 2mm; border-bottom: 0.4pt solid #e5e7eb; vertical-align: top; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tbody tr:nth-child(even) { background: #fafafa; }
+
+  figure { margin: 4mm 0 5mm; break-inside: avoid; text-align: center; }
+  figure img { max-width: 100%; max-height: 190mm; }
+  /* A plate owns its page. 228mm keeps every label at or above the 8pt legibility
+     floor the diagrams were measured against (235mm design height x 0.97). The
+     caption is deliberately one line — a second line would scale the art below it. */
+  figure.plate { break-before: page; break-after: page; margin: 0; }
+  figure.plate img { max-width: 174mm; max-height: 228mm; }
+  figure.plate figcaption { text-align: center; }
+  figcaption { font-family: "Liberation Sans", Arial, sans-serif; font-size: 8pt; color: #6b7280;
+               margin-top: 2mm; text-align: left; line-height: 1.35; }
+  figcaption b { color: #4338ca; }
+
+  .callout { border: 0.5pt solid #c7d2fe; background: #f5f3ff; border-left: 2.5pt solid #4338ca;
+             padding: 2.6mm 3mm; margin: 0 0 3.5mm; font-size: 9.4pt; break-inside: avoid; }
+  .callout p:last-child { margin-bottom: 0; }
+  .callout .lbl { font-family: "Liberation Sans", Arial, sans-serif; font-size: 7.5pt;
+                  font-weight: bold; letter-spacing: 0.6pt; text-transform: uppercase;
+                  color: #4338ca; display: block; margin-bottom: 1.2mm; }
+  .warn { border-color: #fecaca; background: #fef2f2; border-left-color: #b91c1c; }
+  .warn .lbl { color: #b91c1c; }
+
+  .miss { color: #b91c1c; font-weight: bold; }
+  .met  { color: #047857; font-weight: bold; }
+  ul, ol { margin: 0 0 3mm; padding-left: 6mm; }
+  li { margin-bottom: 1.2mm; }
+
+  /* ---- title page ---- */
+  /* Absolute positioning rather than flex: WeasyPrint's flex support is partial,
+     and the cover only needs "meta block pinned to the foot of page 1". */
+  .cover { height: 297mm; padding: 30mm 22mm 20mm; box-sizing: border-box; position: relative; }
+  .cover .rule { height: 3pt; background: #4338ca; width: 34mm; margin-bottom: 9mm; }
+  .cover h1 { font-size: 33pt; margin: 0 0 3mm; color: #312e81; letter-spacing: -0.4pt; }
+  .cover .tag { font-family: "Liberation Sans", Arial, sans-serif; font-size: 13pt;
+                color: #4b5563; line-height: 1.4; margin: 0 0 7mm; max-width: 150mm; }
+  .cover .lede { font-size: 11pt; color: #374151; max-width: 152mm; margin: 0 0 5mm; }
+  .cover .meta { position: absolute; bottom: 22mm; left: 22mm; right: 22mm;
+                 font-family: "Liberation Sans", Arial, sans-serif; font-size: 9pt;
+                 color: #4b5563; border-top: 0.5pt solid #d1d5db; padding-top: 4mm; }
+  .cover .meta table { font-size: 9pt; margin: 0; }
+  .cover .meta td { border: none; padding: 0.9mm 0; }
+  .cover .meta td.k { color: #6b7280; width: 34mm; }
+  .badges { font-family: "Liberation Sans", Arial, sans-serif; font-size: 8pt; color: #4338ca;
+            margin-bottom: 7mm; }
+  .badges span { border: 0.5pt solid #c7d2fe; background: #eef2ff; padding: 1mm 2mm;
+                 margin-right: 1.5mm; border-radius: 2pt; }
+
+  /* ---- table of contents ---- */
+  .toc { font-family: "Liberation Sans", Arial, sans-serif; font-size: 9.2pt; }
+  .toc table { font-size: 9.2pt; }
+  .toc td { border: none; padding: 1.1mm 0; }
+  .toc td.n { color: #6b7280; width: 8mm; }
+  .toc td.req { color: #6b7280; text-align: right; font-size: 8pt; width: 26mm; }
+</style>
+</head>
+<body>
+
+<div class="cover">
+  <div class="rule"></div>
+  <h1>ControlPlane.ai</h1>
+  <p class="tag">A real-time AI oversight gateway. Every LLM response is checked across
+     performance, cost, and responsibility before a decision to pass, edit, block, or escalate it.</p>
+  <div class="badges">
+    <span>Python 3.12 · 3.14</span><span>FastAPI</span><span>Apache-licensed models</span><span>36 ADRs ruled</span>
+  </div>
+  <p class="lede">Point an OpenAI-compatible client at one URL and select a policy with one header.
+     The same response can be edited for a support bot, blocked for an HR copilot, and escalated for
+     a finance advisor. The difference is YAML configuration, not application code.</p>
+  <p class="lede"><b>This document is the project README.</b> It follows the section order of the
+     README template supplied with the challenge brief, adapted for a standalone gateway service
+     rather than a Drupal module.</p>
+  <div class="meta">
+    <table>
+      <tr><td class="k">Submission</td><td>Accenture Innovation Challenge 2026 · Round 2 · Problem Track 1</td></tr>
+      <tr><td class="k">Team</td><td>b24bb1029 · Indian Institute of Technology Jodhpur</td></tr>
+      <tr><td class="k">Repository</td><td>github.com/harshitsaini17/controlplane-ai</td></tr>
+      <tr><td class="k">Status</td><td>Round 2 prototype. Every figure in this document is a measurement, reproducible by a command in the repository.</td></tr>
+    </table>
+  </div>
+</div>
+
+<h2 class="cont">Introduction</h2>
+
+<p>Enterprises run many AI use cases at once — customer chatbots, internal copilots, decision
+support in regulated workflows — and each carries a different risk signature. Oversight today is
+fragmented and after the fact: quality is evaluated offline weeks later, cost overruns surface at
+month end, and bias or data leakage appears in an annual audit. There is no unified layer that
+inspects every response across accuracy, cost, and responsibility <i>before delivery</i>, and no way
+to vary that inspection per use case, geography, or risk appetite without rewriting code.</p>
+
+<p>ControlPlane.ai is that layer. It is a reverse proxy that sits between an application and its
+LLM provider. It intercepts each response at the sentence boundary, runs a set of budgeted detectors
+across three planes, converges their signals in a single policy engine, and returns exactly one
+verdict — <b>pass</b>, <b>edit</b>, <b>block</b>, or <b>escalate</b> — before the user sees anything.
+Every decision is written to an append-only audit record naming the signals that drove it and the
+policy version that judged it.</p>
+
+<p>The headline feature is that the policy is configuration. Thresholds, the label-to-action map,
+failure posture, geography, and budgets all live in per-use-case YAML, and the engine contains no
+use-case conditionals at all. One identical response therefore receives different verdicts in
+different pipelines with no code difference — which is what makes it a control <i>plane</i> rather
+than a content filter.</p>
+
+<div class="callout">
+  <span class="lbl">Project page and issue queue</span>
+  <p>Source, issue tracker, and CI live at
+  <b>github.com/harshitsaini17/controlplane-ai</b>. Bug reports and feature suggestions belong in
+  that repository's issue queue at <b>/issues</b>. Design decisions are tracked in the repository
+  itself rather than in an external tracker: <code>docs/03-decisions.md</code> is the dated ADR log,
+  and <code>docs/08-open-questions.md</code> is the public ledger of deviations, standing
+  limitations, and logged minor resolutions.</p>
+</div>
+
+<h3>Scope of this prototype</h3>
+
+<p>This is a hackathon Round 2 prototype, and the boundary is drawn deliberately. Prototype-grade
+engineering is acceptable; fabricated results are not. Every number presented here — latency,
+detection rates, cost — comes from a measurement harness in the repository, and two of those numbers
+are published misses. There is no production HA or orchestration, no inspection of model internals,
+no real personal data anywhere in the corpus, and no custom model training. The
+<a href="#limitations">Known limitations</a> section is a complete register of what does not work
+rather than a selection of what does.</p>
+
+<h2>Table of contents</h2>
+
+<div class="toc">
+<table>
+  <tr><td class="n">1</td><td><b>Introduction</b></td><td class="req">required</td></tr>
+  <tr><td class="n">2</td><td>Table of contents</td><td class="req">optional</td></tr>
+  <tr><td class="n">3</td><td><b>Requirements</b></td><td class="req">required</td></tr>
+  <tr><td class="n">4</td><td><b>Installation</b></td><td class="req">required</td></tr>
+  <tr><td class="n">5</td><td><b>Configuration</b> — policy as data, and the signature moment</td><td class="req">required</td></tr>
+  <tr><td class="n">6</td><td>Architecture — planes, interception, and lane isolation</td><td class="req">supplementary</td></tr>
+  <tr><td class="n">7</td><td>How a verdict is computed</td><td class="req">supplementary</td></tr>
+  <tr><td class="n">8</td><td>Detectors and signals</td><td class="req">supplementary</td></tr>
+  <tr><td class="n">9</td><td>Interfaces</td><td class="req">supplementary</td></tr>
+  <tr><td class="n">10</td><td>Audit and evidence</td><td class="req">supplementary</td></tr>
+  <tr><td class="n">11</td><td>Measured results</td><td class="req">supplementary</td></tr>
+  <tr><td class="n">12</td><td>Known limitations — what does not ship</td><td class="req">supplementary</td></tr>
+  <tr><td class="n">13</td><td>Troubleshooting</td><td class="req">optional</td></tr>
+  <tr><td class="n">14</td><td>Frequently asked questions</td><td class="req">optional</td></tr>
+  <tr><td class="n">15</td><td>Maintainers</td><td class="req">optional</td></tr>
+</table>
+</div>
+
+<p>Sections 1, 3, 4, and 5 are the template's required set and appear in its order. Sections 6 to 12
+are additions this project needs: a gateway that makes claims about latency and detection accuracy
+has to show its architecture and its measurements, and the limitations register is what keeps those
+claims honest.</p>
+<h2>Requirements</h2>
+
+<p>The gateway is a single Python process with no external service dependencies. There is no
+database server, message broker, or orchestrator to stand up — audit storage is SQLite, and the
+review queue and cost ledger are tables inside it.</p>
+
+<h3>Runtime</h3>
+
+<table>
+  <tr><th>Component</th><th>Requirement</th><th>Notes</th></tr>
+  <tr><td>Python</td><td>3.12 or 3.14</td><td>Both are exercised by the CI matrix. Verified on 3.14.6, Arch Linux.</td></tr>
+  <tr><td>Operating system</td><td>Linux or macOS</td><td>Developed and measured on Linux. Nothing is platform-specific by design.</td></tr>
+  <tr><td>CPU</td><td>x86-64, no GPU</td><td>The latency budgets are CPU budgets. A GPU is not used and not required.</td></tr>
+  <tr><td>Disk</td><td>≈2.5 GB with the model stack</td><td>ONNX runtime, a sentence-transformer, and the spaCy NER model dominate this.</td></tr>
+  <tr><td>Network</td><td>Only for the upstream provider</td><td>Air-gapped operation works with a local model; see the deployment note below.</td></tr>
+</table>
+
+<h3>Python dependencies</h3>
+
+<p>Declared in <code>pyproject.toml</code> across four extras, so an install can be scoped to what
+is actually being done.</p>
+
+<table>
+  <tr><th>Extra</th><th>Brings</th><th>Needed for</th></tr>
+  <tr><td><code>(base)</code></td><td>FastAPI, uvicorn, pydantic, PyYAML, httpx</td><td>The gateway, policy loading, audit writes</td></tr>
+  <tr><td><code>[dev]</code></td><td>pytest, coverage, linting</td><td>The test suite, the freeze gate, contract tests</td></tr>
+  <tr><td><code>[ml]</code></td><td>onnxruntime, sentence-transformers, spaCy, presidio</td><td>Tier-2 detectors, grounding, NER enrichment</td></tr>
+  <tr><td><code>[dashboard]</code></td><td>Console page dependencies</td><td><code>GET /console</code> and the demo reveals</td></tr>
+</table>
+
+<div class="callout warn">
+  <span class="lbl">Install CPU-only torch first</span>
+  <p>Two version floors are constrained by Python 3.14 and must not be lowered:
+  <code>pydantic&gt;=2.13</code> (earlier <code>pydantic-core</code> has no cp314 wheel) and
+  <code>spacy&gt;=3.8.7</code> (earlier releases declare <code>Requires-Python &lt;3.13</code>).</p>
+  <p>Install <code>torch</code> from the CPU index <i>before</i> the extras. Skipping that step makes
+  pip resolve the full CUDA stack — several gigabytes — for no benefit whatever, because the
+  documented latency budgets are CPU budgets.</p>
+</div>
+
+<h3>Model stack</h3>
+
+<p>All detector models are permissively licensed and run locally. Nothing is sent to a third-party
+classification service, which is what makes the responsibility plane viable in an air-gapped
+deployment.</p>
+
+<table>
+  <tr><th>Purpose</th><th>Model / library</th><th>Runtime</th></tr>
+  <tr><td>PII detection and spans</td><td>Presidio recognizers plus repo-owned patterns</td><td>Deterministic, CPU</td></tr>
+  <tr><td>NER for entity enrichment</td><td>spaCy <code>en_core_web_sm</code></td><td>CPU; a separate download step</td></tr>
+  <tr><td>Prompt-injection classification</td><td>ONNX classifier over strided windows</td><td>onnxruntime, CPU</td></tr>
+  <tr><td>Toxicity classification</td><td>ONNX classifier, per output sentence</td><td>onnxruntime, CPU</td></tr>
+  <tr><td>RAG grounding</td><td>Sentence-transformer embeddings</td><td>CPU</td></tr>
+</table>
+
+<h3>Upstream provider</h3>
+
+<p>Any OpenAI-compatible endpoint. Providers are classified by provenance, and the classification is
+load-bearing rather than cosmetic: a <b>measured</b>-class provider reports real prompt-token counts,
+so cost figures taken from it are citable, while a <b>dev</b>-class provider — a fixture or a replay
+source — reports none. That distinction travels with every audit row in an
+<code>upstream_class</code> column, so a reader can tell which figures are measurements. Serving
+requires a measured-class provider and its key; the deterministic replay demo requires neither.</p>
+
+<h2>Installation</h2>
+
+<h3>1 — Light install: tests, schemas, policies, audit</h3>
+
+<p>Sufficient to run the unit and contract suites, load and validate the policies, and exercise the
+audit database. No models, so no multi-gigabyte download.</p>
+
+<pre><code>git clone https://github.com/harshitsaini17/controlplane-ai.git
+cd controlplane-ai
+python -m venv .venv
+.venv/bin/pip install -e ".[dev]"
+.venv/bin/python -m pytest -q</code></pre>
+
+<h3>2 — Full install: detectors, evaluation, console</h3>
+
+<p>Adds the model stack. The <code>torch</code> line is first on purpose, per the warning above.</p>
+
+<pre><code>.venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+.venv/bin/pip install -e ".[dev,ml,dashboard]"
+.venv/bin/python -m spacy download en_core_web_sm</code></pre>
+
+<h3>3 — Configure secrets</h3>
+
+<p>Nothing in the repository reads <code>.env</code> implicitly. That is deliberate — an implicit
+loader makes it ambiguous which credentials a given run used — so the file is sourced explicitly into
+the environment.</p>
+
+<pre><code>cp .env.example .env          # then add provider values; never commit them
+set -a; . ./.env; set +a</code></pre>
+
+<p>Three variable names are normative: <code>UPSTREAM_API_KEY</code>,
+<code>REVIEW_WEBHOOK_URL</code>, and <code>CP_DB_PATH</code>. Without the sourcing step every keyed
+provider sees an unset variable, the startup canary reports <code>UNVERIFIED</code> rather than
+satisfied, and the console chat renders a verdict with no model text behind it — the pipeline runs
+correctly and nothing answers.</p>
+
+<h3>4 — Run the gateway</h3>
+
+<pre><code>.venv/bin/uvicorn --factory controlplane.gateway.app:create_live_app --port 8080</code></pre>
+
+<p>Then open <code>http://localhost:8080/console</code>. Two details in that command are not
+stylistic. <code>--factory</code> is required because the module exposes factories and no
+module-level <code>app</code> — a module global would leave a stale policy set behind a hot reload.
+And the port is explicit because the default 8000 collides with a local OpenAI-compatible endpoint
+used during development, which would make the gateway proxy to itself.</p>
+
+<table>
+  <tr><th>Factory</th><th>Provider class</th><th>Use it for</th></tr>
+  <tr><td><code>create_live_app()</code></td><td>measured</td><td>Serving. Token counts and cost figures from this path are citable.</td></tr>
+  <tr><td><code>create_app()</code></td><td>dev</td><td>Tests, replay demo, and fault injection — paths where a fixture answers.</td></tr>
+</table>
+
+<div class="callout warn">
+  <span class="lbl">Do not promote the offline provider to fix serving</span>
+  <p>The two factories differ by provenance, not by style. Raising the offline default to a
+  measured class also re-classes every test, every replay run, and every regenerated report — and a
+  measured provider that reports no prompt tokens is a fatal startup condition by contract, which is
+  exactly what a fixture does.</p>
+</div>
+
+<h3>5 — Run the deterministic demo</h3>
+
+<pre><code>.venv/bin/python -m demo.run_script --replay</code></pre>
+
+<p>Replay is the reproducible path: it returns frozen fixtures instead of live model text, so the
+verdicts are identical on every run and the script exits nonzero if any beat fails. Live upstream
+text is nondeterministic, so a live run demonstrates the pipeline but cannot be a regression gate.</p>
+
+<h3>Verifying the install</h3>
+
+<p>Four tiers, in the order they catch problems. The reasoning behind each is in
+<code>docs/TESTING.md</code>.</p>
+
+<pre><code>.venv/bin/python -m pytest -q                        # 1. unit + contract
+.venv/bin/python -m eval.run_all                     # 2. evaluation over the frozen corpus
+.venv/bin/python -m eval.bench_latency --check       # 3. latency, nonzero exit on breach
+.venv/bin/python -m eval.fault_injection --reps 5    # 4. failure-posture invariants
+.venv/bin/python -m eval.validate_dataset --freeze   #    corpus is byte-identical to approved
+.venv/bin/python -m eval.check_derivations           #    every derived figure re-derived</code></pre>
+
+<div class="callout">
+  <span class="lbl">Measurement runs need a quiet host</span>
+  <p>Every harness stamps CPU count and load average at start and end. An artifact whose start stamp
+  exceeds the documented threshold is <b>not citable</b>, and one harness refuses to write at all
+  rather than overwrite good evidence with contaminated evidence. Do not run tests, a build, or a
+  second harness while a measurement is in flight — a published artifact was contaminated that way
+  once, which is why the stamp exists.</p>
+</div>
+<h2 id="configuration">Configuration</h2>
+
+<p>Configuration is not a settings appendix in this project — it is the product. Thresholds, the
+label-to-action map, failure posture, geography, streaming mode, and budgets all live in
+per-use-case YAML, and the policy engine contains <b>no use-case conditionals at all</b>. An
+<code>if use_case == "support_bot"</code> in Python would be a defect rather than an implementation
+detail, and the test suite treats it as one.</p>
+
+<p>Three policies ship in <code>policies/</code>, one per demo use case. Adding a fourth pipeline
+means adding a fourth file — no code change, no redeploy, no branch in the engine.</p>
+
+<h3>The policy file</h3>
+
+<pre><code># policies/support_bot.yaml — abridged
+use_case: support_bot
+policy_version: 3
+geography: EU
+risk_appetite: medium
+streaming: true
+
+thresholds:
+  tau_low: 0.35
+  tau_high: 0.70
+
+budget:
+  monthly_usd: 500
+  per_request_max_tokens: 4000
+  loop_max_requests_per_min: 20
+
+actions:
+  pii.*: edit                             # redact, then release
+  pii.api_key: block                      # a typed credential is already compromised
+  security.prompt_injection: block
+  toxicity.high: block
+  toxicity.moderate: pass
+  hallucination.ungrounded_claim: edit    # soften
+  cost.budget_exceeded: block
+default_action: pass
+borderline_action: edit                   # action inside [tau_low, tau_high)
+
+fail_mode:
+  tier1: fail_closed                      # never release unscanned personal data
+  tier2: fail_open                        # availability over strictness</code></pre>
+
+<h3>Configuration keys</h3>
+
+<table>
+  <tr><th>Key</th><th>Meaning</th><th>Consequence of changing it</th></tr>
+  <tr><td><code>policy_version</code></td><td>Monotonic version stamped into every audit record judged by this file.</td><td>The audit trail can attribute a verdict to an exact policy revision. Bump it whenever behavior changes.</td></tr>
+  <tr><td><code>streaming</code></td><td>Whether responses stream sentence-by-sentence or are fully buffered.</td><td><code>false</code> means nothing at all precedes the verdict — the correct posture for a regulated pipeline.</td></tr>
+  <tr><td><code>thresholds.tau_low</code><br><code>thresholds.tau_high</code></td><td>The uncertainty band for confidence-kind scores.</td><td>Above <code>tau_high</code> the signal is dropped; below <code>tau_low</code> the mapped action applies; between them <code>borderline_action</code> decides.</td></tr>
+  <tr><td><code>actions</code></td><td>Label-to-action map. Specific keys beat wildcards.</td><td>The primary control surface. <code>pii.*: edit</code> with <code>pii.api_key: block</code> redacts ordinary personal data but refuses a leaked credential outright.</td></tr>
+  <tr><td><code>default_action</code></td><td>Action for a label with no entry.</td><td>Determines whether an unmapped label is permissive or restrictive by default.</td></tr>
+  <tr><td><code>borderline_action</code></td><td>Action inside the uncertainty band.</td><td>Encodes risk appetite directly: the same ambiguous score becomes <code>edit</code>, <code>pass</code>, or <code>escalate</code> depending only on this line.</td></tr>
+  <tr><td><code>fail_mode.tier1</code><br><code>fail_mode.tier2</code></td><td>What happens when a detector class times out or crashes.</td><td>A per-use-case decision, never an engineering preference. Flipping one is a policy-version change; changing the mechanism is a protocol deviation.</td></tr>
+  <tr><td><code>budget</code></td><td>Monthly spend ceiling, per-request token cap, and loop rate limit.</td><td>Read pre-dispatch against the cost ledger, so a budget refusal costs zero upstream tokens.</td></tr>
+  <tr><td><code>geography</code>, <code>risk_appetite</code></td><td>Jurisdiction and posture metadata.</td><td>Carried into the audit record so a decision can be explained in its regulatory context.</td></tr>
+</table>
+
+<div class="callout warn">
+  <span class="lbl">YAML 1.1 quoting trap</span>
+  <p>PyYAML parses YAML 1.1, where bare <code>on</code> and <code>off</code> are booleans. Any
+  policy value that is the literal string <code>on</code> or <code>off</code> — the
+  <code>consistency</code> and <code>cascade_probe</code> settings — must be <b>quoted</b>.
+  <code>streaming</code> is a genuine boolean and stays unquoted.</p>
+</div>
+
+<h3>The three shipped policies, compared</h3>
+
+<p>Every row below is a difference in data. None of them is a difference in code.</p>
+
+<table>
+  <tr><th>Setting</th><th><code>support_bot</code></th><th><code>hr_copilot</code></th><th><code>finance_advisor</code></th></tr>
+  <tr><td><code>policy_version</code></td><td class="num">3</td><td class="num">1</td><td class="num">4</td></tr>
+  <tr><td><code>streaming</code></td><td>true</td><td>true</td><td><b>false</b> — nothing precedes the verdict</td></tr>
+  <tr><td><code>pii.*</code></td><td><code>edit</code></td><td><code>block</code></td><td><code>escalate</code></td></tr>
+  <tr><td><code>borderline_action</code></td><td><code>edit</code></td><td><code>pass</code></td><td><code>escalate</code></td></tr>
+  <tr><td><code>fail_mode.tier1</code></td><td>fail_closed</td><td>fail_closed</td><td>fail_closed</td></tr>
+  <tr><td><code>fail_mode.tier2</code></td><td>fail_open</td><td>fail_open</td><td><b>fail_closed</b></td></tr>
+  <tr><td>Monthly budget</td><td>$500</td><td>$800</td><td>strict</td></tr>
+  <tr><td>Signature verdict</td><td><b>EDIT</b></td><td><b>BLOCK</b></td><td><b>ESCALATE</b></td></tr>
+</table>
+
+<h3>Selecting a policy at request time</h3>
+
+<p>One header. The client change is a <code>base_url</code> and that header; nothing else in the
+calling application moves.</p>
+
+<pre><code>PROMPT='Confirm the record on file.'
+
+curl -sS http://localhost:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'X-ControlPlane-Use-Case: support_bot' \
+  -d "{\"model\":\"small\",\"messages\":[{\"role\":\"user\",\"content\":\"$PROMPT\"}]}"
+# verdict = EDIT      — the SSN is rendered as [REDACTED:ssn]
+
+curl -sS http://localhost:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'X-ControlPlane-Use-Case: hr_copilot' \
+  -d "{\"model\":\"small\",\"messages\":[{\"role\":\"user\",\"content\":\"$PROMPT\"}]}"
+# verdict = BLOCK     — personal data withheld under the hr_copilot policy
+
+curl -sS http://localhost:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'X-ControlPlane-Use-Case: finance_advisor' \
+  -d "{\"model\":\"small\",\"messages\":[{\"role\":\"user\",\"content\":\"$PROMPT\"}]}"
+# verdict = ESCALATE  — quarantined and routed for human verification</code></pre>
+
+<p>Same content, three policies, zero code difference. The verdicts above are the replay-verified
+values for frozen fixture PII-001; live upstream text is nondeterministic, so a live run shows the
+same mechanism against different words.</p>
+
+<figure class="plate">
+  <img src="p2-signature.png" alt="One identical response and one identical signal set produce three different verdicts under three policies.">
+  <figcaption><b>Figure 1 — the signature moment.</b> One response, one multi-label signal, one build. Three policies, three verdicts. Nothing but YAML differs between the branches.</figcaption>
+</figure>
+
+<h3>Failure posture is also configuration</h3>
+
+<p>When a detector times out or crashes, the gateway synthesizes an <i>operational failure record</i>
+— explicitly never a content signal, because conflating the two would let an infrastructure event
+appear in the audit trail as a risk finding. The policy's <code>fail_mode</code> for that detector
+class then decides what happens, and the two shipped answers are opposites.</p>
+
+<p>Under <code>fail_open</code> the failure is logged, a counter increments, the missing detector's
+signals are simply absent, and the response is released — availability chosen over strictness, with
+the gap visible in the audit record. Under <code>fail_closed</code> the synthesized failure maps to
+<b>escalate</b>, never to a silent block, so a human sees the response and the reason it was held.</p>
+
+<figure class="plate">
+  <img src="p4-failmodes.png" alt="An identical injected detector fault produces a pass under one policy and a quarantine under another.">
+  <figcaption><b>Figure 2 — failure posture is per-use-case policy.</b> The same injected timeout releases the response under <code>fail_open</code> and quarantines it under <code>fail_closed</code>. Reproduce with <code>eval.fault_injection</code>, which exits nonzero if any invariant breaks.</figcaption>
+</figure>
+
+<h3>Changing configuration without a restart</h3>
+
+<pre><code>curl -sS http://localhost:8080/admin/policies              # active versions
+curl -sS -X POST http://localhost:8080/admin/policies/reload</code></pre>
+
+<p>Policies are validated against their schema on load, so an invalid file is rejected rather than
+partially applied. Because <code>policy_version</code> is stamped into each audit record at decision
+time, a reload leaves earlier records attributable to the exact policy that judged them — the audit
+trail does not retroactively change its mind.</p>
+<h2>Architecture</h2>
+
+<p>One FastAPI process, three planes of checks, exactly one verdict per unit of text. The planes are
+<b>signal families, not separate services</b>: detectors emit independent evidence, and only the
+policy engine converges it. Keeping them separate is what allows a single sentence to be a
+performance problem and a responsibility problem at the same time without either finding suppressing
+the other.</p>
+
+<table>
+  <tr><th>Plane</th><th>Fast path — synchronous, per sentence or request</th><th>Deep lane — asynchronous, sampled</th></tr>
+  <tr><td><b>Performance</b></td><td>RAG grounding score, numeric-claim check</td><td>Semantic-entropy clustering, drift statistics</td></tr>
+  <tr><td><b>Cost</b></td><td>Budget gate, token estimate, routing choice</td><td>Cost-per-outcome aggregation, loop analytics</td></tr>
+  <tr><td><b>Responsibility</b></td><td>Tier-1 PII and blocklist; Tier-2 injection on input, toxicity on output</td><td>Fairness spot checks, safety-taxonomy sampling</td></tr>
+</table>
+
+<figure class="plate">
+  <img src="p1-overview.png" alt="Client request enters the gateway, passes the input lane, is dispatched upstream, and each response sentence is checked by detectors across three planes before the policy engine issues one verdict.">
+  <figcaption><b>Figure 3 — system overview.</b> One process. The input lane can refuse a request before it costs an upstream token; the output path checks each sentence before any of it is released.</figcaption>
+</figure>
+
+<h3>Interception granularity</h3>
+
+<p>Checks run on a <b>sentence buffer</b> — not token by token, and not on the finished response.
+Both alternatives are easier to build and both break something load-bearing. Token-level checking
+cannot see a claim, because a claim is not present until a clause completes. Full-response checking
+can see everything but has already streamed a flagged sentence to the user by the time it decides.
+The sentence boundary is the smallest unit at which the guarantee holds: <b>for a flagged sentence,
+no part of it reaches the client</b>.</p>
+
+<p>The input lane runs before dispatch, which gives the cost plane something the output path cannot
+offer. A prompt that trips the blocklist, carries an injection attempt, or exceeds the monthly budget
+is refused for <b>zero upstream tokens</b> — the cheapest possible interception is the one that
+happens before the provider is called at all.</p>
+
+<h3>Fast lane and deep lane</h3>
+
+<p>Expensive analysis is genuine oversight, but it cannot be on the hot path. Semantic entropy takes
+seconds, and no latency budget survives it. The split is therefore enforced rather than intended, and
+it has two halves that are easy to conflate: <b>nothing in the request lifecycle awaits the deep
+lane</b>, and <b>the deep lane may never alter a verdict already delivered</b>. Its findings change
+the <i>next</i> request, through the feedback loop and a proposed policy diff — never the one that has
+already been answered.</p>
+
+<p>A sampled copy of each request, response, and signal set is handed to an in-process queue and
+forgotten. Sampling rate is per-policy. What comes back enriches the audit record and the console
+panels; a post-hoc re-decision would make the audit trail disagree with what the user was actually
+served, which is the specific failure this boundary exists to prevent.</p>
+
+<figure class="plate">
+  <img src="p5-lanes.png" alt="The fast lane runs inside the request lifecycle; a sampled copy is passed to an unbudgeted deep lane that enriches the audit record and feeds the next policy version, but never alters a delivered verdict.">
+  <figcaption><b>Figure 4 — lane isolation.</b> The forbidden edge is drawn deliberately: no hot-path await on the deep lane, and no post-hoc change to a verdict already delivered.</figcaption>
+</figure>
+
+<h2>How a verdict is computed</h2>
+
+<p>One deterministic path from a set of signals to exactly one verdict. Identical inputs give an
+identical verdict, and the steps are fixed for every use case — the policy supplies the numbers and
+the mappings, never the control flow.</p>
+
+<figure class="plate">
+  <img src="p3-engine.png" alt="Five-step policy engine: map labels to actions, apply band logic to confidence-kind scores only, take the most severe surviving action, check editability, then stamp the audit record.">
+  <figcaption><b>Figure 5 — the policy engine algorithm.</b> Score polarity is typed, so a deterministic detection can never be dropped by a confidence threshold; and an edit with nothing to edit is promoted to escalate rather than passed.</figcaption>
+</figure>
+
+<table>
+  <tr><th>Step</th><th>What happens</th></tr>
+  <tr><td><b>1 — map</b></td><td>Each label resolves to an action: a specific key beats a wildcard, which beats <code>default_action</code>. A signal's action is the most severe across its own labels.</td></tr>
+  <tr><td><b>2 — band</b></td><td>Applies to <b>confidence</b>-kind scores only. Above <code>tau_high</code> the signal is dropped; between the thresholds <code>borderline_action</code> decides; below <code>tau_low</code> the mapped action stands. <b>Detection</b>-kind scores bypass this entirely.</td></tr>
+  <tr><td><b>3 — converge</b></td><td>The most severe surviving action wins: <b>block &gt; escalate &gt; edit &gt; pass</b>. If nothing survived, the verdict is <b>pass</b>.</td></tr>
+  <tr><td><b>4 — editability</b></td><td>An <b>edit</b> is only an edit if there is something to edit — a span, or a full output sentence. Otherwise it is <b>promoted to escalate</b>. Transforms redact at <code>pii.*</code> spans or soften a claim, then Tier-1 PII re-runs as a guard on the result.</td></tr>
+  <tr><td><b>5 — stamp</b></td><td>Verdict, contributing signal ids, and <code>policy_version</code> are written to the audit record — stored, not recomputed later.</td></tr>
+</table>
+
+<p>Two of those steps answer the questions reviewers actually ask. <b>Score polarity is typed</b>, so
+a deterministic regex hit scoring 1.0 can never be silently discarded by a confidence threshold —
+band logic is defined for confidence-kind signals and does not touch detection-kind ones. And an
+<b>edit with no editable extent is promoted, never downgraded</b>: a span-less signal mapped to
+<code>edit</code> becomes <code>escalate</code>, so a configuration that cannot be carried out fails
+toward human review rather than toward release.</p>
+
+<h2>Detectors and signals</h2>
+
+<p>Detectors emit evidence. They never choose actions — that separation is precisely what keeps
+policy in configuration, because a detector that decided anything would be a use-case conditional
+written in Python.</p>
+
+<table>
+  <tr><th>Detector</th><th>Stage</th><th>Plane</th><th>Emits</th></tr>
+  <tr><td><code>tier1_pii</code></td><td>input + output sentence</td><td>responsibility</td><td><code>pii.*</code> — span-accurate, so redaction is possible</td></tr>
+  <tr><td><code>tier1_blocklist</code></td><td>input + output sentence</td><td>responsibility</td><td><code>security.blocklist</code></td></tr>
+  <tr><td><code>tier2_injection</code></td><td>input</td><td>responsibility</td><td><code>security.prompt_injection</code> — ONNX classifier, max over strided windows for full input coverage</td></tr>
+  <tr><td><code>tier2_toxicity</code></td><td>output sentence</td><td>responsibility</td><td><code>toxicity.moderate</code> / <code>toxicity.high</code></td></tr>
+  <tr><td><code>rag_grounding</code></td><td>output sentence</td><td>performance</td><td><code>hallucination.ungrounded_claim</code> — only when the request carries context documents</td></tr>
+  <tr><td><code>numeric_claims</code></td><td>output sentence</td><td>performance</td><td><code>hallucination.unsourced_numeric</code> — quantity-shaped numerals with no citation marker</td></tr>
+  <tr><td><code>fast_consistency</code></td><td>output full</td><td>performance</td><td><code>hallucination.low_confidence</code> — <span class="miss">specified, not shipped (SL-6)</span></td></tr>
+  <tr><td><code>cost_budget</code></td><td>input</td><td>cost</td><td><code>cost.*</code> — ledger lookup plus a token estimate</td></tr>
+  <tr><td><code>loop_guard</code></td><td>input</td><td>cost</td><td><code>cost.loop_detected</code></td></tr>
+  <tr><td><code>conv_tracker</code></td><td>conversation</td><td>responsibility</td><td><code>conversation.cumulative_risk</code></td></tr>
+  <tr><td><code>entity_enricher</code></td><td>enrichment</td><td>responsibility</td><td>appends <code>privacy.person</code> to an existing signal</td></tr>
+</table>
+
+<p>Per-detector latency budgets are normative in the detection spec; measured P99s are in
+<a href="#results">Measured results</a>. What each detector actually ran — and what was expected and
+did not run — is recorded per request, so <b>absence of coverage is a fact a reader can see rather
+than infer</b>.</p>
+
+<h3>Signals are multi-label</h3>
+
+<p>A single sentence can be a fabrication <i>and</i> a privacy exposure at once. The naive design
+emits two signals and correlates them afterwards, which double-counts the same text and makes the
+audit record ambiguous about how many findings there were. Instead <b>one signal carries labels from
+multiple planes</b>, and enrichment <i>appends to</i> that signal rather than emitting alongside it:
+NER over the span and its sentence window finds a person, and <code>privacy.person</code> joins the
+existing <code>hallucination.ungrounded_claim</code> on the same signal. Two planes, one finding, one
+convergence.</p>
+
+<h2>Interfaces</h2>
+
+<p>The integration surface is deliberately one line of client change: a <code>base_url</code> and a
+header.</p>
+
+<table>
+  <tr><th>Endpoint</th><th>Purpose</th></tr>
+  <tr><td><code>POST /v1/chat/completions</code></td><td>OpenAI-compatible proxy. <code>X-ControlPlane-Use-Case</code> selects the policy; <code>X-ControlPlane-Conversation-Id</code> enables conversation tracking; body <code>controlplane.context</code> supplies source documents for grounding.</td></tr>
+  <tr><td><code>GET /metrics</code></td><td>Metrics snapshot read by the console and the demo reveals.</td></tr>
+  <tr><td><code>GET /admin/review?status=pending</code></td><td>The quarantine queue. PII spans are pre-redacted in the listing, and each item is labelled by escalation cause.</td></tr>
+  <tr><td><code>POST /admin/review/{review_id}</code></td><td>Human override. Approve releases the stored response; reject confirms the catch. Both append to the audit lineage with a reviewer note.</td></tr>
+  <tr><td><code>GET /admin/requests</code><br><code>GET /admin/requests/{request_id}</code></td><td>Read-only forensic trace for a single request.</td></tr>
+  <tr><td><code>GET /admin/policies</code><br><code>POST /admin/policies/reload</code></td><td>Active policy versions, and hot reload so behavior changes without a restart.</td></tr>
+  <tr><td><code>GET /console</code></td><td>Same-origin console pages served by the gateway itself.</td></tr>
+</table>
+
+<p>Response shapes carry the verdict explicitly rather than hiding it. An edited response is flagged
+in a header. A block returns HTTP 200 with the policy's configured fallback and
+<code>finish_reason: content_filter</code>, so an OpenAI-compatible client handles it as a normal
+completion. An escalation returns HTTP 202 with a <code>review_id</code>. Errors never include prompt
+or response content.</p>
+
+<div class="callout warn">
+  <span class="lbl">The admin API has no authentication in v1</span>
+  <p>It is a localhost demo surface. This is a stated limitation rather than an oversight, and it is
+  the first thing to fix before this is exposed on any network — the review endpoints can release
+  quarantined content, and <code>/admin/requests</code> reads the forensic trace.</p>
+</div>
+
+<h2>Audit and evidence</h2>
+
+<p>Oversight that cannot be inspected afterwards is not oversight. Every request writes one
+append-only record naming which signals drove the verdict, which policy version judged it, which
+detectors ran, and what it cost. Storage is SQLite across four tables:
+<code>audit_records</code>, <code>review_items</code>, <code>deep_audit_results</code>, and
+<code>cost_ledger</code>.</p>
+
+<p>Three invariants hold across that schema, and each exists because its opposite is a plausible
+mistake.</p>
+
+<ul>
+  <li><b>Exactly one column may hold verbatim model output</b> — <code>review_items.quarantined_text</code>
+  — and PII is masked before it is written. Everywhere else, the audit trail records the
+  <i>category and fact</i> of a detection, never the matched value. A privacy tool that leaks
+  personal data into its own logs has defeated itself.</li>
+  <li><b>A detector fault is never a content signal.</b> Operational failures live in their own
+  column, so an infrastructure timeout cannot appear in the trail as though it were a risk finding.</li>
+  <li><b>What drove a verdict is stored, not recomputed.</b> An audit read therefore cannot quietly
+  disagree with the decision it describes — including after a policy reload changes the thresholds
+  that would apply today.</li>
+</ul>
+
+<p>Provenance travels with each row too. <code>upstream_class</code> records whether a
+<b>measured</b> or <b>dev</b> provider answered, <code>model_used</code> records the concrete
+provider model id rather than a tier name, and <code>record_status</code> distinguishes a complete
+record from a partial one so a crash mid-request is visible instead of silently absent.</p>
+
+<h3>The loop closes</h3>
+
+<p>An escalation is not a dead end. A human decides, the decisions are aggregated per label, and a
+threshold utility proposes a YAML diff. <b>Nothing is ever auto-applied</b> — a human applies the
+diff, <code>policy_version</code> bumps, and the diff itself becomes the audit trail for why the
+policy changed. An oversight system that retuned its own thresholds unattended would have no
+accountable author for its behavior.</p>
+<h2 id="results">Measured results</h2>
+
+<p>Every figure below is produced by a command in the repository, on a quiet host, over the frozen
+corpus. Two of them are <span class="miss">misses</span>, and they are published as misses.</p>
+
+<table>
+  <tr><th>Metric</th><th>Measured</th><th>Target</th></tr>
+  <tr><td>Engine conformance</td><td>840/840 decisions — 280 cases × 3 policies, perfect detection assumed</td><td class="met">≥ 0.90 — met</td></tr>
+  <tr><td>Tier-1 PII precision</td><td>1.000</td><td>Report honestly</td></tr>
+  <tr><td>Tier-1 PII recall</td><td>0.8852 — all 7 misses are the documented bare-7-digit exclusion</td><td class="miss">0.95 — MISSED, target unmoved</td></tr>
+  <tr><td>Injection detector</td><td>Precision 1.000 / recall 0.150 — blind first contact</td><td>No numeric target</td></tr>
+  <tr><td>End-to-end policy agreement</td><td>0.851 / 0.851 / 0.825 over 194 of 280 cases; partial coverage and masked detector failures remain</td><td class="met">≥ 0.80 per pipeline — met</td></tr>
+  <tr><td>Input-lane hold</td><td>P99 27.49 ms, n = 200</td><td class="met">P99 &lt; 50 ms — met</td></tr>
+  <tr><td>Detector P99s</td><td>blocklist 0.020 ms · PII 0.133 ms · numeric 0.277 ms · toxicity 23.741 ms · injection 25.348 ms</td><td>Tier-1 &lt; 1 ms; numeric &lt; 5 ms; Tier-2 &lt; 25 ms — <span class="miss">injection MISSED</span></td></tr>
+  <tr><td>Fault injection</td><td>In-process 5/5 runs at 39/39; separate processes 3/5 clean and two at 38/39</td><td>All 39 invariants per run</td></tr>
+  <tr><td>Cascade cost curve</td><td>+50% at f = 0; +25% at f = 0.25; break-even f = 0.50; loss above it</td><td>No point target; f is <b>not computed</b> because the router does not ship</td></tr>
+</table>
+
+<h3>Reproducing them</h3>
+
+<table>
+  <tr><th>Command</th><th>Produces</th></tr>
+  <tr><td><code>.venv/bin/python -m eval.run_all</code></td><td>Per-detector precision/recall/F1 and both policy matrices → <code>reports/eval_report.md</code></td></tr>
+  <tr><td><code>.venv/bin/python -m eval.bench_latency --check</code></td><td>Latency table → <code>reports/latency_report.md</code>; exits nonzero on a budget breach</td></tr>
+  <tr><td><code>.venv/bin/python -m eval.fault_injection --reps 5</code></td><td>Failure-posture invariants → <code>reports/fault_injection_report.md</code></td></tr>
+  <tr><td><code>.venv/bin/python -m eval.cost_simulation</code></td><td>The cascade cost curve → <code>reports/cost_report.md</code></td></tr>
+  <tr><td><code>.venv/bin/python -m eval.check_derivations</code></td><td>Re-derives every figure a document claims to have derived</td></tr>
+</table>
+
+<div class="callout">
+  <span class="lbl">The rule these numbers rest on</span>
+  <p><b>First contact is blind. Nothing is tuned toward a target, and a target is never moved to
+  accommodate a result.</b> The evaluation corpus is frozen and byte-checked before anything is
+  computed, so a case cannot be edited as a fix — only through a new freeze cycle. When a revision
+  improves a figure, the earlier column is retained rather than replaced. A missed target becomes a
+  registered limitation, which is why two rows above are red and the targets beside them are
+  unchanged.</p>
+  <p>The check that enforces this hardest is <code>check_derivations</code>, which reports three
+  outcomes rather than two: OK, MISMATCH, and <b>NO SOURCE</b> — a document claiming a figure its
+  artifacts cannot produce. Such a figure gains a derivation or loses the claim; there is no third
+  state.</p>
+</div>
+
+<h3>What makes this different</h3>
+
+<ul>
+  <li>One policy engine converges performance, cost, and responsibility signals into a single verdict,
+  rather than three tools reporting separately after the fact.</li>
+  <li>Uncertainty bands <i>and</i> detector-failure posture are both per-use-case policy, including
+  fail-open and fail-closed behavior.</li>
+  <li>Signals are multi-label, so overlapping risks stay independent until convergence instead of one
+  suppressing the other.</li>
+  <li>Interception is at the sentence boundary, so a flagged sentence is acted on before any part of it
+  is released — and the input lane can refuse a request before it costs an upstream token.</li>
+  <li>The OpenAI-compatible boundary is provider-neutral, supporting cloud, local, and air-gapped
+  shapes. Local fallback is verified on the owner host only.</li>
+  <li>Claims are auditable: the corpus is frozen, first contact is blind, revisions retain earlier
+  columns, and misses remain published.</li>
+</ul>
+
+<h2 id="limitations">Known limitations — what does not ship</h2>
+
+<p>This register exists so prototype limits are reviewable rather than presented as completed
+capability. It is complete, not a selection: ten IDs, of which one is closed.</p>
+
+<table>
+  <tr><th>ID</th><th>Limitation</th><th>Status and plan</th></tr>
+  <tr><td><b>SL-1</b></td><td>PII recall is 0.8852 against a 0.95 target.</td><td><b>Open</b>; target unmoved. Seven known bare-7-digit misses are the price of precision 1.000 — a deliberate trade, not an unexplained gap.</td></tr>
+  <tr><td><b>SL-2</b></td><td>Invalid NANP area codes can still fire under the v1 phone superset behavior.</td><td><b>Open</b>; precision hardening requires a new corpus freeze cycle.</td></tr>
+  <tr><td><b>SL-3</b></td><td>Price provenance requires re-verification at submission time.</td><td>Downgraded for the two bound provider model ids; comparisons against retired models remain barred.</td></tr>
+  <tr><td><b>SL-4</b></td><td>A genuinely local fallback was previously absent.</td><td class="met">Closed on the owner host with <code>llama3.2:3b</code>. No fallback latency or cost claim is made from the development host.</td></tr>
+  <tr><td><b>SL-5</b></td><td>Tier-2 latency evidence is low-concurrency.</td><td><b>Open</b>; the published single-thread column already shows breaches, and a proper load test is out of scope for the prototype.</td></tr>
+  <tr><td><b>SL-6</b></td><td><code>fast_consistency</code> is specified but not implemented.</td><td>Cut to roadmap. Context-free performance checking is the missing case — grounding requires context documents.</td></tr>
+  <tr><td><b>SL-7</b></td><td>The grounding band cannot be calibrated: <code>tau_low</code> 0.8365 ≥ <code>tau_high</code> 0.7157.</td><td><b>Open</b>; the 56/78 oracle ceiling points at a detector-model change, not at threshold tuning.</td></tr>
+  <tr><td><b>SL-8</b></td><td>Injection attributable P99 is 25.348 ms against a 25 ms budget.</td><td><b>Open</b> measured breach; target unmoved. Runtime tuning or serving hardware is roadmap.</td></tr>
+  <tr><td><b>SL-9</b></td><td>The two-plane overlap demo cut worked for only 2 of 3 policies.</td><td>Cut from the demo path after 10 repetitions. Fixture PII-001 remains the deterministic signature beat.</td></tr>
+  <tr><td><b>SL-10</b></td><td>The two-tier cascade router is not built.</td><td><b>Open</b>. Budget gating ships, but the cascade fraction <i>f</i> has no producer, so cost saving remains a curve with break-even at f = 0.50 rather than a measured saving.</td></tr>
+</table>
+
+<p>Two further boundaries are stated in the sections above rather than here, and both matter to a
+reviewer: the <b>admin API has no authentication in v1</b>, and the <b>cascade cost figures are a
+simulated curve, not an achieved saving</b>. Detailed rationale and the beat-by-beat record of what
+was cut are in <code>docs/09-engineering-notes.md</code>; the authoritative register is
+<code>docs/08-open-questions.md</code>.</p>
+
+<h3>How the project was built</h3>
+
+<p>The repository was built spec-first: contracts preceded code, AI implementation agents worked
+under a binding operating manual, an independent AI review challenged each checkpoint, and humans
+adjudicated every contract change. The ledger records <b>36</b> ADRs ruled, 32 deviations all filed
+and closed with none open, and ten registered SL IDs — SL-4 closed, leaving nine active limitations.
+Every minor resolution is logged as well, so the open-deviation count is honest rather than merely
+low.</p>
+
+<ul>
+  <li>Requirements and schemas are the contract; code does not silently redefine them.</li>
+  <li>Implementation agents must halt or log a conflict under the deviation protocol rather than
+  improvising past it.</li>
+  <li>An independent reviewer produced adversarial findings before each phase was accepted.</li>
+  <li>Human rulings changed contracts through dated ADRs — never by weakening a failing test.</li>
+</ul>
+
+<div class="callout">
+  <span class="lbl">Zero open deviations is not a health score</span>
+  <p>It means nothing is <i>undecided</i>. What is <i>missing</i> is stated in the register above and
+  in the public ledger, and it is substantial. The two claims are independent, and reading the first
+  as the second would be the wrong conclusion to draw from this repository.</p>
+</div>
+<h2>Troubleshooting</h2>
+
+<p>Every entry below is a failure that actually occurred during development, with the cause rather
+than a guess at it.</p>
+
+<h3>Installation and startup</h3>
+
+<table>
+  <tr><th>Symptom</th><th>Cause and fix</th></tr>
+  <tr><td>pip downloads several gigabytes of CUDA packages</td><td><code>torch</code> was resolved from the default index. Install it from the CPU index <i>first</i>, then the extras. The latency budgets are CPU budgets, so the CUDA stack buys nothing.</td></tr>
+  <tr><td><code>pydantic-core</code> or <code>spacy</code> fails to build a wheel</td><td>A version floor was lowered. On Python 3.14, <code>pydantic&gt;=2.13</code> and <code>spacy&gt;=3.8.7</code> are hard floors — earlier releases have no cp314 wheel or exclude 3.13+ outright.</td></tr>
+  <tr><td><code>OSError: [E050] Can't find model 'en_core_web_sm'</code></td><td>The spaCy model is a separate download, not a pip dependency. Run <code>.venv/bin/python -m spacy download en_core_web_sm</code>.</td></tr>
+  <tr><td>uvicorn reports it cannot find an attribute named <code>app</code></td><td><code>--factory</code> was omitted. The module exposes factories and no module-level <code>app</code> by design, because a module global would leave a stale policy set alive behind a hot reload.</td></tr>
+  <tr><td>Requests hang, or the gateway appears to call itself</td><td>The gateway is on port 8000, which collides with the local OpenAI-compatible endpoint used in development — so it proxies to itself. Serve on 8080.</td></tr>
+</table>
+
+<h3>Runtime</h3>
+
+<table>
+  <tr><th>Symptom</th><th>Cause and fix</th></tr>
+  <tr><td>The console chat renders a verdict but no model text; the startup canary reports <code>UNVERIFIED</code></td><td><code>.env</code> was not sourced. Nothing in the repository loads it implicitly, so every keyed provider sees an unset variable. Run <code>set -a; . ./.env; set +a</code> in the shell that starts uvicorn. The pipeline is working correctly here — there is simply nothing upstream to answer.</td></tr>
+  <tr><td>Boot fails with a prompt-token error</td><td>A <b>measured</b>-class provider reported no prompt tokens, which is fatal by contract because its cost figures would then be uncitable. Almost always a fixture behind a measured classification. Use <code>create_app()</code> for offline work instead of promoting the provider.</td></tr>
+  <tr><td>A policy edit has no effect</td><td>Policies load at startup. Either <code>POST /admin/policies/reload</code>, or restart. Confirm the active set with <code>GET /admin/policies</code>.</td></tr>
+  <tr><td>A policy value behaves as <code>true</code>/<code>false</code> when a string was intended</td><td>PyYAML parses YAML 1.1, where bare <code>on</code> and <code>off</code> are booleans. Quote the <code>consistency</code> and <code>cascade_probe</code> values. <code>streaming</code> is a real boolean and stays unquoted.</td></tr>
+  <tr><td>A response was blocked but the client saw HTTP 200</td><td>Working as specified. A block returns 200 with the policy's configured fallback and <code>finish_reason: content_filter</code>, so an OpenAI-compatible client handles it as an ordinary completion. An escalation is the one that returns 202, with a <code>review_id</code>.</td></tr>
+  <tr><td>An expected detector produced no signal</td><td>Check the per-request <code>detectors_json</code> trace via <code>GET /admin/requests/{request_id}</code>. It distinguishes <code>ran</code>, <code>not_run</code>, and <code>unavailable</code> — grounding, for instance, does not run at all unless the request carried context documents.</td></tr>
+</table>
+
+<h3>Tests and measurement</h3>
+
+<table>
+  <tr><th>Symptom</th><th>Cause and fix</th></tr>
+  <tr><td><code>eval.run_all</code> prints <code>NFR-EVAL-001: MISSED</code></td><td><b>Expected.</b> That is SL-1 — PII recall 0.8852 against 0.95 — a real unmet target that is deliberately not tuned away. It is a published miss, not a broken run.</td></tr>
+  <tr><td><code>bench_latency --check</code> exits nonzero</td><td>Check which row breached. The injection detector at 25.348 ms against 25 ms is SL-8, a known and published breach. A <i>different</i> row breaching is a genuine regression.</td></tr>
+  <tr><td>The freeze gate fails</td><td>The labeled corpus is no longer byte-identical to its approved state. A frozen case is not editable as a fix — reverting the edit is the fix, and a genuine change requires a new freeze cycle.</td></tr>
+  <tr><td>Fault injection reports 38/39 instead of 39/39</td><td>This harness is load-sensitive and its own report records host load. Re-run on a quiet host; the invariant that dropped is timing-dependent, not a posture failure.</td></tr>
+  <tr><td>A measurement harness exits 2 and writes nothing</td><td>Deliberate. The host was too loaded to produce citable evidence, so the harness refused to overwrite a good artifact with a contaminated one. Quiet the host and re-run.</td></tr>
+  <tr><td><code>check_derivations</code> reports <b>NO SOURCE</b></td><td>A document claims a figure its artifacts cannot produce. The figure gains a derivation or loses the claim — there is no third option, and this is a gate in CI.</td></tr>
+  <tr><td>Latency numbers look worse than the published ones</td><td>Check the load stamp at the head of the report. An artifact whose start stamp exceeds the documented threshold is not citable at all. Measurement runs must not share a host with tests, a build, or another harness.</td></tr>
+</table>
+
+<h2>Frequently asked questions</h2>
+
+<h4>Is this just a content filter with extra steps?</h4>
+<p>No, and the difference is testable. A filter has one policy compiled into it. Here the same
+response, the same signal set, and the same build produce <b>edit</b>, <b>block</b>, or
+<b>escalate</b> depending only on which YAML file is selected by a request header — and the engine
+contains no use-case branch to do it. It also converges three planes rather than one: a budget
+breach and a hallucination are handled by the same decision path as a toxicity hit.</p>
+
+<h4>Why the sentence boundary? Isn't token-level checking stricter?</h4>
+<p>Token-level is finer but cannot see a claim — a claim does not exist until a clause completes.
+Full-response checking sees everything but has already streamed a flagged sentence by the time it
+decides. The sentence buffer is the smallest unit at which the actual guarantee holds: for a flagged
+sentence, no part of it reaches the client.</p>
+
+<h4>Does it work with providers other than OpenAI?</h4>
+<p>Yes. The boundary is the OpenAI-compatible wire format, so any provider speaking it works, including
+a local model — which is what makes an air-gapped deployment possible, since every detector model runs
+locally too. Local fallback is verified on the owner host only, and no latency or cost claim is made
+for it from the development host.</p>
+
+<h4>Can the deep lane change a verdict after the fact?</h4>
+<p>No, and that is enforced rather than merely intended. The deep lane is never awaited on the hot
+path, and it may not alter a verdict already delivered. Its findings enrich the audit record and feed
+a proposed policy diff that affects the <i>next</i> request. A post-hoc re-decision would make the
+audit trail disagree with what the user was actually served.</p>
+
+<h4>What is the latency cost of oversight?</h4>
+<p>The input-lane hold measures P99 27.49 ms against a 50 ms budget at n = 200. Per-detector P99s
+range from 0.020 ms for the blocklist to 25.348 ms for injection — and that last figure is a published
+breach of its 25 ms budget, registered as SL-8. All of it is single-threaded CPU measurement on a
+quiet host; concurrency behavior is explicitly not evidenced, which is SL-5.</p>
+
+<h4>How do I add a fourth use case?</h4>
+<p>Add a fourth YAML file to <code>policies/</code> and send its name in the
+<code>X-ControlPlane-Use-Case</code> header. No code change, no engine branch, and
+<code>POST /admin/policies/reload</code> avoids even a restart.</p>
+
+<h4>What happens if a detector crashes in production?</h4>
+<p>The gateway records an operational failure event — never a content signal — and the policy's
+<code>fail_mode</code> for that detector class decides. <code>fail_open</code> releases the response
+with the gap recorded in the audit trail; <code>fail_closed</code> escalates to human review, never
+silently blocks. Both behaviors are exercised by <code>eval.fault_injection</code>, which exits
+nonzero if an invariant breaks.</p>
+
+<h4>Is any real personal data in the repository?</h4>
+<p>No. The evaluation corpus is synthetic, and the audit schema is built so that a leak is
+structurally hard: exactly one column may hold verbatim model output, PII is masked before that write,
+and every other record stores the <i>category and fact</i> of a detection rather than the matched
+value. A privacy tool that leaked personal data into its own logs would have defeated itself.</p>
+
+<h4>Why are failing numbers published instead of fixed?</h4>
+<p>Because a hackathon README that reports only passes is not evidence of anything. First contact with
+the frozen corpus is blind, nothing is tuned toward a target, and a target is never moved to
+accommodate a result. A missed target becomes a registered limitation with its measured value
+attached. Two rows in the results table are misses for exactly this reason.</p>
+
+<h4>What is the largest gap between this and a production system?</h4>
+<p>Three things, in order. The admin API has no authentication. The cascade router is not built, so the
+cost saving is a simulated curve with break-even at f = 0.50 rather than an achieved number (SL-10).
+And latency evidence is single-threaded, so concurrent behavior under load is unknown (SL-5).</p>
+
+<h2>Maintainers</h2>
+
+<p>Team <b>b24bb1029</b>, Indian Institute of Technology Jodhpur. Submitted to the Accenture
+Innovation Challenge 2026, Round 2.</p>
+
+<table>
+  <tr><th>Member</th><th>Roll number</th><th>Branch</th></tr>
+  <tr><td><b>Priyanshu Pandey</b> — team lead</td><td>B24BB1029</td><td>Bioengineering, third year</td></tr>
+  <tr><td><b>Harshit Saini</b></td><td>B24CS1031</td><td>Computer Science, third year</td></tr>
+  <tr><td><b>Jayant Soni</b></td><td>B24CM1033</td><td>Artificial Intelligence &amp; Data Science, third year</td></tr>
+</table>
+
+<p>Issues and feature requests belong in the repository's issue queue at
+<b>github.com/harshitsaini17/controlplane-ai/issues</b>. Design decisions are tracked in the
+repository rather than an external tracker: <code>docs/03-decisions.md</code> is the dated ADR log and
+<code>docs/08-open-questions.md</code> is the public ledger.</p>
+
+<h3>Documentation map</h3>
+
+<table>
+  <tr><th>Document</th><th>What it answers</th></tr>
+  <tr><td><code>docs/00-charter.md</code></td><td>Goals, non-goals, assumptions, success criteria</td></tr>
+  <tr><td><code>docs/01-requirements-and-scenarios.md</code></td><td>FR/NFR requirements and the three demo use cases</td></tr>
+  <tr><td><code>docs/02-architecture.md</code></td><td>Planes, lane split, policy engine placement, request lifecycle</td></tr>
+  <tr><td><code>docs/03-decisions.md</code></td><td>The ADR log — 36 dated rulings</td></tr>
+  <tr><td><code>docs/04-policy-and-detection-spec.md</code></td><td>Detector contracts, latency budgets, the verdict state machine, fail-mode rules</td></tr>
+  <tr><td><code>docs/05-api-and-data-contracts.md</code></td><td>Endpoint contracts, policy schema, audit DDL, telemetry spans</td></tr>
+  <tr><td><code>docs/06-evaluation-plan.md</code></td><td>Corpus design, precision/recall methodology, benchmark method</td></tr>
+  <tr><td><code>docs/07-demo-script.md</code></td><td>The beat-by-beat demo, treated as a regression suite</td></tr>
+  <tr><td><code>docs/08-open-questions.md</code></td><td>The public ledger: deviations, SL register, logged minor resolutions</td></tr>
+  <tr><td><code>docs/09-engineering-notes.md</code></td><td>Full claims table, derivations, historical columns, cut record</td></tr>
+  <tr><td><code>docs/TESTING.md</code></td><td>The four verification tiers and the reasoning behind each</td></tr>
+  <tr><td><code>docs/diagrams/</code></td><td>Authoritative mermaid sources, each naming the spec sections it derives from</td></tr>
+</table>
+
+<h3>Repository layout</h3>
+
+<pre><code>controlplane/  gateway, detector, policy, audit, cost, and telemetry code
+policies/      three validated per-use-case YAML policies
+eval/          frozen corpus, scoring, latency, fault, cost, derivation harnesses
+demo/          headless scripted demo and replay fixtures
+dashboard/     same-origin console pages served by the gateway
+reports/       committed, reproducible evidence — not build output
+docs/          contracts, ADRs, ledgers, testing guide, engineering notes
+tests/         contract, regression, evaluation, and demo-path gates</code></pre>
+
+<h3>Submission artifacts</h3>
+
+<table>
+  <tr><th>Artifact</th><th>Status</th></tr>
+  <tr><td>Public repository</td><td>github.com/harshitsaini17/controlplane-ai</td></tr>
+  <tr><td>Business proposal</td><td><code>b24bb1029_ControlPlane_Business_Proposal.pdf</code></td></tr>
+  <tr><td>README — this document</td><td><code>b24bb1029_ControlPlane_README.pdf</code></td></tr>
+  <tr><td>Working prototype</td><td>Runs from the Installation steps above; deterministic replay demo included</td></tr>
+  <tr><td>Demo video</td><td>Not yet recorded</td></tr>
+  <tr><td>License</td><td>Not yet chosen — tracked in <code>docs/08-open-questions.md</code></td></tr>
+</table>
+
+<p style="margin-top:8mm; padding-top:3mm; border-top:0.5pt solid #d1d5db; font-size:8.5pt; color:#6b7280; text-align:left;">
+The diagrams in this document are print-scale simplifications. The authority is the mermaid source in
+<code>docs/diagrams/</code>, where each file names the specification sections it was derived from, so a
+diagram that has drifted from the spec is auditable rather than merely wrong. Two sources carry no
+tracked render on purpose: theirs depicted a since-retired schema column, and a picture of a retired
+schema is worse than no picture.
+</p>
+
+</body>
+</html>

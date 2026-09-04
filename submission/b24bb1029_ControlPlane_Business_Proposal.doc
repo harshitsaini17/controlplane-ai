@@ -1,0 +1,686 @@
+<html xmlns:v="urn:schemas-microsoft-com:vml"
+      xmlns:o="urn:schemas-microsoft-com:office:office"
+      xmlns:w="urn:schemas-microsoft-com:office:word"
+      xmlns="http://www.w3.org/TR/REC-html40">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<meta name="ProgId" content="Word.Document">
+<meta name="Originator" content="Microsoft Word 15">
+<title>ControlPlane &#183; Business Proposal &#183; Accenture Innovation Challenge 2026</title>
+<!--[if gte mso 9]><xml>
+ <w:WordDocument>
+  <w:View>Print</w:View>
+  <w:Zoom>100</w:Zoom>
+  <w:DoNotOptimizeForBrowser/>
+ </w:WordDocument>
+</xml><![endif]-->
+<style>
+/* ============================================================
+   ControlPlane business proposal - Word/.doc typesetting.
+   Design system: dashboard/DESIGN-cohere.md (tokens transcribed
+   verbatim; the same tokens dashboard/static/cp.css uses).
+   Word HTML has no CSS variables, flexbox, grid or border-radius,
+   so tokens are inlined, layout is table-driven, and the rounded
+   card radii degrade to square inset panels. Type sizes are the
+   documented web ramp scaled to A4 print measure; the ratios,
+   weight-400 restraint, tight leading and negative tracking of
+   the display faces are preserved.
+   ============================================================ */
+
+/* --- page: A4, generous margins (whitespace as trust signal) --- */
+@page WordSection1
+  {size:21.0cm 29.7cm;
+   margin:2.2cm 1.9cm 1.9cm 1.9cm;
+   mso-header-margin:1.0cm;
+   mso-footer-margin:1.0cm;
+   mso-paper-source:0;
+   mso-header:h1;
+   mso-footer:f1;}
+div.WordSection1 {page:WordSection1;}
+
+/* --- base: canvas white, ink body, Unica77 fallback chain --- */
+body {margin:0; background:#ffffff; color:#212121;
+      font-family:"Unica77 Cohere Web",Inter,Arial,sans-serif;
+      font-size:10.5pt; line-height:1.5;}
+p    {margin:0 0 8pt 0; font-size:10.5pt; line-height:1.5; color:#212121;}
+a    {color:#1863dc; text-decoration:none;}
+h1,h2,h3,h4 {margin:0; font-weight:normal;}
+
+/* --- display faces: CohereText fallback chain, tight + tracked in --- */
+.hero   {font-family:"CohereText","Space Grotesk",Inter,Arial,sans-serif;
+         font-size:42pt; line-height:1.0; letter-spacing:-.9pt; color:#17171c;
+         mso-line-height-rule:exactly;}
+.h-sec  {font-family:"Unica77 Cohere Web",Inter,Arial,sans-serif;
+         font-size:20pt; line-height:1.2; letter-spacing:-.35pt; color:#17171c;}
+.h-sub  {font-family:"Unica77 Cohere Web",Inter,Arial,sans-serif;
+         font-size:12pt; line-height:1.3; color:#17171c;}
+.h-feat {font-family:"Unica77 Cohere Web",Inter,Arial,sans-serif;
+         font-size:11.5pt; line-height:1.3; color:#17171c;}
+
+/* --- supporting text roles --- */
+.lead  {font-size:12pt; line-height:1.4; color:#616161;}
+.cap   {font-size:9pt;  line-height:1.4; color:#75758a;}
+.micro {font-size:8pt;  line-height:1.4; color:#93939f;}
+
+/* --- mono label: uppercase technical marker (CohereMono fallback) --- */
+.ml {font-family:"CohereMono",Arial,sans-serif; font-size:8.5pt; line-height:1.4;
+     letter-spacing:.6pt; text-transform:uppercase; color:#75758a;}
+
+/* --- rules: depth comes from hairlines, never shadow --- */
+.rule      {border-top:.75pt solid #d9d9dd; font-size:1pt; line-height:1pt;}
+.rule-dark {border-top:.75pt solid #212121; font-size:1pt; line-height:1pt;}
+
+/* --- research-table: rule-separated, tall rows, no vertical borders --- */
+table.rt {width:100%; border-collapse:collapse; mso-table-lspace:0pt; mso-table-rspace:0pt;}
+table.rt th {font-size:8.5pt; line-height:1.35; font-weight:normal; color:#75758a;
+             text-align:left; vertical-align:bottom;
+             padding:0pt 10pt 5pt 0pt; border-bottom:.75pt solid #212121;}
+table.rt td {font-size:9.5pt; line-height:1.38; color:#212121;
+             text-align:left; vertical-align:top;
+             padding:8pt 10pt 8pt 0pt; border-bottom:.75pt solid #d9d9dd;}
+table.rt td.k {color:#17171c;}
+table.rt td.last, table.rt th.last {padding-right:0pt;}
+
+/* --- surfaces --- */
+.band-green {background:#003c33; color:#ffffff;}
+.band-navy  {background:#071829; color:#ffffff;}
+.card-stone {background:#eeece7; color:#212121;}
+.card-blue  {background:#f1f5ff; color:#212121;}
+.on-dark    {color:#ffffff; font-size:10.5pt; line-height:1.5;}
+.on-dark-ml {font-family:"CohereMono",Arial,sans-serif; font-size:8.5pt;
+             letter-spacing:.6pt; text-transform:uppercase; color:#8fb3ac;}
+
+/* --- verdict chips (cp.css): pass / edit / block / escalate --- */
+.v-pass     {background:#edfce9; color:#003c33; font-size:9pt; padding:1pt 4pt;}
+.v-edit     {background:#fff1ec; color:#a33b1c; font-size:9pt; padding:1pt 4pt;}
+.v-block    {background:#fdecec; color:#b30000; font-size:9pt; padding:1pt 4pt;}
+.v-escalate {background:#f6eefa; color:#6d3f7c; font-size:9pt; padding:1pt 4pt;}
+
+/* --- coral taxonomy marker: [model] tags and warm flags only --- */
+.chip {background:#fff6f3; color:#a33b1c; font-size:8pt; padding:1pt 4pt;}
+
+/* --- KPI figure --- */
+.kpi-n {font-family:"CohereText","Space Grotesk",Inter,Arial,sans-serif;
+        font-size:23pt; line-height:1.0; letter-spacing:-.45pt; color:#17171c;
+        mso-line-height-rule:exactly;}
+
+/* --- running header / footer --- */
+p.MsoHeader, p.MsoFooter {margin:0; font-size:7.5pt; line-height:1.3; color:#93939f;
+        font-family:"Unica77 Cohere Web",Inter,Arial,sans-serif;}
+</style>
+</head>
+
+<body lang="EN-IN">
+
+
+
+<div class="WordSection1">
+
+<!-- ==================== COVER ==================== -->
+<!-- announcement-bar: full-width black strip, white micro copy -->
+<table style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;">
+ <tr><td class="band-navy" style="background:#000000;padding:8pt 14pt;text-align:center;">
+  <p style="margin:0;color:#ffffff;font-size:8pt;line-height:1.4;letter-spacing:.3pt;">
+   Round 2 &#183; Prototype Development &#183; working prototype, measured evidence, auditable claims</p>
+ </td></tr>
+</table>
+
+<p style="margin:26pt 0 0 0;" class="ml">Business proposal &#183; 30 August 2026</p>
+
+<p class="hero" style="margin:14pt 0 0 0;">ControlPlane</p>
+<p style="margin:10pt 0 0 0;font-family:'Unica77 Cohere Web',Inter,Arial,sans-serif;font-size:17pt;line-height:1.2;letter-spacing:-.3pt;color:#17171c;">
+ The real-time oversight gateway for enterprise AI</p>
+
+<p class="lead" style="margin:14pt 0 0 0;">Every AI response, inspected before delivery &#8212; quality, cost, and
+ responsibility converged into one policy-governed verdict per business pipeline. Working prototype,
+ measured evidence, auditable claims.</p>
+
+<p class="rule" style="margin:22pt 0 0 0;">&nbsp;</p>
+
+<p style="margin:16pt 0 0 0;font-size:10.5pt;color:#212121;">
+ Business Proposal &#8212; Accenture Innovation Challenge 2026, Round 2 (Prototype Development)</p>
+
+<!-- team: product-card on soft stone -->
+<table style="width:100%;border-collapse:collapse;margin-top:18pt;mso-table-lspace:0pt;mso-table-rspace:0pt;">
+ <tr><td class="card-stone" style="padding:22pt 22pt 18pt 22pt;">
+  <p class="ml" style="margin:0;">Team b24bb1029</p>
+  <p class="h-sub" style="margin:6pt 0 14pt 0;font-size:14pt;">Indian Institute of Technology Jodhpur</p>
+  <table style="width:100%;border-collapse:collapse;">
+   <tr>
+    <td style="padding:7pt 10pt 7pt 0;border-top:.75pt solid #d9d9dd;font-size:10pt;color:#17171c;">Priyanshu Pandey <span style="color:#75758a;">(Lead)</span></td>
+    <td style="padding:7pt 10pt 7pt 0;border-top:.75pt solid #d9d9dd;font-family:'CohereMono',Arial,sans-serif;font-size:9pt;letter-spacing:.4pt;color:#212121;">B24BB1029</td>
+    <td style="padding:7pt 0 7pt 0;border-top:.75pt solid #d9d9dd;font-size:9.5pt;color:#616161;">Bioengineering, 3rd year</td>
+   </tr>
+   <tr>
+    <td style="padding:7pt 10pt 7pt 0;border-top:.75pt solid #d9d9dd;font-size:10pt;color:#17171c;">Harshit Saini</td>
+    <td style="padding:7pt 10pt 7pt 0;border-top:.75pt solid #d9d9dd;font-family:'CohereMono',Arial,sans-serif;font-size:9pt;letter-spacing:.4pt;color:#212121;">B24CS1031</td>
+    <td style="padding:7pt 0 7pt 0;border-top:.75pt solid #d9d9dd;font-size:9.5pt;color:#616161;">Computer Science, 3rd year</td>
+   </tr>
+   <tr>
+    <td style="padding:7pt 10pt 7pt 0;border-top:.75pt solid #d9d9dd;font-size:10pt;color:#17171c;">Jayant Soni</td>
+    <td style="padding:7pt 10pt 7pt 0;border-top:.75pt solid #d9d9dd;font-family:'CohereMono',Arial,sans-serif;font-size:9pt;letter-spacing:.4pt;color:#212121;">B24CM1033</td>
+    <td style="padding:7pt 0 7pt 0;border-top:.75pt solid #d9d9dd;font-size:9.5pt;color:#616161;">Artificial Intelligence &amp; Data Science, 3rd year</td>
+   </tr>
+  </table>
+ </td></tr>
+</table>
+
+<p class="cap" style="margin:18pt 0 0 0;">Prepared 30 August 2026. Every product figure in this document is
+ measured, reproduces from a single command in the public repository, and is presented with its limitations.
+ Market figures are bottom-up models with stated assumptions, marked <span class="chip">[model]</span>.</p>
+
+<!-- ==================== 1 EXECUTIVE SUMMARY ==================== -->
+<p style="page-break-before:always;">&nbsp;</p>
+<p class="ml" style="margin:0;">Section 1</p>
+<p class="h-sec" style="margin:5pt 0 0 0;">Executive summary</p>
+<p class="rule-dark" style="margin:9pt 0 14pt 0;">&nbsp;</p>
+
+<p>Enterprises are deploying generative AI faster than they can supervise it. Quality is evaluated in offline
+ reports weeks after the fact; cost appears on a monthly invoice; privacy and safety failures surface in audits
+ &#8212; all after the damage. The tooling market sells point solutions for each symptom; nothing sits in the
+ delivery path making a single, accountable decision per response, per business context.</p>
+
+<p><b style="font-weight:normal;color:#17171c;">ControlPlane is that missing layer:</b> a drop-in gateway (one
+ base-URL change) through which every AI request and response passes. Deterministic scanners, small ML
+ classifiers, and grounding checks emit multi-label risk signals; a single policy engine converges them into one
+ of four verdicts &#8212; <span class="v-pass">Pass</span> <span class="v-edit">Edit</span>
+ <span class="v-block">Block</span> <span class="v-escalate">Escalate</span> &#8212; under a per-pipeline
+ policy file. Three business pipelines can receive three different verdicts on the identical content with zero code
+ difference: governance is configuration, versioned and audited.</p>
+
+<p>This is not a concept deck. The prototype is a working system with an unusual property for this stage: its
+ claims are auditable. A frozen, independently reviewed 280-case evaluation corpus; blind first-contact
+ measurements published before any tuning; misses reported next to passes; 1,200+ tests green on two
+ machines; and an engineering ledger of 32 formally adjudicated deviations &#8212; produced by AI coding
+ agents operating under the same class of oversight the product implements.</p>
+
+<!-- KPI strip: five measured figures, hairline-separated, no shadow -->
+<table style="width:100%;border-collapse:collapse;margin:14pt 0 6pt 0;mso-table-lspace:0pt;mso-table-rspace:0pt;">
+ <tr>
+  <td style="width:20%;padding:12pt 8pt 12pt 0;border-top:.75pt solid #212121;border-bottom:.75pt solid #212121;vertical-align:top;">
+   <p class="kpi-n" style="margin:0;">840/840</p>
+   <p class="cap" style="margin:6pt 0 0 0;">policy-engine verdicts correct, frozen corpus &#215; 3 policies</p></td>
+  <td style="width:20%;padding:12pt 8pt 12pt 8pt;border-top:.75pt solid #212121;border-bottom:.75pt solid #212121;border-left:.75pt solid #d9d9dd;vertical-align:top;">
+   <p class="kpi-n" style="margin:0;">1.000</p>
+   <p class="cap" style="margin:6pt 0 0 0;">PII detector precision &#8212; zero false alarms across corpus</p></td>
+  <td style="width:20%;padding:12pt 8pt 12pt 8pt;border-top:.75pt solid #212121;border-bottom:.75pt solid #212121;border-left:.75pt solid #d9d9dd;vertical-align:top;">
+   <p class="kpi-n" style="margin:0;">&lt;1 ms</p>
+   <p class="cap" style="margin:6pt 0 0 0;">tier-1 hold P99 (0.77 ms); full-pipeline holds within targets</p></td>
+  <td style="width:20%;padding:12pt 8pt 12pt 8pt;border-top:.75pt solid #212121;border-bottom:.75pt solid #212121;border-left:.75pt solid #d9d9dd;vertical-align:top;">
+   <p class="kpi-n" style="margin:0;">39/39</p>
+   <p class="cap" style="margin:6pt 0 0 0;">fault-injection assertions; fail-open/fail-closed per policy</p></td>
+  <td style="width:20%;padding:12pt 0 12pt 8pt;border-top:.75pt solid #212121;border-bottom:.75pt solid #212121;border-left:.75pt solid #d9d9dd;vertical-align:top;">
+   <p class="kpi-n" style="margin:0;">1,200+</p>
+   <p class="cap" style="margin:6pt 0 0 0;">tests, two-machine certification, CI on 3.12/3.14</p></td>
+ </tr>
+</table>
+
+<p style="margin-top:14pt;"><span class="ml">Why now</span>&nbsp; the EU AI Act's obligations are in force and
+ phasing in; India's DPDP Act exposes enterprises to penalties up to INR 250 crore per category of
+ security-safeguard failure; sector regulators (RBI, SEBI, HIPAA regimes) increasingly expect demonstrable AI
+ oversight. Compliance evidence &#8212; the audit trail ControlPlane produces natively &#8212; is becoming a
+ purchasing requirement, not a feature.</p>
+
+<p><span class="ml">The opportunity</span>&nbsp; occupy the converged pre-delivery decision layer before point
+ tools grow into it. Open-core distribution (Apache-licensed gateway) drives adoption; a paid Governance
+ Console, compliance policy packs, and audit retention monetize the enterprises that need evidence. We seek
+ hackathon backing now and an indicative pre-seed of INR 1.6 crore (~US$190k) to convert the prototype into
+ three design-partner pilots within two quarters.</p>
+
+<!-- ==================== 2 PROBLEM FRAMING ==================== -->
+<p style="page-break-before:always;">&nbsp;</p>
+<p class="ml" style="margin:0;">Section 2</p>
+<p class="h-sec" style="margin:5pt 0 0 0;">Problem framing</p>
+<p class="rule-dark" style="margin:9pt 0 14pt 0;">&nbsp;</p>
+
+<p class="h-feat" style="margin:0 0 7pt 0;">2.1 &#183; Three failures, one root cause</p>
+<p>A bank runs three AI assistants. The customer chatbot confidently invents a loan approval
+ (<i>wrong</i>). The internal assistant repeats an employee's phone number into a log (<i>leaky</i>). The
+ decision-support tool quietly burns tens of thousands in inference (<i>expensive</i>). Three different teams
+ discover three different incidents &#8212; weeks late. The root cause is common: <b style="font-weight:normal;color:#17171c;">no
+ supervision exists at the moment the AI speaks.</b></p>
+
+<p class="h-feat" style="margin:16pt 0 7pt 0;">2.2 &#183; Why current tooling does not solve it</p>
+<table class="rt">
+ <tr><th style="width:24%;">Tool category</th><th style="width:34%;">What it does</th><th class="last" style="width:42%;">What it cannot do</th></tr>
+ <tr><td class="k">Observability / evals <span style="color:#75758a;">(Arize, Langfuse, LangSmith, Datadog LLM)</span></td>
+     <td>Watches, scores, and reports after delivery</td>
+     <td class="last">Cannot stop, edit, or escalate a response before a user sees it</td></tr>
+ <tr><td class="k">Guardrails <span style="color:#75758a;">(NVIDIA NeMo, AWS Bedrock Guardrails, Azure Content Safety, Lakera)</span></td>
+     <td>Filters specific harms with stacked allow/deny checks</td>
+     <td class="last">One global configuration; no per-pipeline governance, no converged verdict, no fail-posture policy</td></tr>
+ <tr><td class="k">AI gateways <span style="color:#75758a;">(Portkey, Kong AI Gateway, LiteLLM)</span></td>
+     <td>Routing, caching, cost tracking, basic guardrail hooks</td>
+     <td class="last">Decision logic is thin; risk categories siloed; no audit-grade evidence trail</td></tr>
+ <tr><td class="k">DLP <span style="color:#75758a;">(Microsoft Presidio, Google DLP)</span></td>
+     <td>Broad PII category coverage</td>
+     <td class="last">Not response-path decision-making; no quality/cost planes; no HITL loop</td></tr>
+</table>
+<p style="margin-top:10pt;">Each category is real and funded &#8212; and each optimizes one plane. The
+ enterprise problem is <b style="font-weight:normal;color:#17171c;">the convergence:</b> one accountable verdict
+ per response, tuned per business context, with evidence a regulator accepts.</p>
+
+<p class="h-feat" style="margin:16pt 0 7pt 0;">2.3 &#183; The regulatory forcing function</p>
+<table class="rt">
+ <tr><th style="width:28%;">Regime</th><th style="width:30%;">Exposure</th><th class="last" style="width:42%;">Operational implication</th></tr>
+ <tr><td class="k">EU AI Act <span style="color:#75758a;">(in force, obligations phasing through 2026-27)</span></td>
+     <td>Fines up to &#8364;35M / 7% of global turnover for the most serious violations</td>
+     <td class="last">High-risk deployments must demonstrate oversight, logging, and human control &#8212; an audit-trail requirement</td></tr>
+ <tr><td class="k">India DPDP Act 2023 <span style="color:#75758a;">(rules operationalizing)</span></td>
+     <td>Up to INR 250 crore per category of failure of security safeguards</td>
+     <td class="last">AI channels that touch personal data need demonstrable interception and minimization</td></tr>
+ <tr><td class="k">Sectoral <span style="color:#75758a;">(RBI/SEBI expectations, HIPAA, internal model-risk regimes)</span></td>
+     <td>License, audit, and reputational exposure</td>
+     <td class="last">Per-jurisdiction, per-use-case policy variance &#8212; hard-coded rules age immediately</td></tr>
+</table>
+<p style="margin-top:10pt;">ControlPlane's design premise follows directly: <b style="font-weight:normal;color:#17171c;">policies
+ are data, not code</b> &#8212; scoped by pipeline, geography and risk appetite, versioned, hot-reloadable, and
+ stamped into every audit record.</p>
+
+<!-- ==================== 3 THE SOLUTION ==================== -->
+<p style="page-break-before:always;">&nbsp;</p>
+<p class="ml" style="margin:0;">Section 3</p>
+<p class="h-sec" style="margin:5pt 0 0 0;">The solution &#8212; and what the prototype already proves</p>
+<p class="rule-dark" style="margin:9pt 0 14pt 0;">&nbsp;</p>
+
+<p class="h-feat" style="margin:0 0 7pt 0;">3.1 &#183; Architecture in one paragraph</p>
+<!-- dark-feature-band: deep green, white text, request lifecycle -->
+<table style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;">
+ <tr><td class="band-green" style="padding:22pt;">
+  <p class="on-dark-ml" style="margin:0 0 9pt 0;">Request lifecycle</p>
+  <p class="on-dark" style="margin:0;color:#ffffff;">Applications change one base URL; every request then flows:
+   <b style="font-weight:normal;">input lane</b> (PII scan with pre-dispatch prompt redaction, injection screen,
+   budget gate) &#8594; <b style="font-weight:normal;">provider dispatch</b> (two-tier model routing; provider
+   accounting sanity-checked at boot) &#8594; <b style="font-weight:normal;">sentence-buffered output lane</b>
+   (a flagged sentence never partially reaches the user) &#8594; <b style="font-weight:normal;">detectors emit
+   multi-label signals</b> (a fabricated fact about a person is one signal carrying both a hallucination and a
+   privacy label) &#8594; <b style="font-weight:normal;">the policy engine converges everything into one
+   verdict</b> &#8212; Pass / Edit / Block / Escalate &#8212; under the pipeline's YAML policy &#8594;
+   <b style="font-weight:normal;">append-only audit record</b> (categories always, raw values never) &#8594;
+   escalations enter a <b style="font-weight:normal;">human review queue</b> whose decisions feed proposed
+   threshold updates.</p>
+  <p class="on-dark" style="margin:9pt 0 0 0;color:#c7d4d2;">Uncertainty handling and even failure
+   posture (fail-open vs fail-closed when a detector itself breaks) are per-pipeline policy fields.</p>
+ </td></tr>
+</table>
+
+<p class="h-feat" style="margin:16pt 0 7pt 0;">3.2 &#183; Application cases implemented in the prototype</p>
+<table class="rt">
+ <tr><th style="width:24%;">Pipeline (shipped policy)</th><th style="width:22%;">Enterprise application case</th><th class="last" style="width:54%;">Demonstrated behaviors (all live)</th></tr>
+ <tr><td class="k"><span style="font-family:'CohereMono',Arial,sans-serif;font-size:9pt;">support_bot</span> &#8212; customer-facing, streaming, moderate strictness</td>
+     <td>Customer-service deflection for consumer businesses</td>
+     <td class="last">PII redacted from prompts pre-dispatch (provider never sees it) and from streamed answers;
+      typed credentials blocked outright (an incident, not a field); injection blocked at zero token cost;
+      borderline claims softened</td></tr>
+ <tr><td class="k"><span style="font-family:'CohereMono',Arial,sans-serif;font-size:9pt;">hr_copilot</span> &#8212; internal, strict on personal data</td>
+     <td>Internal knowledge / HR assistant</td>
+     <td class="last">Identical PII content that <span style="font-family:'CohereMono',Arial,sans-serif;font-size:9pt;">support_bot</span>
+      edits is <span class="v-block">blocked</span> here &#8212; policy-only divergence; logged-pass posture for
+      low-confidence claims</td></tr>
+ <tr><td class="k"><span style="font-family:'CohereMono',Arial,sans-serif;font-size:9pt;">finance_advisor</span> &#8212; regulated, non-streaming, fail-closed</td>
+     <td>Decision support in a regulated workflow</td>
+     <td class="last">Full-response buffering (nothing precedes the verdict); escalation-heavy posture;
+      quarantine + human review with released/rejected lineage; detector failure escalates rather than silently
+      blocking</td></tr>
+</table>
+<p style="margin-top:10pt;">The signature demonstration &#8212; <b style="font-weight:normal;color:#17171c;">the
+ same request producing Edit / Block / Escalate across the three pipelines with zero code difference</b> &#8212;
+ runs live and is enforced by a structural test: use-case names may not appear in executable code.</p>
+
+<p class="h-feat" style="margin:16pt 0 7pt 0;">3.3 &#183; How AI enables the solution</p>
+<p>AI is on both sides of the gateway. <span class="ml">Watched</span>&nbsp; any OpenAI-compatible provider
+ (cloud or local &#8212; the demo runs on Groq-hosted open models and a fully local Ollama fallback).
+ <span class="ml">Watching</span>&nbsp; a deliberately tiered stack &#8212; microsecond deterministic scanners
+ derived from published format specifications; quantized transformer classifiers (injection, toxicity) on CPU with
+ full-coverage windowing that cannot be bypassed by padding; embedding-based grounding checks; NER-driven
+ privacy enrichment.</p>
+<table style="width:100%;border-collapse:collapse;margin-top:6pt;mso-table-lspace:0pt;mso-table-rspace:0pt;">
+ <tr><td class="card-blue" style="padding:16pt;border-left:2.25pt solid #1863dc;">
+  <p style="margin:0;font-size:10.5pt;color:#212121;"><b style="font-weight:normal;color:#17171c;">No LLM sits in
+   the decision path:</b> the verdict layer is deterministic, explainable, and testable &#8212; the correct
+   property for a governance product.</p>
+ </td></tr>
+</table>
+
+<!-- ==================== 4 NOVEL SYSTEMS ==================== -->
+<p style="page-break-before:always;">&nbsp;</p>
+<p class="ml" style="margin:0;">Section 4</p>
+<p class="h-sec" style="margin:5pt 0 0 0;">Novel systems built in this prototype</p>
+<p class="rule-dark" style="margin:9pt 0 12pt 0;">&nbsp;</p>
+<p class="lead" style="margin:0 0 12pt 0;">Six mechanisms we did not find combined &#8212; in several cases not
+ present at all &#8212; in the surveyed landscape.</p>
+
+<table class="rt">
+ <tr><th style="width:22%;">Mechanism</th><th style="width:39%;">What is new</th><th class="last" style="width:39%;">Why it matters commercially</th></tr>
+ <tr><td class="k">Converged tri-plane verdict engine</td>
+     <td>Quality, cost, and responsibility signals merge into one accountable verdict; risk labels are multi-label because real risks overlap</td>
+     <td class="last">One throat to choke for compliance; stacked-filter competitors cannot express overlapping risk</td></tr>
+ <tr><td class="k">Uncertainty and failure as configuration</td>
+     <td>The borderline band's action and each detector-class's fail-open/fail-closed posture are per-pipeline policy fields</td>
+     <td class="last">Answers the two questions regulators actually ask &#8212; what do you do when unsure, and when your safety net breaks</td></tr>
+ <tr><td class="k">Attribution-correct enforcement</td>
+     <td>Budgets clock detector-attributable compute, not event-loop wall-clock; scheduling noise cannot fabricate faults; hang backstop kept separately</td>
+     <td class="last">Verdicts in regulated pipelines cannot be flipped by load artifacts &#8212; discovered and fixed by measurement, on the record</td></tr>
+ <tr><td class="k">Provenance-classed providers + accounting canary</td>
+     <td>Upstreams are dev- or measured-class; a boot canary checks provider token accounting against a local estimate</td>
+     <td class="last">Caught a real intermediary silently injecting ~5,000 hidden prompt tokens per request &#8212; cost-integrity as a shipped feature</td></tr>
+ <tr><td class="k">Evidence pipeline as product</td>
+     <td>Frozen reviewed corpus; blind-then-disclosed measurement; every README claim maps to a reproducing command; misses published beside passes</td>
+     <td class="last">Competitors ask to be trusted; ControlPlane ships the apparatus for auditing itself &#8212; the core enterprise objection, answered structurally</td></tr>
+ <tr><td class="k">Built under the oversight it sells</td>
+     <td>AI agents developed the system under a binding contract: 32 adjudicated deviations, independent AI review, human rulings &#8212; the full ledger is public</td>
+     <td class="last">A defensible story no incumbent can copy quickly, and living proof the governance model works on real engineering</td></tr>
+</table>
+
+<!-- ==================== 5 EVIDENCE ==================== -->
+<p style="page-break-before:always;">&nbsp;</p>
+<p class="ml" style="margin:0;">Section 5</p>
+<p class="h-sec" style="margin:5pt 0 0 0;">Evidence &#8212; measured, reproducible, and honest about misses</p>
+<p class="rule-dark" style="margin:9pt 0 12pt 0;">&nbsp;</p>
+
+<table class="rt">
+ <tr><th style="width:22%;">Quantity</th><th style="width:41%;">Measured</th><th class="last" style="width:37%;">Reading</th></tr>
+ <tr><td class="k">Policy-engine conformance</td>
+     <td><b style="font-weight:normal;color:#17171c;">840/840 verdicts</b> (280 frozen cases &#215; 3 policies); falsified via 7/7 injected defects caught</td>
+     <td class="last">The decision layer is provably correct against its specification</td></tr>
+ <tr><td class="k">PII detection</td>
+     <td>Precision <b style="font-weight:normal;color:#17171c;">1.000</b>; recall 0.836 blind &#8594; 0.885 after a disclosed, spec-derived revision <span class="chip">target 0.95 &#8212; missed</span></td>
+     <td class="last">Zero false alarms; every residual miss is one documented scope trade-off; both numbers ship permanently</td></tr>
+ <tr><td class="k">Unsourced-numeric claims</td>
+     <td>Precision 0.267 blind &#8594; 0.857 after correcting a flaw in our own spec</td>
+     <td class="last">First-contact honesty: the bad number is preserved beside the fix</td></tr>
+ <tr><td class="k">Injection / toxicity classifiers <span style="color:#75758a;">(blind)</span></td>
+     <td>Injection P 1.000, R 0.150; toxicity high P 0.400, R 0.250 &#8212; no targets were set, nothing was tuned</td>
+     <td class="last">Layered defense: patterns catch overt attacks in microseconds; the model layer's thresholds tune via the feedback loop on real traffic &#8212; a roadmap item, stated as such</td></tr>
+ <tr><td class="k">End-to-end verdict accuracy</td>
+     <td>0.825&#8211;0.851 over 194 covered cases (up from 159)</td>
+     <td class="last">The score fell as coverage widened into the hardest classes &#8212; reported exactly that way</td></tr>
+ <tr><td class="k">Latency</td>
+     <td>Input-hold P99 26.7 ms / 50; sentence-hold P99 31.4 ms / 100; tier-1 era hold P99 <b style="font-weight:normal;color:#17171c;">0.77 ms</b>; one detector tail breach (25.35 vs 25 ms) published as a standing limitation</td>
+     <td class="last">Budgets are enforced on attributable time; the one miss is published, target unmoved</td></tr>
+ <tr><td class="k">Reliability</td>
+     <td><b style="font-weight:normal;color:#17171c;">39/39</b> fault-injection assertions on a quiet host; fail-closed never silently blocks</td>
+     <td class="last">Failure posture is policy, and it is tested</td></tr>
+ <tr><td class="k">Engineering base</td>
+     <td>1,200+ tests; CI (Python 3.12/3.14); two-machine certification; 32 adjudicated deviations; 8 standing limitations, each explained</td>
+     <td class="last">The limitation register is the roadmap &#8212; measured, not imagined</td></tr>
+</table>
+<p class="cap" style="margin:10pt 0 0 0;">Sources: <span style="font-family:'CohereMono',Arial,sans-serif;">reports/</span>
+ directory of the public repository; every row reproduces from one command (README claims table).</p>
+
+<!-- ==================== 6 TARGET USERS ==================== -->
+<p style="page-break-before:always;">&nbsp;</p>
+<p class="ml" style="margin:0;">Section 6</p>
+<p class="h-sec" style="margin:5pt 0 0 0;">Target users and buyers</p>
+<p class="rule-dark" style="margin:9pt 0 12pt 0;">&nbsp;</p>
+
+<table class="rt">
+ <tr><th style="width:24%;">Persona</th><th style="width:36%;">Pain today</th><th class="last" style="width:40%;">What ControlPlane gives them</th></tr>
+ <tr><td class="k">Head of Platform / AI Engineering</td>
+     <td>N applications &#215; M models &#215; ad-hoc guardrails; every new use case re-solves oversight</td>
+     <td class="last">One gateway, one policy schema; onboarding a pipeline = one YAML file + one header</td></tr>
+ <tr><td class="k">CISO / DPO / Compliance officer</td>
+     <td>Cannot evidence AI oversight to auditors; DPDP/AI-Act exposure</td>
+     <td class="last">Per-jurisdiction policy packs; append-only audit trail with categories-not-values; HITL lineage</td></tr>
+ <tr><td class="k">FinOps / Engineering finance</td>
+     <td>Inference spend unattributed and unmanaged</td>
+     <td class="last">Per-pipeline budgets enforced pre-dispatch; tiered routing; cost attribution per verdict</td></tr>
+ <tr><td class="k">Risk / model-governance teams <span style="color:#75758a;">(BFSI)</span></td>
+     <td>Regulator expects human-in-the-loop and model supervision</td>
+     <td class="last">Escalation queue, fail-closed postures, versioned policy diffs as change evidence</td></tr>
+</table>
+<p style="margin-top:10pt;"><span class="ml">Initial ICP</span>&nbsp; mid-to-large enterprises running 3+
+ generative-AI use cases in regulated or brand-sensitive contexts &#8212; BFSI, healthcare, telco, and India's
+ Global Capability Centers, where DPDP exposure meets aggressive AI adoption. The design-partner motion starts
+ there (&#167;8).</p>
+
+<!-- ==================== 7 MARKET ANALYSIS ==================== -->
+<p style="page-break-before:always;">&nbsp;</p>
+<p class="ml" style="margin:0;">Section 7</p>
+<p class="h-sec" style="margin:5pt 0 0 0;">Market analysis</p>
+<p class="rule-dark" style="margin:9pt 0 14pt 0;">&nbsp;</p>
+
+<p class="h-feat" style="margin:0 0 7pt 0;">7.1 &#183; Category and timing</p>
+<p>ControlPlane sits at the intersection of AI gateways, guardrails/AI-security, and AI governance/GRC &#8212; the
+ space industry analysts group under <i>AI trust, risk and security management</i>. Every serious survey of
+ enterprise generative-AI adoption reports the same pattern: adoption is broad, production incidents are rising,
+ and governance maturity lags years behind deployment. Precise third-party market-size figures vary by an order
+ of magnitude across reports; rather than cite one, we model the opportunity bottom-up with stated
+ assumptions.</p>
+
+<p class="h-feat" style="margin:16pt 0 7pt 0;">7.2 &#183; Bottom-up sizing <span class="chip">model &#8212; all assumptions stated</span></p>
+<table class="rt">
+ <tr><th style="width:20%;">Layer</th><th style="width:52%;">Assumption</th><th class="last" style="width:28%;">Result</th></tr>
+ <tr><td class="k">TAM</td>
+     <td>~40&#8211;60k enterprises worldwide will run &#8805;3 production genAI use cases by 2028; governance layer value US$30&#8211;60k ACV</td>
+     <td class="last"><b style="font-weight:normal;color:#17171c;">US$1.5&#8211;3.5B</b> annual <span class="chip">[model]</span></td></tr>
+ <tr><td class="k">SAM (initial)</td>
+     <td>Regulated verticals + GCCs in India/EU/US reachable via open-core + SI channels: ~6&#8211;8k accounts</td>
+     <td class="last"><b style="font-weight:normal;color:#17171c;">US$250&#8211;450M</b> annual <span class="chip">[model]</span></td></tr>
+ <tr><td class="k">SOM (36 months)</td>
+     <td>120&#8211;180 paying accounts at US$35&#8211;50k blended ACV via design-partner &#8594; partner-led motion</td>
+     <td class="last"><b style="font-weight:normal;color:#17171c;">US$5&#8211;8M ARR</b> <span class="chip">[model]</span></td></tr>
+</table>
+
+<p class="h-feat" style="margin:16pt 0 7pt 0;">7.3 &#183; Competitive positioning</p>
+<table class="rt">
+ <tr><th style="width:26%;">Player (representative)</th><th style="width:28%;">Strength</th><th class="last" style="width:46%;">Gap ControlPlane occupies</th></tr>
+ <tr><td class="k">Portkey / Kong / LiteLLM <span style="color:#75758a;">(gateways)</span></td>
+     <td>Routing, caching, cost visibility, scale</td>
+     <td class="last">Thin decision layer; no per-pipeline verdict governance; no audit-grade evidence</td></tr>
+ <tr><td class="k">Bedrock Guardrails / Azure Content Safety / NeMo</td>
+     <td>Distribution, harm filters</td>
+     <td class="last">Cloud-locked or single-plane; one global config; no fail-posture or borderline policy; no HITL lineage</td></tr>
+ <tr><td class="k">Arize / Langfuse / LangSmith / Datadog</td>
+     <td>Observability depth, enterprise reach</td>
+     <td class="last">Post-hoc by design &#8212; cannot gate delivery; no enforcement</td></tr>
+ <tr><td class="k">Lakera / prompt-security startups</td>
+     <td>Focused attack research</td>
+     <td class="last">Single plane (security); no cost/quality convergence, no per-use-case governance</td></tr>
+ <tr><td class="k">Presidio / Google DLP</td>
+     <td>PII category breadth</td>
+     <td class="last">Not a delivery-path decision system; we integrate rather than compete (roadmap: Presidio as a tier-1 provider)</td></tr>
+</table>
+<p style="margin-top:10pt;">We state plainly what our own analysis discipline required: every individual technique
+ exists somewhere. The defensible position is <b style="font-weight:normal;color:#17171c;">the converged,
+ per-use-case, evidence-producing decision layer</b> &#8212; and a credibility asset none of the above ships:
+ auditable claims about their own accuracy.</p>
+
+<!-- ==================== 8 BUSINESS MODEL ==================== -->
+<p style="page-break-before:always;">&nbsp;</p>
+<p class="ml" style="margin:0;">Section 8</p>
+<p class="h-sec" style="margin:5pt 0 0 0;">Business model and go-to-market</p>
+<p class="rule-dark" style="margin:9pt 0 14pt 0;">&nbsp;</p>
+
+<p class="h-feat" style="margin:0 0 7pt 0;">8.1 &#183; Open-core model</p>
+<table class="rt">
+ <tr><th style="width:20%;">Tier</th><th style="width:48%;">What ships</th><th class="last" style="width:32%;">Price posture <span class="chip">[model]</span></th></tr>
+ <tr><td class="k">Open source <span style="color:#75758a;">(Apache-2.0)</span></td>
+     <td>Gateway, policy engine, detectors, audit schema, eval harness &#8212; the full prototype lineage</td>
+     <td class="last"><b style="font-weight:normal;color:#17171c;">Free</b> &#8212; adoption, community patterns, credibility</td></tr>
+ <tr><td class="k">Team</td>
+     <td>Governance Console (the dashboard shipped in this prototype, hardened), SSO, retention, alerting</td>
+     <td class="last"><b style="font-weight:normal;color:#17171c;">US$500&#8211;1,000</b> / month per production pipeline</td></tr>
+ <tr><td class="k">Enterprise</td>
+     <td>Compliance policy packs (EU AI Act, DPDP, RBI/SEBI, HIPAA), audit exports, air-gapped/local-model deployment, support SLAs, custom calibration on customer traffic</td>
+     <td class="last"><b style="font-weight:normal;color:#17171c;">US$40&#8211;120k</b> ACV</td></tr>
+</table>
+<p style="margin-top:10pt;">Per-pipeline pricing scales with the customer's own AI adoption &#8212; land on one use
+ case, expand as the platform team routes more pipelines through the plane. Local-model support (already
+ working: the demo's fallback is a fully local Ollama deployment) unlocks the air-gapped segment cloud guardrails
+ cannot serve.</p>
+
+<p class="h-feat" style="margin:16pt 0 7pt 0;">8.2 &#183; Go-to-market phases</p>
+<table class="rt">
+ <tr><th style="width:20%;">Phase</th><th style="width:48%;">Motion</th><th class="last" style="width:32%;">Proof point targeted</th></tr>
+ <tr><td class="k">Launch <span style="color:#75758a;">(0&#8211;3 mo)</span></td>
+     <td>Public OSS release + the build-in-public story (the adjudication ledger and blind-measurement discipline are genuinely distinctive developer content); Show-HN/launch posts; conference CFPs on &#8216;AI built under AI oversight&#8217;</td>
+     <td class="last">1k GitHub stars-class attention; inbound design-partner pipeline</td></tr>
+ <tr><td class="k">Design partners <span style="color:#75758a;">(2&#8211;6 mo)</span></td>
+     <td>3&#8211;5 pilots in Indian BFSI/GCC + one EU-exposed SaaS; success = one pipeline in production with audit evidence accepted by the partner's risk function</td>
+     <td class="last">Reference architecture + first case studies; calibration-on-customer-traffic playbook</td></tr>
+ <tr><td class="k">Partner-led <span style="color:#75758a;">(6&#8211;18 mo)</span></td>
+     <td>System-integrator channel &#8212; the governance layer is precisely what SIs (Accenture among them) deploy for clients; cloud-marketplace listings</td>
+     <td class="last">Repeatable SI-attached deals; first US$1M ARR <span class="chip">[model]</span></td></tr>
+</table>
+<p style="margin-top:10pt;">The Accenture channel is not rhetorical: this proposal exists inside Accenture's own
+ innovation program, and responsible-AI deployment is a stated Accenture service line. A winning prototype here
+ is a warm first partnership conversation.</p>
+
+<!-- ==================== 9 IMPACT ==================== -->
+<p style="page-break-before:always;">&nbsp;</p>
+<p class="ml" style="margin:0;">Section 9</p>
+<p class="h-sec" style="margin:5pt 0 0 0;">Impact</p>
+<p class="rule-dark" style="margin:9pt 0 14pt 0;">&nbsp;</p>
+
+<table class="rt">
+ <tr><th style="width:20%;">Dimension</th><th style="width:52%;">Mechanism</th><th class="last" style="width:28%;">Evidence base</th></tr>
+ <tr><td class="k">Privacy protection</td>
+     <td>PII intercepted at input (provider never receives it) and output; credentials blocked as incidents; zero raw values in evidence &#8212; verified by an owner-run audit-DB hunt returning 0</td>
+     <td class="last">Live prototype behavior; NFR-SEC-001 gate</td></tr>
+ <tr><td class="k">Regulatory de-risking</td>
+     <td>Append-only audit trail, HITL lineage, per-jurisdiction policy packs &#8594; evidence for DPDP (up to INR 250 crore exposure) and EU AI Act oversight duties</td>
+     <td class="last">Shipped audit schema + review queue</td></tr>
+ <tr><td class="k">Cost discipline</td>
+     <td>Pre-dispatch budget enforcement, loop guards, two-tier routing; savings scale with the deployment's price ratio (measured 2.0&#215; on demo tiers; flagship-vs-mini gaps run far higher)</td>
+     <td class="last">Relative-delta simulation, honestly labeled</td></tr>
+ <tr><td class="k">Safe AI adoption at scale</td>
+     <td>Small teams get bank-grade oversight from a config file &#8212; lowering the barrier for Indian enterprises and public-sector pilots to deploy AI responsibly</td>
+     <td class="last">One-URL integration; local-model path</td></tr>
+ <tr><td class="k">Engineering practice</td>
+     <td>The agent-oversight methodology (contract, deviation protocol, independent review) is publishable and reusable beyond this product</td>
+     <td class="last">Public ledger in the repository</td></tr>
+</table>
+
+<!-- ==================== 10 ROADMAP ==================== -->
+<p style="page-break-before:always;">&nbsp;</p>
+<p class="ml" style="margin:0;">Section 10</p>
+<p class="h-sec" style="margin:5pt 0 0 0;">Phased roadmap</p>
+<p class="rule-dark" style="margin:9pt 0 12pt 0;">&nbsp;</p>
+<p class="lead" style="margin:0 0 12pt 0;">Phase 0 is complete and is this prototype. Later phases burn down the
+ standing-limitation register &#8212; our roadmap is a list of measured gaps, not imagined features.</p>
+
+<table class="rt">
+ <tr><th style="width:20%;">Phase</th><th style="width:48%;">Scope</th><th class="last" style="width:32%;">Exit criteria</th></tr>
+ <tr><td class="k">P0 &#183; Prototype <span class="v-pass">done</span></td>
+     <td>Gateway, tri-plane detectors, policy engine, audit + HITL, console, demo; evidence pipeline</td>
+     <td class="last">This submission</td></tr>
+ <tr><td class="k">P1 &#183; Pilot-ready <span style="color:#75758a;">(0&#8211;3 mo)</span></td>
+     <td>Recall categories &amp; Indic/locale PII; threshold sweeps via the feedback loop on partner traffic;
+      <span style="font-family:'CohereMono',Arial,sans-serif;font-size:9pt;">fast_consistency</span> &amp;
+      deep-audit workers; Presidio head-to-head on the frozen corpus; conversation-level cumulative risk</td>
+     <td class="last">Recall &#8805;0.95 on expanded corpus or an explained delta; 3 pilots live</td></tr>
+ <tr><td class="k">P2 &#183; Product <span style="color:#75758a;">(3&#8211;9 mo)</span></td>
+     <td>Governance Console GA; compliance policy packs; compiled data plane (Rust) for the microsecond story at
+      scale; multi-tenant isolation; SOC 2 program start</td>
+     <td class="last">First paid conversions; P99 targets at 10&#215; load</td></tr>
+ <tr><td class="k">P3 &#183; Scale <span style="color:#75758a;">(9&#8211;18 mo)</span></td>
+     <td>Kubernetes sidecar/mesh deployment; agent-action gating (tool-call firewall); marketplace listings;
+      policy-pack certification with partners</td>
+     <td class="last">Partner-led revenue; US$1M ARR <span class="chip">[model]</span></td></tr>
+</table>
+
+<!-- ==================== 11 RISKS ==================== -->
+<p style="page-break-before:always;">&nbsp;</p>
+<p class="ml" style="margin:0;">Section 11</p>
+<p class="h-sec" style="margin:5pt 0 0 0;">Key risks and mitigations</p>
+<p class="rule-dark" style="margin:9pt 0 12pt 0;">&nbsp;</p>
+
+<table class="rt">
+ <tr><th style="width:20%;">Risk</th><th style="width:30%;">Reality check</th><th class="last" style="width:50%;">Mitigation</th></tr>
+ <tr><td class="k">Detection quality gaps <span style="color:#75758a;">(our blind numbers show them)</span></td>
+     <td>Injection recall 0.150 blind; calibration band inverted on synthetic corpus</td>
+     <td class="last">Layered defense (patterns already catch overt attacks); feedback loop exists precisely to tune
+      thresholds on real traffic; per-customer calibration is the paid motion &#8212; and publishing these numbers
+      is why a buyer can trust the ones that improve</td></tr>
+ <tr><td class="k">Hyperscaler bundling</td>
+     <td>AWS/Azure/GCP ship guardrails by default</td>
+     <td class="last">Cross-provider + local-model neutrality; governance depth (per-pipeline verdicts, fail posture,
+      HITL lineage) that platform filters don't attempt; compliance-evidence moat</td></tr>
+ <tr><td class="k">Latency objections</td>
+     <td>Real: one detector tail-breaches its budget (25.35 vs 25 ms), published</td>
+     <td class="last">Sub-ms deterministic tier already measured; attribution-correct enforcement; compiled data
+      plane in P2; per-pipeline max-token policy as the pressure valve</td></tr>
+ <tr><td class="k">Provider churn</td>
+     <td>A model we depended on was deprecated 11 days before this deadline</td>
+     <td class="last">It broke loudly, not silently: provenance classes + boot canary are shipped features born from
+      this exact event</td></tr>
+ <tr><td class="k">Student team capacity</td>
+     <td>Three third-years</td>
+     <td class="last">The delivery record in the public ledger &#8212; measured discipline most professional teams
+      cannot evidence; funding converts our documented process into hired capacity; SI channel supplies deployment
+      muscle</td></tr>
+ <tr><td class="k">Synthetic-corpus overfit claims</td>
+     <td>Fair critique of any self-built eval</td>
+     <td class="last">Corpus frozen before tuning; blind-first protocol; Presidio head-to-head and partner-traffic
+      calibration scheduled in P1</td></tr>
+</table>
+
+<!-- ==================== 12 THE ASK ==================== -->
+<p style="margin:22pt 0 0 0;" class="ml">Section 12</p>
+<p class="h-sec" style="margin:5pt 0 0 0;">The ask</p>
+<p class="rule-dark" style="margin:9pt 0 12pt 0;">&nbsp;</p>
+
+<table style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;">
+ <tr>
+  <td class="card-stone" style="width:50%;padding:20pt;vertical-align:top;">
+   <p class="ml" style="margin:0 0 7pt 0;">From this challenge</p>
+   <p style="margin:0;font-size:10.5pt;color:#212121;">The win and the platform it provides &#8212; Accenture
+    mentorship and a first design-partner introduction inside Accenture's responsible-AI practice.</p></td>
+  <td style="width:8pt;">&nbsp;</td>
+  <td class="card-stone" style="width:50%;padding:20pt;vertical-align:top;">
+   <p class="ml" style="margin:0 0 7pt 0;">Indicative pre-seed <span class="chip">[model]</span></p>
+   <p style="margin:0;font-size:10.5pt;color:#212121;"><b style="font-weight:normal;color:#17171c;">INR 1.6 crore
+    (~US$190k) for 12 months</b> &#8212; 60% founding-team + one senior engineer; 20% pilot infrastructure and
+    compliance advisory (DPDP/AI-Act policy-pack review); 20% GTM content and developer relations.</p></td>
+ </tr>
+</table>
+
+<p style="margin:12pt 0 0 0;"><span class="ml">Milestones</span>&nbsp; 3 pilots live (Q2), recall/threshold targets
+ met on partner traffic (Q3), first paid conversions and SOC 2 kickoff (Q4).</p>
+
+<!-- ==================== CLOSING ==================== -->
+<p style="page-break-before:always;">&nbsp;</p>
+<table style="width:100%;border-collapse:collapse;margin-top:40pt;mso-table-lspace:0pt;mso-table-rspace:0pt;">
+ <tr><td class="band-navy" style="padding:34pt 28pt;">
+  <p style="margin:0;color:#ffffff;font-family:'CohereText','Space Grotesk',Inter,Arial,sans-serif;font-size:21pt;line-height:1.2;letter-spacing:-.4pt;">
+   Every company is deploying AI faster than it can supervise it. We built the supervision &#8212; configurable per
+   business context, honest about its numbers, and proven by the way it was built.</p>
+  <p style="margin:18pt 0 0 0;color:#8fa8bf;font-size:12pt;line-height:1.4;">
+   ControlPlane: oversight for AI, built under oversight.</p>
+ </td></tr>
+</table>
+
+<p class="rule" style="margin:30pt 0 0 0;">&nbsp;</p>
+<p class="cap" style="margin:12pt 0 0 0;">Team b24bb1029 &#183; Priyanshu Pandey &#183; Harshit Saini &#183; Jayant
+ Soni &#8212; Indian Institute of Technology Jodhpur. Public repository, demo video, and README accompany this
+ proposal per Round 2 requirements.</p>
+
+</div>
+
+<!-- ===================== running header ===================== -->
+<div style="mso-element:header" id="h1">
+<table style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;">
+ <tr>
+  <td style="padding:0pt 0pt 4pt 0pt;border-bottom:.75pt solid #d9d9dd;text-align:left;">
+   <p class="MsoHeader"><span style="letter-spacing:.4pt;">CONTROLPLANE &#183; BUSINESS PROPOSAL &#183; ACCENTURE INNOVATION CHALLENGE 2026 &#8212; ROUND 2</span></p></td>
+  <td style="padding:0pt 0pt 4pt 0pt;border-bottom:.75pt solid #d9d9dd;text-align:right;">
+   <p class="MsoFooter">Team b24bb1029 &#183; IIT Jodhpur</p></td>
+ </tr>
+</table>
+</div>
+
+<!-- ===================== running footer ===================== -->
+<div style="mso-element:footer" id="f1">
+<table style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;">
+ <tr>
+  <td style="padding:5pt 0pt 0pt 0pt;border-top:.75pt solid #d9d9dd;text-align:left;">
+   <p class="MsoFooter">30 August 2026 &#183; Confidential draft for evaluation</p></td>
+  <td style="padding:5pt 0pt 0pt 0pt;border-top:.75pt solid #d9d9dd;text-align:right;">
+   <p class="MsoFooter">Page <!--[if supportFields]><span style='mso-element:field-begin'></span>PAGE<span style='mso-element:field-separator'></span><![endif]-->1<!--[if supportFields]><span style='mso-element:field-end'></span><![endif]--></p></td>
+ </tr>
+</table>
+</div>
+
+</body>
+</html>

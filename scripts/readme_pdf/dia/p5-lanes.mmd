@@ -1,0 +1,27 @@
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Liberation Sans, Arial, sans-serif","fontSize":"17px","primaryTextColor":"#111827","lineColor":"#4b5563"},"flowchart":{"curve":"basis","nodeSpacing":26,"rankSpacing":30}}}%%
+flowchart TB
+  REQ(["request arrives"])
+  FD["<b>FAST LANE</b> — synchronous, inside the request lifecycle<br/>detectors run per unit, each under its own latency budget"]
+  FV["<b>policy engine verdict</b> — then the sentence is released or acted on"]
+  DEL(["<b>response delivered to the user</b>"])
+  QUEUE[["<b>in-process queue</b> · a sampled copy of request, response and signals<br/><i>10% support_bot · 5% hr_copilot · 25% finance_advisor</i>"]]
+  SLOW["<b>DEEP LANE</b> — asynchronous, sampled, unbudgeted<br/>semantic entropy · fairness spot checks · drift statistics<br/><i>seconds, not milliseconds</i>"]
+  ENRICH[("enrich the audit record and the console panels")]
+  FEED{{"<b>feedback loop</b> — threshold and policy proposals"}}
+  FORBID["<b>✗ FORBIDDEN</b> — nothing on the hot path awaits the deep lane,<br/>and the deep lane may never alter a verdict already delivered"]
+
+  REQ --> FD --> FV --> DEL
+  FV -.->|"fire and forget · <b>never awaited</b>"| QUEUE --> SLOW --> ENRICH --> FEED
+  FEED -.->|"influences the NEXT request, via a new policy version"| REQ
+  SLOW -.-x FORBID
+
+  classDef fast fill:#eff6ff,stroke:#1d4ed8,color:#111827
+  classDef slow fill:#f5f3ff,stroke:#6d28d9,color:#111827
+  classDef gate fill:#f3f4f6,stroke:#4b5563,color:#111827
+  classDef bad fill:#fee2e2,stroke:#b91c1c,color:#7f1d1d
+  classDef term fill:#ecfdf5,stroke:#047857,color:#111827
+  class FD,FV fast
+  class SLOW,FEED slow
+  class QUEUE,ENRICH gate
+  class FORBID bad
+  class REQ,DEL term

@@ -1,0 +1,43 @@
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Liberation Sans, Arial, sans-serif","fontSize":"17px","primaryTextColor":"#111827","lineColor":"#4b5563"},"flowchart":{"curve":"basis","nodeSpacing":26,"rankSpacing":32}}}%%
+flowchart TB
+  CL["<b>CLIENT APPS</b> — support_bot · hr_copilot · finance_advisor<br/><i>one base_url, one header</i>"]
+  ING["<b>INGRESS</b> — resolve use case, bind policy_version"]
+  IL["<b>INPUT LANE</b> — before any upstream cost<br/>tier1_pii · tier1_blocklist · tier2_injection<br/>cost_budget · loop_guard · router"]
+  UP["<b>UPSTREAM LLM</b> — small or frontier tier"]
+  SB["<b>SENTENCE BUFFER</b><br/>accumulate to a sentence boundary"]
+  OL["<b>OUTPUT LANE</b> — per buffered sentence<br/>tier1_pii · tier2_toxicity<br/>rag_grounding · numeric_claims"]
+  PE{{"<b>POLICY ENGINE</b> — converge signals, most severe wins"}}
+  A1["PASS"]
+  A2["EDIT"]
+  A3["BLOCK"]
+  A4["ESCALATE"]
+  AUD[("<b>AUDIT LOG</b> — append-only, no raw PII")]
+  PS[("<b>POLICY STORE</b><br/>policies/*.yaml")]
+
+  CL --> ING --> IL
+  IL -->|"input verdict PASS"| UP --> SB --> OL
+  IL -.->|"BLOCK or ESCALATE stops here:<br/><b>zero upstream tokens</b>"| PE
+  OL -->|"multi-label signals"| PE
+  PS -.-> ING
+  PS -.-> PE
+  PE --> A1 --> AUD
+  PE --> A2 --> AUD
+  PE --> A3 --> AUD
+  PE --> A4 --> AUD
+
+  classDef resp fill:#fff1f2,stroke:#be123c,color:#111827
+  classDef cost fill:#fffbeb,stroke:#b45309,color:#111827
+  classDef ctrl fill:#eef2ff,stroke:#4338ca,color:#111827
+  classDef store fill:#f3f4f6,stroke:#4b5563,color:#111827
+  classDef vpass fill:#ecfdf5,stroke:#047857,color:#111827
+  classDef vedit fill:#fef3c7,stroke:#b45309,color:#111827
+  classDef vblock fill:#fee2e2,stroke:#b91c1c,color:#111827
+  classDef vesc fill:#ffedd5,stroke:#c2410c,color:#111827
+  class IL,OL resp
+  class CL cost
+  class ING,SB,PE,UP ctrl
+  class PS,AUD store
+  class A1 vpass
+  class A2 vedit
+  class A3 vblock
+  class A4 vesc

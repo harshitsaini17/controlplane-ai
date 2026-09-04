@@ -1,0 +1,32 @@
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Liberation Sans, Arial, sans-serif","fontSize":"17px","primaryTextColor":"#111827","lineColor":"#4b5563"},"flowchart":{"curve":"basis","nodeSpacing":24,"rankSpacing":34}}}%%
+flowchart TB
+  FIX["<b>ONE IDENTICAL RESPONSE</b><br/>a low-confidence claim about a person,<br/>carrying one pii.email span"]
+  SIG["<b>ONE MULTI-LABEL SIGNAL</b><br/>hallucination.ungrounded_claim + privacy.person<br/><i>performance + responsibility</i>"]
+  ENGINE{{"<b>THE SAME POLICY ENGINE</b><br/>same code · same build · same algorithm"}}
+  M1["<b>support_bot</b><br/>pii.* → edit<br/>ungrounded → edit"]
+  M2["<b>hr_copilot</b><br/>pii.* → block<br/>privacy.person → block"]
+  M3["<b>finance_advisor</b><br/>pii.* → escalate<br/>hallucination.* → escalate"]
+  V1["<b>EDIT</b><br/>softened claim,<br/>redacted detail"]
+  V2["<b>BLOCK</b><br/>configured<br/>fallback"]
+  V3["<b>ESCALATE</b><br/>quarantined,<br/>review item"]
+  AUD[("<b>THREE AUDIT RECORDS, SIDE BY SIDE</b><br/>same signals · three verdicts · three policy_version stamps")]
+
+  FIX --> SIG --> ENGINE
+  ENGINE --> M1 --> V1 --> AUD
+  ENGINE --> M2 --> V2 --> AUD
+  ENGINE --> M3 --> V3 --> AUD
+
+  classDef fixture fill:#f3f4f6,stroke:#4b5563,color:#111827
+  classDef signal fill:#fdf4ff,stroke:#a21caf,color:#111827
+  classDef engine fill:#eef2ff,stroke:#4338ca,color:#111827
+  classDef map fill:#ffffff,stroke:#9ca3af,color:#374151
+  classDef vedit fill:#fef3c7,stroke:#b45309,color:#111827
+  classDef vblock fill:#fee2e2,stroke:#b91c1c,color:#111827
+  classDef vesc fill:#ffedd5,stroke:#c2410c,color:#111827
+  class FIX,AUD fixture
+  class SIG signal
+  class ENGINE engine
+  class M1,M2,M3 map
+  class V1 vedit
+  class V2 vblock
+  class V3 vesc

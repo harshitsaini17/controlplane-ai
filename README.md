@@ -692,6 +692,11 @@ dashboard/     same-origin console pages served by the gateway
 reports/       committed, reproducible evidence; not build output
 docs/          contracts, ADRs, ledgers, testing guide, and engineering notes
 tests/         contract, regression, evaluation, and demo-path gates
+config/        gateway and provider configuration
+scripts/       deck and README-PDF build tooling; not part of the gateway
+reviews/       independent adversarial review records per phase
+submission/    judged deliverables: proposal, deck, README PDF
+assets/        the challenge brand template the deck builds from
 ~~~
 
 ## Development and testing
@@ -753,7 +758,8 @@ Team b24bb1029, Indian Institute of Technology Jodhpur.
 | Harshit Saini | B24CS1031 | Computer Science, third year |
 | Jayant Soni | B24CM1033 | Artificial Intelligence & Data Science, third year |
 
-- [Business proposal PDF](b24bb1029_ControlPlane_Business_Proposal.pdf)
-- [README PDF](b24bb1029_ControlPlane_README.pdf)
-- Demo video: not present in the repository yet.
+- [Business proposal PDF](submission/b24bb1029_ControlPlane_Business_Proposal.pdf)
+- [README PDF](submission/b24bb1029_ControlPlane_README.pdf)
+- [Presentation deck](submission/b24bb1029_ControlPlane.pptx)
+- Demo video: submitted through the challenge portal. The 24 MB MP4 is not tracked here; the repository carries source and evidence, not media.
 - License: not yet chosen; tracked in [docs/08-open-questions.md](docs/08-open-questions.md).

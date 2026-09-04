@@ -1,0 +1,18 @@
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Liberation Sans, Arial, sans-serif","fontSize":"17px","primaryTextColor":"#111827","lineColor":"#4b5563"},"flowchart":{"curve":"basis","nodeSpacing":22,"rankSpacing":26,"wrappingWidth":440}}}%%
+flowchart TB
+  S1{"<b>1 · MAP</b> label → action — specific &gt; wildcard &gt; default<br/><b>2 · CLASSIFY</b> by score kind"}
+  BYPASS["<b>detection</b> — higher is worse<br/><i>band never applies: a deterministic 1.0 cannot be dropped</i>"]
+  BAND["<b>confidence</b> — higher is better<br/><i>≥ tau_high drops · inside the band → borderline_action</i>"]
+  S3{"<b>3 · MOST SEVERE SURVIVING ACTION WINS</b> — BLOCK &gt; ESCALATE &gt; EDIT &gt; PASS"}
+  S5["<b>4 · EDIT EXECUTABLE?</b> a span, or stage = output_sentence — else <b>promote to ESCALATE</b><br/><b>5 · STAMP</b> verdict · contributing signal ids · policy_version<br/><i>exactly one verdict, deterministic for identical inputs</i>"]
+
+  S1 -->|"detection"| BYPASS --> S3
+  S1 -->|"confidence"| BAND --> S3
+  S3 --> S5
+
+  classDef step fill:#eef2ff,stroke:#4338ca,color:#111827
+  classDef det fill:#fffbeb,stroke:#b45309,color:#111827
+  classDef conf fill:#eff6ff,stroke:#1d4ed8,color:#111827
+  class S1,S3,S5 step
+  class BYPASS det
+  class BAND conf
