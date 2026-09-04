@@ -49,3 +49,4 @@ core.*
 # Rendered images in docs/diagrams/images/ ARE committed — the proposal, README and
 # video reference them, and judges clone a public repo without a node toolchain.
 .tools/
+node_modules

@@ -754,6 +754,6 @@ Team b24bb1029, Indian Institute of Technology Jodhpur.
 | Jayant Soni | B24CM1033 | Artificial Intelligence & Data Science, third year |
 
 - [Business proposal PDF](b24bb1029_ControlPlane_Business_Proposal.pdf)
-- README PDF: not present in the repository yet.
+- [README PDF](b24bb1029_ControlPlane_README.pdf)
 - Demo video: not present in the repository yet.
 - License: not yet chosen; tracked in [docs/08-open-questions.md](docs/08-open-questions.md).
